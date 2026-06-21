@@ -29,8 +29,8 @@ module.exports = {
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true,
-    installerIcon: 'build/icon.png',
-    uninstallerIcon: 'build/icon.png',
+    installerIcon: 'build/icon.ico',
+    uninstallerIcon: 'build/icon.ico',
     shortcutName: 'AXON'
   },
   dmg: {
