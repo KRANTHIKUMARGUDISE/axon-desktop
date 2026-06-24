@@ -399,11 +399,14 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
               Role <span style={{ color: '#ef4444' }}>*</span>
             </label>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-              {BLOCK_TYPES.map((t) => (
+              {BLOCK_TYPES.map((t) => {
+                const roleIsReserved = t === 'Control'
+                return (
                 <button
                   key={t}
                   type="button"
                   onClick={() => setRole(t)}
+                  disabled={roleIsReserved}
                   style={{
                     display: 'flex',
                     flexDirection: 'column',
@@ -413,10 +416,11 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
                     borderRadius: 8,
                     border: role === t ? '2px solid var(--axon-nexus)' : '1px solid var(--axon-border)',
                     background: role === t ? 'rgba(111,95,232,0.15)' : 'var(--axon-bg4)',
-                    cursor: 'pointer',
+                    cursor: roleIsReserved ? 'not-allowed' : 'pointer',
+                    opacity: roleIsReserved ? 0.5 : 1,
                     transition: 'all 0.12s',
                   }}
-                  title={t}
+                  title={roleIsReserved ? 'Reserved for Axon system blocks' : t}
                 >
                   <img src={getBlockTypeIcon(t)} alt={t} style={{ width: 40, height: 40, borderRadius: 4 }} />
                   <span
@@ -429,7 +433,8 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
                     {t}
                   </span>
                 </button>
-              ))}
+                )
+              })}
             </div>
           </div>
 

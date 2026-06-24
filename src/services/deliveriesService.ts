@@ -15,6 +15,7 @@ export interface CreateDeliveryRequest {
   pipelineId: string
   repoUrl: string
   workspaceType: WorkspaceType
+  storeFullContext?: boolean
   branch?: string
   inputs?: Record<string, unknown>
   retriedFromDeliveryId?: string
@@ -28,7 +29,6 @@ export interface UpdateDeliveryRequest {
 
 export interface GateRequest {
   reason?: string
-  comment?: string
 }
 
 export const getDeliveries = (filter?: DeliveryFilter): Promise<PagedResponse<DeliverySummary>> =>
@@ -46,6 +46,9 @@ export const getDeliveries = (filter?: DeliveryFilter): Promise<PagedResponse<De
 
 // Backend's DeliveryStep has no `id`/`name` — only nodeId/blockId/blockName/output.
 // Normalize to the shape the rest of the UI (DeliveryLiveView's pipeline graph) expects.
+// NOTE: the main GET /api/deliveries/{id} response now omits contextSnapshot and
+// output.result (lazy-loaded only, via getStepContext/getStepOutput below) — both
+// fields stay typed as optional here and are fetched on demand, not from this payload.
 interface RawDeliveryStep {
   nodeId: string
   blockId?: string
@@ -54,12 +57,21 @@ interface RawDeliveryStep {
   contextSnapshot?: Record<string, unknown>
   isContextTruncated?: boolean
   contextFileRef?: string
+  contextAvailability?: Record<string, 'available' | 'missing' | 'empty'>
+  outputAvailability?: Record<string, 'available' | 'missing' | 'empty'>
   output?: {
     summary?: string
     confidence?: number
     humanGateReason?: string
     result?: Record<string, unknown>
     errorMessage?: string
+    errorCode?: string
+    recoverable?: boolean
+    approvedBy?: string
+    approvedAt?: string
+    rejectedBy?: string
+    rejectedAt?: string
+    reviewComment?: string
     isTruncated?: boolean
     outputFileRef?: string
   }
@@ -78,12 +90,21 @@ function normalizeStep(raw: RawDeliveryStep): DeliveryStep {
     contextSnapshot: raw.contextSnapshot,
     isContextTruncated: raw.isContextTruncated,
     contextFileRef: raw.contextFileRef,
+    contextAvailability: raw.contextAvailability,
+    outputAvailability: raw.outputAvailability,
     agentOutput: raw.output
       ? {
           summary: raw.output.summary,
           confidence: raw.output.confidence,
           humanGateReason: raw.output.humanGateReason,
           result: raw.output.result,
+          errorCode: raw.output.errorCode,
+          recoverable: raw.output.recoverable,
+          approvedBy: raw.output.approvedBy,
+          approvedAt: raw.output.approvedAt,
+          rejectedBy: raw.output.rejectedBy,
+          rejectedAt: raw.output.rejectedAt,
+          reviewComment: raw.output.reviewComment,
           isTruncated: raw.output.isTruncated,
           outputFileRef: raw.output.outputFileRef,
         }
@@ -91,6 +112,12 @@ function normalizeStep(raw: RawDeliveryStep): DeliveryStep {
     errorMessage: raw.output?.errorMessage,
   }
 }
+
+export const getStepContext = (deliveryId: string, stepId: string): Promise<{ truncated: true; fileRef?: string } | Record<string, unknown>> =>
+  client.get(`/api/deliveries/${deliveryId}/steps/${stepId}/context`).then((r) => r.data)
+
+export const getStepOutput = (deliveryId: string, stepId: string): Promise<{ truncated: true; fileRef?: string } | Record<string, unknown>> =>
+  client.get(`/api/deliveries/${deliveryId}/steps/${stepId}/output`).then((r) => r.data)
 
 export const getDelivery = (id: string): Promise<Delivery> =>
   client.get<Delivery>(`/api/deliveries/${id}`).then((r) => ({

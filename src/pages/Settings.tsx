@@ -53,6 +53,8 @@ export default function Settings() {
   const [themeSaved, setThemeSaved] = useState<SaveStatus>('idle')
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.75)
   const [confidenceSaved, setConfidenceSaved] = useState<SaveStatus>('idle')
+  const [maxContextSnapshotSizeKb, setMaxContextSnapshotSizeKb] = useState(50)
+  const [maxContextSnapshotSaved, setMaxContextSnapshotSaved] = useState<SaveStatus>('idle')
 
   useEffect(() => {
     async function load() {
@@ -62,6 +64,7 @@ export default function Settings() {
       setGitProvider(((all.gitProvider as string) || 'github') as 'github' | 'azure')
       setTheme(((all.theme as string) || 'dark') as 'dark' | 'light' | 'system')
       setConfidenceThreshold((all.confidenceThreshold as number) || 0.75)
+      setMaxContextSnapshotSizeKb((all.maxContextSnapshotSizeKb as number) || 50)
 
       // Check if keys are set and load their suffixes
       const claudeKey = await window.axon.auth.getSecure('axon-claude-key')
@@ -181,6 +184,13 @@ export default function Settings() {
     await window.axon.settings.set('confidenceThreshold', confidenceThreshold)
     setConfidenceSaved('saved')
     setTimeout(() => setConfidenceSaved('idle'), 2000)
+  }
+
+  async function saveMaxContextSnapshotSize() {
+    setMaxContextSnapshotSaved('saving')
+    await window.axon.settings.set('maxContextSnapshotSizeKb', maxContextSnapshotSizeKb)
+    setMaxContextSnapshotSaved('saved')
+    setTimeout(() => setMaxContextSnapshotSaved('idle'), 2000)
   }
 
   const maskToken = (token: string) => {
@@ -568,6 +578,50 @@ export default function Settings() {
               {confidenceSaved === 'idle' && (
                 <button
                   onClick={saveConfidence}
+                  style={{
+                    marginTop: 8, padding: '8px 16px', borderRadius: 6, border: '1px solid var(--axon-border)',
+                    background: 'var(--axon-bg2)', color: 'var(--axon-t1)', fontSize: 13, fontWeight: 500,
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                  }}
+                >
+                  <Save size={14} /> Save
+                </button>
+              )}
+            </div>
+
+            {/* Max Context Snapshot Size */}
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--axon-t2)', display: 'block', marginBottom: 8 }}>
+                Max Inline Snapshot Size (KB)
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={maxContextSnapshotSizeKb}
+                onChange={e => { setMaxContextSnapshotSizeKb(Math.max(1, parseInt(e.target.value, 10) || 1)); setMaxContextSnapshotSaved('idle') }}
+                style={{
+                  width: 120, padding: '8px 12px', borderRadius: 6, border: '1px solid var(--axon-border)',
+                  background: 'var(--axon-bg2)', color: 'var(--axon-t1)', fontSize: 13, outline: 'none',
+                }}
+              />
+              <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '8px 0 0 0' }}>
+                Step input/output above this size is written to a workspace file instead of stored inline.
+              </p>
+              {maxContextSnapshotSaved === 'saved' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 12, color: '#22c55e' }}>
+                  <CheckCircle size={14} /> Saved
+                </div>
+              )}
+              {maxContextSnapshotSaved === 'saving' && (
+                <button
+                  onClick={saveMaxContextSnapshotSize}
+                  disabled={true}
+                  style={{ marginTop: 8, padding: '8px 16px', borderRadius: 6, border: '1px solid var(--axon-border)', background: 'var(--axon-bg2)', opacity: 0.5 }}
+                />
+              )}
+              {maxContextSnapshotSaved === 'idle' && (
+                <button
+                  onClick={saveMaxContextSnapshotSize}
                   style={{
                     marginTop: 8, padding: '8px 16px', borderRadius: 6, border: '1px solid var(--axon-border)',
                     background: 'var(--axon-bg2)', color: 'var(--axon-t1)', fontSize: 13, fontWeight: 500,

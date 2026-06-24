@@ -6,7 +6,17 @@ export interface CodexStepInput {
   cachedDefinition: string
   deliveryContext: DeliveryContext
   contextRequirements?: string[]
+  outputMapping?: Record<string, string>
   codexApiKey: string
+}
+
+// Mirrors claude.ts's getByPath — kept in sync since both runAgent()s apply the
+// same outputMapping/validation logic once Codex execution is actually wired up.
+function getByPath(obj: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>(
+    (acc, key) => (acc && typeof acc === 'object' ? (acc as Record<string, unknown>)[key] : undefined),
+    obj,
+  )
 }
 
 // Skeleton — Codex runtime is not wired up yet. Surfaces a clear, specific error

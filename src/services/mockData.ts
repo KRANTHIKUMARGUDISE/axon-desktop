@@ -234,7 +234,7 @@ export const mockDeliveries: Record<string, Delivery> = {
         },
       },
       {
-        id: 'step-4', name: 'PR Review Gate', status: 'AwaitingHuman',
+        id: 'step-4', name: 'PR Review Gate', status: 'AwaitingApproval',
         nodeName: 'Human Approval', nodeType: 'Decision',
         startedAt: ago(20),
         agentOutput: {

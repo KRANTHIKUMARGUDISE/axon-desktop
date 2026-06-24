@@ -1,12 +1,13 @@
 import { ipcMain } from 'electron'
 
 export interface AgentOutput {
-  status: 'success' | 'partial' | 'needs_human' | 'failed'
-  confidence: number
+  status: 'success' | 'partial' | 'failed'
+  confidence?: number
   summary: string
   result: Record<string, unknown>
-  humanGateReason?: string
   errorMessage?: string
+  errorCode?: string
+  recoverable?: boolean
   // DS1 — set by executor.ts after this output is produced, when `result` is too
   // large to store inline. Not set by runAgent() itself.
   isTruncated?: boolean
@@ -26,7 +27,15 @@ export interface StepInput {
   cachedDefinition: string
   deliveryContext: DeliveryContext
   contextRequirements?: string[]
+  outputMapping?: Record<string, string>
   claudeApiKey: string
+}
+
+function getByPath(obj: unknown, path: string): unknown {
+  return path.split('.').reduce<unknown>(
+    (acc, key) => (acc && typeof acc === 'object' ? (acc as Record<string, unknown>)[key] : undefined),
+    obj,
+  )
 }
 
 function sleep(ms: number): Promise<void> {
@@ -116,7 +125,7 @@ async function callClaude(apiKey: string, systemPrompt: string, userMessage: str
 }
 
 export async function runAgent(input: StepInput): Promise<AgentOutput> {
-  const { blockName, cachedDefinition, deliveryContext, contextRequirements, claudeApiKey } = input
+  const { blockName, cachedDefinition, deliveryContext, contextRequirements, outputMapping, claudeApiKey } = input
 
   // Build system prompt
   const systemPrompt = `${cachedDefinition}
@@ -124,11 +133,10 @@ export async function runAgent(input: StepInput): Promise<AgentOutput> {
 ## Required Output Format
 Respond ONLY with a valid JSON object. No preamble, no markdown fences.
 {
-  "status": "success" | "partial" | "failed" | "needs_human",
+  "status": "success" | "partial" | "failed",
   "confidence": 0.0-1.0,
   "summary": "Brief description of what was done",
   "result": { ...fields declared in outputSchema... },
-  "humanGateReason": "Optional - explain why human needed",
   "errorMessage": "Optional - what went wrong"
 }`
 
@@ -155,11 +163,19 @@ Respond ONLY with a valid JSON object. No preamble, no markdown fences.
       .join('\n')
   }
 
+  // Distinguish "this block needs nothing" from "this block needs fields that
+  // just weren't available" — both used to render as the same misleading
+  // "(no context fields required)" placeholder, even when fields were declared
+  // required but missing from the pool.
+  const inputFieldsFallback = contextRequirements && contextRequirements.length > 0
+    ? `(none of the required fields [${contextRequirements.join(', ')}] were available in the delivery context)`
+    : '(no context fields required)'
+
   const userMessage = `## Delivery Context
 Ticket: ${deliveryContext.ticketId}${deliveryContext.ticketTitle ? ` — ${deliveryContext.ticketTitle}` : ''}
 
 ## Input Fields
-${inputFieldsText || '(no context fields required)'}`
+${inputFieldsText || inputFieldsFallback}`
 
   try {
     const response = await callClaude(claudeApiKey, systemPrompt, userMessage)
@@ -180,12 +196,24 @@ ${inputFieldsText || '(no context fields required)'}`
       }
     }
 
-    // Validate required fields
-    if (!agentOutput.status || agentOutput.confidence === undefined) {
+    // Apply outputMapping (if the block declares one) before validation, so a
+    // non-canonical agent response shape gets resolved into the canonical fields first.
+    if (outputMapping && Object.keys(outputMapping).length > 0) {
+      for (const field of ['status', 'errorMessage', 'errorCode', 'recoverable'] as const) {
+        const mapPath = outputMapping[field]
+        if (mapPath) {
+          (agentOutput as Record<string, unknown>)[field] = getByPath(agentOutput, mapPath)
+        }
+      }
+    }
+
+    // Validate required fields — only `status` is required, and it must resolve to
+    // one of the three canonical values (no fuzzy matching).
+    if (!agentOutput.status || !['success', 'partial', 'failed'].includes(agentOutput.status)) {
       return {
         status: 'failed',
         confidence: 0,
-        summary: 'Agent response missing required fields (status, confidence)',
+        summary: 'Agent response missing or invalid required field: status',
         result: agentOutput,
       }
     }
@@ -195,8 +223,9 @@ ${inputFieldsText || '(no context fields required)'}`
       confidence: agentOutput.confidence,
       summary: agentOutput.summary || '',
       result: agentOutput.result || {},
-      humanGateReason: agentOutput.humanGateReason,
       errorMessage: agentOutput.errorMessage,
+      errorCode: agentOutput.errorCode,
+      recoverable: agentOutput.recoverable,
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

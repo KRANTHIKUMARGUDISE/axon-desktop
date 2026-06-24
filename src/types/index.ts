@@ -1,5 +1,5 @@
 export type DeliveryStatus = 'Pending' | 'Running' | 'Paused' | 'Completed' | 'Failed' | 'Cancelled'
-export type StepStatus = 'Pending' | 'Running' | 'Completed' | 'Failed' | 'Skipped' | 'AwaitingHuman'
+export type StepStatus = 'Pending' | 'Running' | 'Completed' | 'Failed' | 'Skipped' | 'AwaitingApproval'
 export type WorkspaceType = 'Default' | 'Browse'
 export type NodeType = 'Decision' | 'Execution' | 'Knowledge' | 'Control' | 'IO' | 'Utility'
 export type BlockType = 'Decision' | 'Execution' | 'Knowledge' | 'Control' | 'IO' | 'Utility'
@@ -61,12 +61,22 @@ export interface StepAgentOutput {
   missingFields?: string[]
   humanGateReason?: string
   result?: Record<string, unknown>
+  errorCode?: string
+  recoverable?: boolean
+  // Gate resolution metadata — first-class fields (not inside `result`), since
+  // `result` is excluded from the main delivery-detail response (lazy-loaded only).
+  approvedBy?: string
+  approvedAt?: string
+  rejectedBy?: string
+  rejectedAt?: string
+  reviewComment?: string
   isTruncated?: boolean
   outputFileRef?: string
 }
 
 export interface DeliveryStep {
   id: string
+  nodeId?: string
   name: string
   status: StepStatus
   nodeName?: string
@@ -82,6 +92,8 @@ export interface DeliveryStep {
   contextSnapshot?: Record<string, unknown>
   isContextTruncated?: boolean
   contextFileRef?: string
+  contextAvailability?: Record<string, 'available' | 'missing' | 'empty'>
+  outputAvailability?: Record<string, 'available' | 'missing' | 'empty'>
 }
 
 export interface Delivery {
@@ -92,8 +104,10 @@ export interface Delivery {
   pipelineName: string
   pipelineSnapshot?: { name: string; nodes?: Array<{ id: string; label: string; blockId: string }> }
   status: DeliveryStatus
+  currentNodeId?: string
   repoUrl: string
   workspaceType: WorkspaceType
+  storeFullContext?: boolean
   workspacePath?: string | null
   steps: DeliveryStep[]
   progress: number
@@ -160,6 +174,7 @@ export interface BuildingBlock {
   usedInPipelineIds?: string[]
   contextRequirements?: string[]
   outputSchema?: string[]
+  outputMapping?: Record<string, string>
   sourceType: SourceType
   agentRuntime: AgentRuntime
   artifactFormat: ArtifactFormat

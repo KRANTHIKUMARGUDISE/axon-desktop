@@ -47,7 +47,7 @@ function createWindow() {
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const csp = isDev
       ? "default-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' http://localhost:* ws://localhost:* https:; font-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:;"
-      : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; font-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com;"
+      : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https:; font-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com;"
     callback({
       responseHeaders: {
         ...details.responseHeaders,
@@ -59,7 +59,9 @@ function createWindow() {
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173')
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+    mainWindow.webContents.session.clearCache().then(() => {
+      mainWindow!.loadFile(path.join(__dirname, '../dist/index.html'))
+    })
   }
 
   // Set default window title

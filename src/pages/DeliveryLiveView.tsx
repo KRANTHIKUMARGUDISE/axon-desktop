@@ -4,11 +4,15 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
-  type Node, type Edge, type NodeTypes, type EdgeTypes,
+  type Node, type Edge, type NodeTypes, type EdgeTypes, type ReactFlowInstance,
 } from '@xyflow/react'
 import { useDelivery, useApproveGate, useRejectGate, useCreateDelivery } from '../hooks/useDeliveries'
+import { getStepContext, getStepOutput } from '../services/deliveriesService'
 import { useSignalR } from '../hooks/useSignalR'
 import { getBlocks } from '../services/blocksService'
+import { Badge } from '../components/ui/badge'
+import { Button } from '../components/ui/button'
+import RawDataViewerModal from '../components/shared/RawDataViewerModal'
 import type { DeliveryStep, ExecutionProgress, BuildingBlock } from '../types'
 import type {
   StepStartedEvent, StepCompletedEvent, StepFailedEvent,
@@ -26,6 +30,74 @@ import { getBlockTypeIcon } from '../utils/blockTypeIcons'
 import { getRuntimeIcon, RUNTIME_LABELS } from '../utils/runtimeIcons'
 import type { ExecutionStatus } from '../components/pipeline/nodes/BaseNode'
 import { toast } from 'sonner'
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '../components/ui/collapsible'
+import { ChevronRight } from 'lucide-react'
+
+type AvailabilityStatus = 'available' | 'missing' | 'empty'
+
+function availabilityChipClass(status: AvailabilityStatus | undefined): string {
+  return status === 'available' ? 'border-emerald-600/30 bg-emerald-500/10 text-emerald-500'
+    : status === 'empty' ? 'border-amber-600/30 bg-amber-500/10 text-amber-500'
+      : status === 'missing' ? 'border-red-600/30 bg-red-500/10 text-red-500'
+        : 'text-muted-foreground'
+}
+
+// Declared fields (from the block's own schema) always render as named chips.
+// Anything else actually present in the availability map — i.e. sent to the
+// agent despite not being declared — is real signal worth knowing about, but
+// showing every undeclared key by default would be noisy/unbounded for blocks
+// that send a whole upstream blob with no schema. So it collapses behind a
+// single "+N other fields" disclosure instead, expanded only on click.
+function FieldAvailabilityChips({
+  declaredFields,
+  availability,
+  emptyLabel,
+}: {
+  declaredFields: string[] | undefined
+  availability: Record<string, AvailabilityStatus> | undefined
+  emptyLabel: string
+}) {
+  const declared = declaredFields ?? []
+  const declaredSet = new Set(declared)
+  const extraKeys = Object.keys(availability ?? {}).filter((k) => !declaredSet.has(k))
+
+  if (declared.length === 0 && extraKeys.length === 0) {
+    return <span style={{ fontSize: 10.5, color: 'var(--axon-t4)' }}>{emptyLabel}</span>
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {declared.map((field) => {
+          const status = availability?.[field]
+          return (
+            <Badge key={field} variant="outline" className={availabilityChipClass(status)}>
+              {field}{status ? ` · ${status}` : ''}
+            </Badge>
+          )
+        })}
+      </div>
+      {extraKeys.length > 0 && (
+        <Collapsible>
+          <CollapsibleTrigger className="group/extra-fields flex cursor-pointer items-center gap-1 text-left" style={{ fontSize: 10.5, color: 'var(--axon-t3)' }}>
+            <ChevronRight className="size-3 shrink-0 transition-transform group-data-[state=open]/extra-fields:rotate-90" />
+            +{extraKeys.length} undeclared field{extraKeys.length === 1 ? '' : 's'} also sent — click to view
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-1.5 flex flex-wrap gap-1.5">
+            {extraKeys.map((field) => {
+              const status = availability?.[field]
+              return (
+                <Badge key={field} variant="outline" className={availabilityChipClass(status)}>
+                  {field}{status ? ` · ${status}` : ''}
+                </Badge>
+              )
+            })}
+          </CollapsibleContent>
+        </Collapsible>
+      )}
+    </div>
+  )
+}
 
 const nodeTypes: NodeTypes = {
   decisionNode: DecisionNode,
@@ -45,7 +117,7 @@ function stepStatusToExecutionStatus(status?: DeliveryStep['status']): Execution
     case 'Running': return 'Running'
     case 'Completed': return 'Success'
     case 'Failed': return 'Failed'
-    case 'AwaitingHuman': return 'NeedsHuman'
+    case 'AwaitingApproval': return 'NeedsHuman'
     default: return 'Pending'
   }
 }
@@ -125,11 +197,13 @@ export default function DeliveryLiveView() {
   const [isClearingWorkspace, setIsClearingWorkspace] = useState(false)
   const [blocks, setBlocks] = useState<BuildingBlock[]>([])
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const [fullFileContent, setFullFileContent] = useState<{ title: string; content: string } | null>(null)
-  const nodeStepMapRef = useRef<Map<string, string>>(new Map())
+  const [gateComment, setGateComment] = useState('')
+  const [viewerData, setViewerData] = useState<{ title: string; data: string | Record<string, unknown> } | null>(null)
+  const [viewerLoading, setViewerLoading] = useState(false)
   const autoStartedRef = useRef(false)
   const lastProgressEventRef = useRef<string | null>(null)
   const seededDeliveryIdRef = useRef<string | null>(null)
+  const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null)
 
   // Reset all per-delivery local state when navigating to a different delivery
   // (e.g. via Retry) without a full component remount.
@@ -137,7 +211,6 @@ export default function DeliveryLiveView() {
     if (seededDeliveryIdRef.current !== null && seededDeliveryIdRef.current !== id) {
       setLocalSteps([])
       setTimeline([])
-      nodeStepMapRef.current = new Map()
       lastProgressEventRef.current = null
       autoStartedRef.current = false
     }
@@ -156,7 +229,16 @@ export default function DeliveryLiveView() {
       setPrUrl(delivery.prUrl)
     }
     if (delivery.steps.length > 0) {
-      setLocalSteps(delivery.steps)
+      // The backend's persisted DeliveryStep only carries `nodeId`/`blockName` — there is
+      // no `id`/`name`/`nodeName` field on the wire. Always derive `id` from `nodeId` and
+      // the display label from the pipeline snapshot's node.label, so step lookup by node
+      // id and the title don't silently go blank/unmatched on a reloaded delivery.
+      const nodeLabelById = new Map((delivery.pipelineSnapshot?.nodes ?? []).map((n) => [n.id, n.label]))
+      setLocalSteps(delivery.steps.map((s) => ({
+        ...s,
+        id: s.nodeId ?? s.id,
+        nodeName: nodeLabelById.get(s.nodeId ?? s.id) ?? s.nodeName ?? s.name,
+      })))
       // Live Signals are otherwise purely in-memory (never persisted) — if we're
       // loading a delivery that already has persisted step data and haven't seen
       // any live IPC events this session (fresh mount / reopened later), reconstruct
@@ -243,6 +325,19 @@ export default function DeliveryLiveView() {
     })
   }, [delivery, blockMap, localSteps])
 
+  // `fitView` on <ReactFlow> only auto-fits once, at initial mount. If this
+  // component instance is reused (e.g. retrying a delivery without a full
+  // remount) or `delivery`/`blocks` resolve after the canvas already
+  // initialized, nodes that show up later can end up positioned outside the
+  // viewport that was fitted to the smaller/earlier node set — present in
+  // `flowNodes` but effectively invisible until something re-fits the view.
+  // Re-fit explicitly whenever the node count changes.
+  useEffect(() => {
+    if (flowNodes.length > 0) {
+      reactFlowInstanceRef.current?.fitView()
+    }
+  }, [flowNodes.length])
+
   const flowEdges: Edge[] = useMemo(() => {
     const edges = delivery?.pipelineSnapshot?.edges ?? []
     return edges.map((e) => ({
@@ -262,8 +357,20 @@ export default function DeliveryLiveView() {
   const selectedBlock = selectedNode ? blockMap.get((selectedNode.data as { blockId: string }).blockId) : undefined
   const isSelectedNodeActiveGate = selectedNodeId === delivery?.currentNodeId && delivery?.status === 'Paused'
 
+  // Gate cards describe the *previous* step's output, not the gate block's own (the
+  // human-gate native block always returns a static "Awaiting human review" summary).
+  // Assumes a single incoming edge to the gate node — correct for the current
+  // linear-only pipeline MVP; revisit if branching into a gate is ever supported.
+  const previousStep = useMemo(() => {
+    if (!selectedNode) return undefined
+    const incoming = flowEdges.find((e) => e.target === selectedNode.id)
+    if (!incoming) return undefined
+    return localSteps.find((s) => s.id === incoming.source)
+  }, [selectedNode, flowEdges, localSteps])
+
   const onNodeClick = useCallback((_e: React.MouseEvent, node: Node) => {
     setSelectedNodeId(node.id)
+    setGateComment('')
   }, [])
 
   const onPaneClick = useCallback(() => setSelectedNodeId(null), [])
@@ -275,12 +382,53 @@ export default function DeliveryLiveView() {
         ? `${delivery.workspacePath}/${relativeRef}`.replace(/\\/g, '/')
         : relativeRef
       const content = await window.axon.workspace.readFile(fullPath)
-      setFullFileContent({ title, content })
+      setViewerData({ title, data: content })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       toast.error(`Could not read file — is the developer's machine/workspace available? (${message})`)
     }
   }, [delivery])
+
+  // Lazy-loads the field this step's main payload no longer carries inline
+  // (contextSnapshot / output.result are excluded from GET /deliveries/{id} —
+  // fetched on demand here instead). Falls back to the local workspace file read
+  // when the field was truncated-to-file rather than stored in Mongo.
+  const viewFullField = useCallback(async (
+    kind: 'context' | 'output',
+    step: DeliveryStep,
+    title: string,
+  ) => {
+    if (!id) return
+    // Unlike output.result (always computed), the context snapshot is only ever
+    // persisted when storeFullContext was on for this delivery — fetching it
+    // otherwise would just return an empty object, which reads as a bug
+    // ("no input?!") rather than "this delivery didn't capture full context".
+    if (kind === 'context' && !delivery?.storeFullContext) {
+      toast.info("Full context wasn't stored for this delivery — enable \"Store full context\" on a new delivery to capture it.")
+      return
+    }
+    const isTruncated = kind === 'context' ? step.isContextTruncated : step.agentOutput?.isTruncated
+    const fileRef = kind === 'context' ? step.contextFileRef : step.agentOutput?.outputFileRef
+    if (isTruncated) {
+      if (fileRef) await viewFullFile(fileRef, title)
+      return
+    }
+    setViewerLoading(true)
+    try {
+      const data = kind === 'context' ? await getStepContext(id, step.id) : await getStepOutput(id, step.id)
+      if (data && typeof data === 'object' && 'truncated' in data && (data as { truncated?: boolean }).truncated) {
+        const lazyFileRef = (data as { fileRef?: string }).fileRef
+        if (lazyFileRef) await viewFullFile(lazyFileRef, title)
+        return
+      }
+      setViewerData({ title, data: data as Record<string, unknown> })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      toast.error(`Could not load full ${kind} (${message})`)
+    } finally {
+      setViewerLoading(false)
+    }
+  }, [id, viewFullFile])
 
   // Auto-start delivery when first loaded if in Pending status.
   // The cached `delivery` from useDelivery() can be stale (staleTime: 0 still serves
@@ -310,10 +458,14 @@ export default function DeliveryLiveView() {
     return () => { cancelled = true }
   }, [id, refetch])
 
-  // Periodic sync: refetch every 5s while Running or Paused
+  // Periodic sync: refetch every 5s while Running. Deliberately excludes
+  // Paused — that state can last indefinitely (waiting on a human decision),
+  // nothing changes server-side until that happens, and live IPC progress
+  // events already cover the cases that do (gate resolution, etc.). Polling
+  // through an open-ended wait was pure unnecessary churn for no benefit.
   useEffect(() => {
     if (!id || !delivery || !delivery.status) return
-    if (delivery.status !== 'Running' && delivery.status !== 'Paused') return
+    if (delivery.status !== 'Running') return
 
     const interval = setInterval(() => {
       refetch()
@@ -341,24 +493,18 @@ export default function DeliveryLiveView() {
       } else if (data.type === 'git_prepared') {
         addTimelineEvent('GitPrepared', `Codebase prepared${data.message ? ` — branch ${data.message}` : ''}`)
       } else if (data.type === 'step_started') {
-        setLocalSteps((prev) => {
-          // Mark next Pending step as Running, or create a synthetic one
-          const idx = prev.findIndex((s) => s.status === 'Pending')
-          if (idx !== -1) {
-            const updated = [...prev]
-            const step = { ...updated[idx], status: 'Running' as DeliveryStep['status'], startedAt: new Date().toISOString() }
-            nodeStepMapRef.current.set(data.nodeId, step.id)
-            updated[idx] = step
-            return updated
-          }
-          return prev
-        })
+        setLocalSteps((prev) =>
+          prev.map((s) =>
+            s.id === data.nodeId
+              ? { ...s, status: 'Running' as DeliveryStep['status'], startedAt: new Date().toISOString() }
+              : s
+          )
+        )
         addTimelineEvent('StepStarted', `${data.blockName ?? 'Step'} started`)
       } else if (data.type === 'step_completed') {
-        setLocalSteps((prev) => {
-          const stepId = nodeStepMapRef.current.get(data.nodeId)
-          return prev.map((s) =>
-            s.id === stepId || s.status === 'Running'
+        setLocalSteps((prev) =>
+          prev.map((s) =>
+            s.id === data.nodeId
               ? {
                   ...s,
                   status: 'Completed' as DeliveryStep['status'],
@@ -371,36 +517,39 @@ export default function DeliveryLiveView() {
                 }
               : s
           )
-        })
+        )
         addTimelineEvent('StepCompleted', `${data.blockName ?? 'Step'} completed`)
       } else if (data.type === 'step_failed') {
-        setLocalSteps((prev) => {
-          const stepId = nodeStepMapRef.current.get(data.nodeId)
-          return prev.map((s) =>
-            s.id === stepId || s.status === 'Running'
+        setLocalSteps((prev) =>
+          prev.map((s) =>
+            s.id === data.nodeId
               ? { ...s, status: 'Failed' as DeliveryStep['status'], errorMessage: data.message }
               : s
           )
-        })
+        )
         addTimelineEvent('StepFailed', `${data.blockName ?? 'Step'} failed — ${data.message ?? ''}`)
         setLocalStatus('Failed')
         queryClient.invalidateQueries({ queryKey: ['delivery', id] })
         queryClient.invalidateQueries({ queryKey: ['deliveries'] })
       } else if (data.type === 'gate_reached') {
-        setLocalSteps((prev) => {
-          const stepId = nodeStepMapRef.current.get(data.nodeId)
-          return prev.map((s) =>
-            s.id === stepId || s.status === 'Running'
+        setLocalSteps((prev) =>
+          prev.map((s) =>
+            s.id === data.nodeId
               ? {
                   ...s,
-                  status: 'AwaitingHuman' as DeliveryStep['status'],
+                  status: 'AwaitingApproval' as DeliveryStep['status'],
                   agentOutput: { ...s.agentOutput, humanGateReason: data.output?.summary ?? data.message },
                 }
               : s
           )
-        })
+        )
         addTimelineEvent('GateReached', `Gate reached — ${data.blockName ?? 'Step'}`)
         setLocalStatus('Paused')
+        // delivery.currentNodeId (used by isSelectedNodeActiveGate) only exists in the
+        // backend record — refetch so the Approve/Reject buttons can appear without
+        // waiting for the periodic poll or a manual reopen.
+        queryClient.invalidateQueries({ queryKey: ['delivery', id] })
+        queryClient.invalidateQueries({ queryKey: ['deliveries'] })
       } else if (data.type === 'completed') {
         addTimelineEvent('DeliveryCompleted', 'Delivery completed')
         if (data.prUrl) {
@@ -427,17 +576,21 @@ export default function DeliveryLiveView() {
   }, [id, queryClient])
 
 
-  const handleApprove = async () => {
+  const handleApprove = async (comment: string) => {
     if (!id) return
-    await approveGate.mutateAsync()
+    await approveGate.mutateAsync(comment || undefined)
+    setGateComment('')
     await window.axon.executor.resume(id)
   }
 
-  const handleReject = async () => {
+  const handleReject = async (comment: string) => {
     if (!id) return
-    await rejectGate.mutateAsync()
+    if (!comment.trim()) return
+    await rejectGate.mutateAsync(comment)
+    setGateComment('')
     await window.axon.executor.cancel(id)
-    setLocalStatus('Cancelled')
+    setLocalStatus('Failed')
+    queryClient.invalidateQueries({ queryKey: ['delivery', id] })
     queryClient.invalidateQueries({ queryKey: ['deliveries'] })
   }
 
@@ -562,7 +715,7 @@ export default function DeliveryLiveView() {
     onGateReached: (evt: GateReachedEvent) => {
       setLocalSteps((prev) =>
         prev.map((s) => s.id === evt.stepId
-          ? { ...s, status: 'AwaitingHuman',
+          ? { ...s, status: 'AwaitingApproval',
               agentOutput: { ...s.agentOutput, humanGateReason: evt.message } }
           : s)
       )
@@ -705,7 +858,7 @@ export default function DeliveryLiveView() {
       {/* Main grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
         {/* Left: pipeline graph */}
-        <div>
+        <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)', marginBottom: 10 }}>
             Pipeline Execution
           </div>
@@ -741,6 +894,7 @@ export default function DeliveryLiveView() {
                 elementsSelectable
                 onNodeClick={onNodeClick}
                 onPaneClick={onPaneClick}
+                onInit={(instance) => { reactFlowInstanceRef.current = instance }}
                 fitView
                 proOptions={{ hideAttribution: true }}
                 style={{ background: '#0f1117' }}
@@ -759,7 +913,7 @@ export default function DeliveryLiveView() {
         </div>
 
         {/* Right: node detail (when selected) or Signals + Job details */}
-        <div>
+        <div style={{ minWidth: 0 }}>
           {selectedStep && selectedNode ? (
             <div style={{
               background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
@@ -793,10 +947,14 @@ export default function DeliveryLiveView() {
                     </div>
                   </div>
                 </div>
-                <button onClick={() => setSelectedNodeId(null)} style={{
-                  background: 'transparent', border: 'none', color: 'var(--axon-t3)', cursor: 'pointer', fontSize: 16,
-                  width: 24, height: 24, borderRadius: 6, flexShrink: 0,
-                }}>✕</button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setSelectedNodeId(null)}
+                  style={{ color: 'var(--axon-t3)', flexShrink: 0 }}
+                >
+                  ✕
+                </Button>
               </div>
 
               {/* Status row */}
@@ -805,7 +963,7 @@ export default function DeliveryLiveView() {
                 marginBottom: 14, background: 'var(--axon-bg3)', borderRadius: 8, padding: '8px 11px',
               }}>
                 <span style={{
-                  ...statusBadgeStyle(selectedStep.status === 'AwaitingHuman' ? 'Paused' : selectedStep.status === 'Completed' ? 'Completed' : selectedStep.status),
+                  ...statusBadgeStyle(selectedStep.status === 'AwaitingApproval' ? 'Paused' : selectedStep.status === 'Completed' ? 'Completed' : selectedStep.status),
                   fontSize: 9.5, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
                 }}>
                   {selectedStep.status}
@@ -826,27 +984,71 @@ export default function DeliveryLiveView() {
                 </div>
               )}
 
-              {selectedStep.status === 'AwaitingHuman' && (
+              {selectedStep.status === 'AwaitingApproval' && (
                 <div style={{
                   background: 'var(--axon-amber-d)', border: '1px solid rgba(245,158,11,0.3)',
                   borderRadius: 8, padding: 11, marginBottom: 14,
                 }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-amber)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                    ⚠ Human Gate Reason
+                    ⚠ Review {previousStep?.nodeName ? `— ${previousStep.nodeName}` : ''}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--axon-t2)', lineHeight: 1.5, marginBottom: isSelectedNodeActiveGate ? 10 : 0 }}>
-                    {selectedStep.agentOutput?.humanGateReason ?? 'Human review required before proceeding.'}
+                    {previousStep?.agentOutput?.summary ||
+                      "This step didn't provide a summary. Review its full output below."}
                   </div>
                   {isSelectedNodeActiveGate && (
-                    <div style={{ display: 'flex', gap: 7 }}>
-                      <button onClick={handleApprove} style={{
-                        background: 'var(--axon-green-d)', color: 'var(--axon-green)', border: '1px solid rgba(16,185,129,0.25)',
-                        padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-                      }}>✓ Approve &amp; Continue</button>
-                      <button onClick={handleReject} style={{
-                        background: 'var(--axon-red-d)', color: 'var(--axon-red)', border: '1px solid rgba(239,68,68,0.25)',
-                        padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-                      }}>✕ Reject Delivery</button>
+                    <>
+                      <textarea
+                        value={gateComment}
+                        onChange={(e) => setGateComment(e.target.value)}
+                        placeholder="Optional comment (required to reject)"
+                        rows={2}
+                        style={{
+                          width: '100%', boxSizing: 'border-box', resize: 'vertical', marginBottom: 8,
+                          background: 'var(--axon-bg3)', border: '1px solid var(--axon-border2)', borderRadius: 6,
+                          color: 'var(--axon-t1)', fontSize: 11, fontFamily: 'inherit', padding: '6px 8px',
+                        }}
+                      />
+                      <div style={{ display: 'flex', gap: 7 }}>
+                        <Button
+                          size="sm"
+                          onClick={() => handleApprove(gateComment)}
+                          className="border border-emerald-600/25 bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20"
+                        >
+                          ✓ Approve &amp; Continue
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => handleReject(gateComment)}
+                          disabled={!gateComment.trim()}
+                          title={!gateComment.trim() ? 'A comment is required to reject' : undefined}
+                        >
+                          ✕ Reject Delivery
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {selectedStep.status === 'Completed' && selectedBlock?.role === 'Control' && selectedStep.agentOutput?.approvedBy != null && (
+                <div style={{
+                  background: 'var(--axon-green-d)', border: '1px solid rgba(16,185,129,0.3)',
+                  borderRadius: 8, padding: 11, marginBottom: 14, fontSize: 11, color: 'var(--axon-t2)',
+                }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-green)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    ✓ Approved
+                  </div>
+                  <div>
+                    by <b style={{ color: 'var(--axon-t1)' }}>{selectedStep.agentOutput.approvedBy}</b>
+                    {selectedStep.agentOutput.approvedAt != null && (
+                      <> on <b style={{ color: 'var(--axon-t1)' }}>{new Date(selectedStep.agentOutput.approvedAt).toLocaleString()}</b></>
+                    )}
+                  </div>
+                  {selectedStep.agentOutput.reviewComment != null && (
+                    <div style={{ marginTop: 6, fontStyle: 'italic', color: 'var(--axon-t2)' }}>
+                      “{selectedStep.agentOutput.reviewComment}”
                     </div>
                   )}
                 </div>
@@ -863,90 +1065,64 @@ export default function DeliveryLiveView() {
                   <div style={{ fontSize: 11, color: 'var(--axon-t2)', lineHeight: 1.5 }}>
                     {selectedStep.errorMessage ?? 'An error occurred during this step.'}
                   </div>
+                  {selectedBlock?.role === 'Control' && selectedStep.agentOutput?.rejectedBy != null && (
+                    <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--axon-t2)', paddingTop: 8, borderTop: '1px solid rgba(239,68,68,0.2)' }}>
+                      Rejected by <b style={{ color: 'var(--axon-t1)' }}>{selectedStep.agentOutput.rejectedBy}</b>
+                      {selectedStep.agentOutput.rejectedAt != null && (
+                        <> on <b style={{ color: 'var(--axon-t1)' }}>{new Date(selectedStep.agentOutput.rejectedAt).toLocaleString()}</b></>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Input */}
+              {/* Configured Context Fields — what this block declares it needs, colored by availability */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 7 }}>
                 <span style={{ color: 'var(--axon-nexus2)', fontSize: 11 }}>↓</span>
                 <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-t3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  Input <span style={{ color: 'var(--axon-t4)', fontWeight: 500 }}>(Context)</span>
+                  Configured Context Fields
                 </span>
               </div>
-              {selectedStep.isContextTruncated ? (
-                <button onClick={() => viewFullFile(selectedStep.contextFileRef!, 'Input — full context')} style={{
-                  background: 'var(--axon-bg3)', border: '1px dashed var(--axon-border2)', color: 'var(--axon-t2)',
-                  borderRadius: 8, padding: '8px 10px', fontSize: 10.5, cursor: 'pointer', fontFamily: 'inherit', width: '100%', textAlign: 'left', marginBottom: 14,
-                }}>
-                  ⚠ Input too large — view full content in workspace
-                </button>
-              ) : (
-                <div style={{
-                  background: 'var(--axon-bg3)', border: '1px solid var(--axon-border)', borderRadius: 8,
-                  marginBottom: 14, fontSize: 10.5, overflow: 'hidden',
-                }}>
-                  {selectedStep.contextSnapshot && Object.keys(selectedStep.contextSnapshot).length > 0 ? (
-                    Object.entries(selectedStep.contextSnapshot).map(([k, v], i) => (
-                      <div key={k} style={{
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
-                        padding: '7px 10px', background: i % 2 === 1 ? 'rgba(255,255,255,0.02)' : 'transparent',
-                      }}>
-                        <span style={{ color: 'var(--axon-t3)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>{k}</span>
-                        <span title={JSON.stringify(v)} style={{
-                          color: 'var(--axon-teal)', fontFamily: 'var(--font-mono)', background: 'var(--axon-bg2)',
-                          borderRadius: 5, padding: '2px 7px', textAlign: 'right', overflow: 'hidden',
-                          textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180,
-                        }}>{JSON.stringify(v)}</span>
-                      </div>
-                    ))
-                  ) : selectedBlock?.contextRequirements && selectedBlock.contextRequirements.length > 0 ? (
-                    <div style={{ padding: '9px 10px', color: 'var(--axon-amber)' }}>
-                      ⚠ Required but not available: {selectedBlock.contextRequirements.join(', ')}
-                    </div>
-                  ) : (
-                    <div style={{ padding: '9px 10px', color: 'var(--axon-t4)' }}>(no context fields required)</div>
-                  )}
-                </div>
-              )}
+              <div style={{ marginBottom: 14 }}>
+                <FieldAvailabilityChips
+                  declaredFields={selectedBlock?.contextRequirements}
+                  availability={selectedStep.contextAvailability}
+                  emptyLabel="(no context fields required)"
+                />
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mb-3.5 w-full"
+                disabled={viewerLoading}
+                onClick={() => viewFullField('context', selectedStep, `Input — ${selectedStep.nodeName ?? selectedStep.name}`)}
+              >
+                View full context snapshot
+              </Button>
 
-              {/* Output */}
+              {/* Configured Output Fields — what this block declares it produces, colored by availability */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 7 }}>
                 <span style={{ color: 'var(--axon-green)', fontSize: 11 }}>↑</span>
                 <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-t3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  Output <span style={{ color: 'var(--axon-t4)', fontWeight: 500 }}>(Result)</span>
+                  Configured Output Fields
                 </span>
               </div>
-              {selectedStep.agentOutput?.isTruncated ? (
-                <button onClick={() => viewFullFile(selectedStep.agentOutput!.outputFileRef!, 'Output — full result')} style={{
-                  background: 'var(--axon-bg3)', border: '1px dashed var(--axon-border2)', color: 'var(--axon-t2)',
-                  borderRadius: 8, padding: '8px 10px', fontSize: 10.5, cursor: 'pointer', fontFamily: 'inherit', width: '100%', textAlign: 'left', marginBottom: 14,
-                }}>
-                  ⚠ Output too large — view full content in workspace
-                </button>
-              ) : (
-                <div style={{
-                  background: 'var(--axon-bg3)', border: '1px solid var(--axon-border)', borderRadius: 8,
-                  marginBottom: 14, fontSize: 10.5, overflow: 'hidden',
-                }}>
-                  {selectedStep.agentOutput?.result && Object.keys(selectedStep.agentOutput.result).length > 0 ? (
-                    Object.entries(selectedStep.agentOutput.result).map(([k, v], i) => (
-                      <div key={k} style={{
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
-                        padding: '7px 10px', background: i % 2 === 1 ? 'rgba(255,255,255,0.02)' : 'transparent',
-                      }}>
-                        <span style={{ color: 'var(--axon-t3)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>{k}</span>
-                        <span title={JSON.stringify(v)} style={{
-                          color: 'var(--axon-teal)', fontFamily: 'var(--font-mono)', background: 'var(--axon-bg2)',
-                          borderRadius: 5, padding: '2px 7px', textAlign: 'right', overflow: 'hidden',
-                          textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180,
-                        }}>{JSON.stringify(v)}</span>
-                      </div>
-                    ))
-                  ) : (
-                    <div style={{ padding: '9px 10px', color: 'var(--axon-t4)' }}>(no result yet)</div>
-                  )}
-                </div>
-              )}
+              <div style={{ marginBottom: 14 }}>
+                <FieldAvailabilityChips
+                  declaredFields={selectedBlock?.outputSchema}
+                  availability={selectedStep.outputAvailability}
+                  emptyLabel="(no output schema declared)"
+                />
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mb-3.5 w-full"
+                disabled={viewerLoading}
+                onClick={() => viewFullField('output', selectedStep, `Output — ${selectedStep.nodeName ?? selectedStep.name}`)}
+              >
+                View full output
+              </Button>
 
               {selectedStep.agentOutput?.confidence != null && (
                 <div>
@@ -1004,12 +1180,13 @@ export default function DeliveryLiveView() {
                 padding: '5px 0', fontSize: 11,
                 borderBottom: i < arr.length - 1 ? '1px solid var(--axon-border)' : 'none',
               }}>
-                <span style={{ color: 'var(--axon-t3)' }}>{k}</span>
+                <span style={{ color: 'var(--axon-t3)', flexShrink: 0 }}>{k}</span>
                 <span style={{
                   color: 'var(--axon-t1)', fontWeight: 500,
                   fontFamily: mono ? 'var(--font-mono)' : 'inherit',
                   fontSize: mono ? 10 : 11,
-                }}>
+                  marginLeft: 8, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }} title={typeof v === 'string' ? v : undefined}>
                   {v}
                 </span>
               </div>
@@ -1133,39 +1310,12 @@ export default function DeliveryLiveView() {
         </div>
       </div>
 
-      {fullFileContent && (
-        <div
-          onClick={() => setFullFileContent(null)}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 50,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
-              borderRadius: 12, width: 640, maxHeight: '80vh', display: 'flex', flexDirection: 'column',
-            }}
-          >
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              padding: '12px 16px', borderBottom: '1px solid var(--axon-border)',
-            }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)' }}>{fullFileContent.title}</div>
-              <button onClick={() => setFullFileContent(null)} style={{
-                background: 'transparent', border: 'none', color: 'var(--axon-t3)', cursor: 'pointer', fontSize: 16,
-              }}>✕</button>
-            </div>
-            <pre style={{
-              margin: 0, padding: 16, overflow: 'auto', fontSize: 11, fontFamily: 'var(--font-mono)',
-              color: 'var(--axon-t2)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-            }}>
-              {fullFileContent.content}
-            </pre>
-          </div>
-        </div>
-      )}
+      <RawDataViewerModal
+        open={viewerData != null}
+        onOpenChange={(open) => { if (!open) setViewerData(null) }}
+        title={viewerData?.title ?? ''}
+        data={viewerData?.data}
+      />
 
       <style>{`
         @keyframes axon-step-glow {

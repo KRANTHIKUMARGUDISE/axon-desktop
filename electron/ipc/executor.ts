@@ -25,6 +25,8 @@ async function runAgentForBlock(
     cachedDefinition: string
     deliveryContext: DeliveryContext
     contextRequirements?: string[]
+    outputMapping?: Record<string, string>
+    artifactName?: string
   },
 ): Promise<AgentOutput> {
   const apiKey = credentials[runtime] ?? ''
@@ -33,41 +35,117 @@ async function runAgentForBlock(
       return runClaudeAgent({ ...args, claudeApiKey: apiKey })
     case 'Codex':
       return runCodexAgent({ ...args, codexApiKey: apiKey })
+    case 'Axon':
+      return runAxonNativeBlock(args.artifactName)
     default:
       throw new Error(`Unsupported agent runtime: ${runtime}`)
   }
 }
 
-// Mirrors the exact field-selection logic in claude.ts's runAgent() "Input Fields"
-// section, so the captured snapshot reflects exactly what the block actually saw.
-function buildContextSnapshot(deliveryContext: DeliveryContext, contextRequirements?: string[]): Record<string, unknown> {
+// Native (Axon-runtime) block handlers — no external API call, no cachedDefinition needed.
+// Add a case here when wiring up a new artifactName for a Native/Axon block.
+function runAxonNativeBlock(artifactName: string | undefined): AgentOutput {
+  switch (artifactName) {
+    case 'human-gate':
+      // No real work — the pause itself is driven entirely by the block's role
+      // (role === 'Control', checked in runStepLoop's isGateNode). This handler
+      // just needs to return a valid AgentOutput so the step completes normally.
+      return { status: 'success', summary: 'Awaiting human review', result: {} }
+    default:
+      throw new Error(`No native handler for Axon block artifactName "${artifactName}"`)
+  }
+}
+
+// Captures the *entire* accumulated context pool for persistence/display — not
+// filtered to the block's declared contextRequirements. This is intentionally
+// different from claude.ts's runAgent(), which keeps its own separate, filtered
+// copy of this field-selection for what the agent's prompt actually receives
+// (that one MUST stay scoped to contextRequirements, for token budget and to
+// avoid dumping unrelated data into the prompt) — this function is the
+// persisted/displayed "Full Context Snapshot", a different concern from what
+// the agent sees. Field-level filtering for the "Configured Context Fields"
+// chip display happens client-side instead, against this same full pool.
+function buildContextSnapshot(deliveryContext: DeliveryContext): Record<string, unknown> {
+  return {
+    ...deliveryContext.previousStepsResults,
+    ...deliveryContext.currentInputs,
+  }
+}
+
+// Lightweight, always-computed counterpart to the *entire* accumulated context
+// pool — deliberately NOT filtered to a block's declared contextRequirements.
+// This is a distinct concept from "Configured Context Fields" (the chips UI,
+// which filters this same map down to just the declared keys for display) —
+// availability itself always reports on everything actually available at this
+// point in the pipeline, so a block that declares few/no requirements doesn't
+// end up with a near-empty map while a block downstream of it sees everything.
+// Declared requirements that aren't in the pool at all are still flagged
+// 'missing' even though they're not a natural key of the pool.
+// Shallow check only: doesn't recurse into nested object/array contents.
+function computeContextAvailability(
+  deliveryContext: DeliveryContext,
+  contextRequirements?: string[],
+): Record<string, 'available' | 'missing' | 'empty'> {
   const contextFields: Record<string, unknown> = {
     ...deliveryContext.previousStepsResults,
     ...deliveryContext.currentInputs,
   }
-  if (!contextRequirements || contextRequirements.length === 0) {
-    return contextFields
+  return computeAvailability(contextFields, contextRequirements)
+}
+
+// Symmetric counterpart for output.result against the full pool of keys it
+// actually contains, plus any outputSchema-declared key missing from it.
+function computeOutputAvailability(
+  result: Record<string, unknown>,
+  outputSchema?: string[],
+): Record<string, 'available' | 'missing' | 'empty'> {
+  return computeAvailability(result, outputSchema)
+}
+
+function computeAvailability(
+  fields: Record<string, unknown>,
+  declaredKeys?: string[],
+): Record<string, 'available' | 'missing' | 'empty'> {
+  // Always report on every key actually in the pool — declared keys only add
+  // entries for ones that are missing from it (so a required-but-absent field
+  // still shows up), they never narrow what's reported.
+  const keysToCheck = new Set(Object.keys(fields))
+  for (const key of declaredKeys ?? []) keysToCheck.add(key)
+
+  const availability: Record<string, 'available' | 'missing' | 'empty'> = {}
+  for (const key of keysToCheck) {
+    if (!(key in fields)) {
+      availability[key] = 'missing'
+      continue
+    }
+    const value = fields[key]
+    const isEmpty = value == null || value === '' || (Array.isArray(value) && value.length === 0)
+    availability[key] = isEmpty ? 'empty' : 'available'
   }
-  const selected: Record<string, unknown> = {}
-  for (const key of contextRequirements) {
-    if (key in contextFields) selected[key] = contextFields[key]
-  }
-  return selected
+  return availability
 }
 
 // DS1 — Large Output Storage Strategy. Anything over `threshold` bytes (serialized)
 // gets written to a local workspace file instead of sent inline; the backend only
-// ever receives a small marker + the file reference.
-const DS1_THRESHOLD_BYTES = 50_000
+// ever receives a small marker + the file reference. Threshold is the same setting
+// (Settings > Preferences > Max Inline Snapshot Size) for both context-input and
+// output.result storage — see settings.ts's `maxContextSnapshotSizeKb`.
+const DS1_DEFAULT_THRESHOLD_BYTES = 50_000
+
+function getDS1ThresholdBytes(): number {
+  const kb = store.get('maxContextSnapshotSizeKb') as number | undefined
+  return kb && kb > 0 ? kb * 1024 : DS1_DEFAULT_THRESHOLD_BYTES
+}
 
 async function checkAndStoreIfLarge(
   workspacePath: string,
   subfolder: 'inputs' | 'outputs',
   nodeId: string,
   data: Record<string, unknown>,
+  thresholdBytes: number,
 ): Promise<{ value: Record<string, unknown>; isTruncated: boolean; fileRef?: string }> {
   const serialized = JSON.stringify(data)
-  if (Buffer.byteLength(serialized, 'utf-8') < DS1_THRESHOLD_BYTES) {
+  if (Buffer.byteLength(serialized, 'utf-8') < thresholdBytes) {
     return { value: data, isTruncated: false }
   }
 
@@ -126,10 +204,12 @@ interface BuildingBlock {
   name: string
   role?: string
   agentRuntime?: string
+  artifactName?: string
   cachedFiles?: CachedFile[]
   entryPointPath?: string
   contextRequirements?: string[]
   outputSchema?: string[]
+  outputMapping?: Record<string, string>
 }
 
 interface PipelineSnapshot {
@@ -147,6 +227,7 @@ interface DeliveryFromApi {
   repoUrl: string
   workspaceType: 'Default' | 'Browse'
   workspacePath?: string | null
+  storeFullContext?: boolean
   currentNodeId?: string
   pipelineSnapshot?: PipelineSnapshot
   steps: Array<{ nodeId: string; blockName: string }>
@@ -267,14 +348,21 @@ async function runStepLoop(
 
     let output: AgentOutput
     let contextResult: { value: Record<string, unknown>; isTruncated: boolean; fileRef?: string } | undefined
+    let contextAvailability: Record<string, 'available' | 'missing' | 'empty'> | undefined
     try {
       const block = ctx.blocks.get(node.blockId)
       if (!block) {
         throw new Error(`Block ${node.blockId} not found in context`)
       }
-      const entryFile = block.cachedFiles?.find((f) => f.relativePath === block.entryPointPath)
-      if (!entryFile) {
-        throw new Error(`Block ${node.label} has no entry point file matching "${block.entryPointPath}" in its cachedFiles`)
+      // Native (Axon-runtime) blocks have no cachedFiles/entryPointPath — they're not
+      // a skill/prompt, just a handler keyed off artifactName (see runAxonNativeBlock).
+      let cachedDefinition = ''
+      if (block.agentRuntime !== 'Axon') {
+        const entryFile = block.cachedFiles?.find((f) => f.relativePath === block.entryPointPath)
+        if (!entryFile) {
+          throw new Error(`Block ${node.label} has no entry point file matching "${block.entryPointPath}" in its cachedFiles`)
+        }
+        cachedDefinition = entryFile.content
       }
 
       const deliveryContext: DeliveryContext = {
@@ -284,15 +372,20 @@ async function runStepLoop(
         currentInputs: ctx.delivery.inputs ?? {},
       }
 
-      const contextSnapshot = buildContextSnapshot(deliveryContext, block.contextRequirements)
-      contextResult = await checkAndStoreIfLarge(ctx.workspacePath, 'inputs', node.id, contextSnapshot)
+      contextAvailability = computeContextAvailability(deliveryContext, block.contextRequirements)
+      if (ctx.delivery.storeFullContext) {
+        const contextSnapshot = buildContextSnapshot(deliveryContext)
+        contextResult = await checkAndStoreIfLarge(ctx.workspacePath, 'inputs', node.id, contextSnapshot, getDS1ThresholdBytes())
+      }
 
       output = await runAgentForBlock(block.agentRuntime ?? 'Claude', ctx.credentials, {
         blockId: node.blockId,
         blockName: node.label,
-        cachedDefinition: entryFile.content,
+        cachedDefinition,
         deliveryContext,
         contextRequirements: block.contextRequirements,
+        outputMapping: block.outputMapping,
+        artifactName: block.artifactName,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -307,17 +400,20 @@ async function runStepLoop(
           contextSnapshot: contextResult?.value,
           isContextTruncated: contextResult?.isTruncated ?? false,
           contextFileRef: contextResult?.fileRef,
+          contextAvailability,
           output: { status: 'failed', confidence: 0, summary: message, result: {}, errorMessage: message },
         },
         token,
         baseUrl,
       )
-      await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Failed', nodeId: node.id }, token, baseUrl)
+      await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Failed', currentNodeId: node.id }, token, baseUrl)
       activeExecutions.delete(ctx.deliveryId)
       return
     }
 
-    const outputResult = await checkAndStoreIfLarge(ctx.workspacePath, 'outputs', node.id, output.result)
+    const block = ctx.blocks.get(node.blockId)
+    const outputAvailability = computeOutputAvailability(output.result, block?.outputSchema)
+    const outputResult = await checkAndStoreIfLarge(ctx.workspacePath, 'outputs', node.id, output.result, getDS1ThresholdBytes())
     const persistedOutput: AgentOutput = {
       ...output,
       result: outputResult.value,
@@ -325,16 +421,22 @@ async function runStepLoop(
       outputFileRef: outputResult.fileRef,
     }
 
+    // isGateNode takes priority over output.status — a Control-role block always
+    // pauses for approval regardless of what status the agent itself returned.
+    const isGateNode = ctx.blocks.get(node.blockId)?.role === 'Control'
+
     await apiPost(
       `/api/deliveries/${ctx.deliveryId}/steps`,
       {
         nodeId: node.id,
         blockId: node.blockId,
         blockName: node.label,
-        status: output.status === 'failed' ? 'Failed' : output.status === 'needs_human' ? 'AwaitingHuman' : 'Completed',
+        status: isGateNode ? 'AwaitingApproval' : output.status === 'failed' ? 'Failed' : 'Completed',
         contextSnapshot: contextResult?.value,
         isContextTruncated: contextResult?.isTruncated ?? false,
         contextFileRef: contextResult?.fileRef,
+        contextAvailability,
+        outputAvailability,
         output: persistedOutput,
       },
       token,
@@ -343,7 +445,7 @@ async function runStepLoop(
 
     if (output.status === 'failed') {
       sendProgress({ deliveryId: ctx.deliveryId, type: 'step_failed', nodeId: node.id, blockName: node.label, output, message: output.summary })
-      await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Failed', nodeId: node.id }, token, baseUrl)
+      await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Failed', currentNodeId: node.id }, token, baseUrl)
       activeExecutions.delete(ctx.deliveryId)
       return
     }
@@ -352,10 +454,9 @@ async function runStepLoop(
     ctx.stepResults[node.id] = output.result
     ctx.flatResults = { ...ctx.flatResults, ...output.result }
 
-    const isGateNode = ctx.blocks.get(node.blockId)?.role === 'Control'
-    if (output.status === 'needs_human' || isGateNode) {
+    if (isGateNode) {
       sendProgress({ deliveryId: ctx.deliveryId, type: 'gate_reached', nodeId: node.id, blockName: node.label, output, message: output.summary })
-      await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Paused', nodeId: node.id }, token, baseUrl)
+      await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Paused', currentNodeId: node.id }, token, baseUrl)
       // Keep context alive so resume can continue from here
       ctx.delivery.currentNodeId = node.id
       return

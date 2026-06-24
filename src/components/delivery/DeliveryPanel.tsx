@@ -46,7 +46,7 @@ function StepRow({ step, index }: { step: DeliveryStep; index: number }) {
   } else if (step.status === 'Failed') {
     icon = <div style={{ ...iconStyle, background: 'var(--axon-red-d)', color: 'var(--axon-red)', border: '1px solid rgba(239,68,68,0.3)' }}>✕</div>
     statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-red)' }}>Failed</span>
-  } else if (step.status === 'AwaitingHuman') {
+  } else if (step.status === 'AwaitingApproval') {
     icon = <div style={{ ...iconStyle, background: 'var(--axon-amber-d)', color: 'var(--axon-amber)', border: '1px solid rgba(245,158,11,0.3)', fontSize: 11 }}>🚦</div>
     statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-amber)' }}>Awaiting approval</span>
   } else {
@@ -159,7 +159,7 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
 
           {/* Current stage card */}
           {(() => {
-            const current = (delivery.steps ?? []).find(s => s.status === 'Running' || s.status === 'AwaitingHuman')
+            const current = (delivery.steps ?? []).find(s => s.status === 'Running' || s.status === 'AwaitingApproval')
             if (!current) return null
             return (
               <div style={{ margin: '10px 16px', padding: '10px 12px', background: 'var(--axon-bg3)', borderRadius: 8, border: '1px solid var(--axon-border2)' }}>
@@ -168,7 +168,7 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
                   <div>
                     <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--axon-t1)' }}>{current.name}</div>
                     <div style={{ fontSize: 11, color: 'var(--axon-t3)', marginTop: 1 }}>
-                      {current.status === 'AwaitingHuman' ? 'Awaiting approval' : `Running for ${fmtDuration(current.startedAt)}`}
+                      {current.status === 'AwaitingApproval' ? 'Awaiting approval' : `Running for ${fmtDuration(current.startedAt)}`}
                     </div>
                   </div>
                 </div>

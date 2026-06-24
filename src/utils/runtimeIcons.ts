@@ -1,10 +1,13 @@
 import type { AgentRuntime } from '../types'
+import claudeIcon from '../assets/runtimes/Claude-ai-icon.png'
+import codexIcon from '../assets/runtimes/codex-ai-icon.png'
+import axonRuntimeIcon from '../assets/runtimes/axon-icon.png'
 
 export function getRuntimeIcon(runtime: AgentRuntime): string {
   const iconMap: Record<AgentRuntime, string> = {
-    Claude: '/src/assets/runtimes/Claude-ai-icon.png',
-    Codex: '/src/assets/runtimes/codex-ai-icon.png',
-    Axon: '/src/assets/runtimes/axon-icon.png',
+    Claude: claudeIcon,
+    Codex: codexIcon,
+    Axon: axonRuntimeIcon,
   }
   return iconMap[runtime]
 }

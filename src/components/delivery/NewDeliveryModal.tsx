@@ -52,6 +52,8 @@ export default function NewDeliveryModal({
   const [browsedPath, setBrowsedPath] = useState<string | null>(null)
   const [inputsJson, setInputsJson] = useState('')
   const [inputsError, setInputsError] = useState<string | null>(null)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [storeFullContext, setStoreFullContext] = useState(false)
 
   const ticketRef = useRef<HTMLInputElement>(null)
 
@@ -64,6 +66,8 @@ export default function NewDeliveryModal({
       setPipelineId(defaultPipelineId ?? '')
       setInputsJson('')
       setInputsError(null)
+      setShowAdvanced(false)
+      setStoreFullContext(false)
       setTimeout(() => ticketRef.current?.focus(), 50)
     }
   }, [isOpen, defaultPipelineId])
@@ -86,6 +90,7 @@ export default function NewDeliveryModal({
         pipelineId,
         repoUrl,
         workspaceType,
+        storeFullContext,
         inputs,
       })
       onClose()
@@ -255,6 +260,40 @@ export default function NewDeliveryModal({
               <p style={{ fontSize: 10, color: 'var(--axon-t3)', marginTop: 6 }}>
                 Ad-hoc values merged into delivery context — used by blocks' Context Requirements.
               </p>
+            )}
+          </div>
+
+          {/* Advanced */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              style={{
+                background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit',
+                fontSize: 11, fontWeight: 600, color: 'var(--axon-t3)', display: 'flex', alignItems: 'center', gap: 4,
+              }}
+            >
+              {showAdvanced ? '▾' : '▸'} Advanced
+            </button>
+            {showAdvanced && (
+              <div style={{ marginTop: 10 }}>
+                <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={storeFullContext}
+                    onChange={(e) => setStoreFullContext(e.target.checked)}
+                    style={{ marginTop: 2, cursor: 'pointer' }}
+                  />
+                  <span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)', display: 'block' }}>
+                      Store full input context for every step
+                    </span>
+                    <span style={{ fontSize: 10, color: 'var(--axon-t3)' }}>
+                      Off by default — only field availability (available/missing/empty) is recorded, not the actual values.
+                    </span>
+                  </span>
+                </label>
+              </div>
             )}
           </div>
         </div>

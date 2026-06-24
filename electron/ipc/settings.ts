@@ -12,6 +12,7 @@ interface AxonSettings {
   setupComplete: boolean
   userEmail: string
   userName: string
+  maxContextSnapshotSizeKb: number
 }
 
 const store = new Store<AxonSettings>({
@@ -26,6 +27,9 @@ const store = new Store<AxonSettings>({
     setupComplete: { type: 'boolean', default: false },
     userEmail: { type: 'string', default: '' },
     userName: { type: 'string', default: '' },
+    // DS1's inline-vs-workspace-file truncation cap, shared by both context-snapshot
+    // (input) and output.result storage — same constant either side used to gate on.
+    maxContextSnapshotSizeKb: { type: 'number', default: 50 },
   },
 })
 

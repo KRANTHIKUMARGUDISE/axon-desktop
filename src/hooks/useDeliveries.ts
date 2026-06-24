@@ -49,7 +49,7 @@ export function useUpdateDelivery(deliveryId: string) {
 export function useApproveGate(deliveryId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: () => approveGate(deliveryId),
+    mutationFn: (comment?: string) => approveGate(deliveryId, comment ? { reason: comment } : undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['delivery', deliveryId] })
     },
@@ -59,7 +59,7 @@ export function useApproveGate(deliveryId: string) {
 export function useRejectGate(deliveryId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: () => rejectGate(deliveryId),
+    mutationFn: (comment: string) => rejectGate(deliveryId, { reason: comment }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['delivery', deliveryId] })
     },
