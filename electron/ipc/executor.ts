@@ -4,15 +4,18 @@ import fs from 'fs/promises'
 import { Agent } from 'undici'
 import { store } from './settings'
 import { readSecure } from './auth'
+import { getClaudeKey } from './claudeKeyStore'
 import { runAgent as runClaudeAgent } from './claude'
 import type { AgentOutput, DeliveryContext } from './claude'
+import { runAgenticBlock } from './claudeAgentic'
 import { runAgent as runCodexAgent } from './codex'
 import { cloneOrOpen, createDeliveryBranch, getChangedFiles, commitChanges, pushBranch, createPullRequest } from './git'
 import type { PRConfig } from './git'
 
-// One secure-storage key per runtime. Add an entry here when wiring up a new runtime.
+// One secure-storage key per runtime. Claude is resolved from claudeKeyStore's
+// in-memory key instead — it is never persisted to disk (see CLAUDE.md "BUILD —
+// Claude key resolution"). Add an entry here when wiring up a new disk-backed runtime.
 const CREDENTIAL_KEY_BY_RUNTIME: Record<string, string> = {
-  Claude: 'axon-claude-key',
   Codex: 'axon-codex-key',
 }
 
@@ -28,8 +31,16 @@ async function runAgentForBlock(
     outputMapping?: Record<string, string>
     artifactName?: string
   },
+  agentic?: {
+    workspacePath: string
+    effectiveTools: string[]
+    timeoutSeconds: number
+  },
 ): Promise<AgentOutput> {
   const apiKey = credentials[runtime] ?? ''
+  if (runtime === 'Claude' && agentic) {
+    return runAgenticBlock({ ...args, claudeApiKey: apiKey, ...agentic })
+  }
   switch (runtime) {
     case 'Claude':
       return runClaudeAgent({ ...args, claudeApiKey: apiKey })
@@ -192,6 +203,7 @@ interface PipelineNode {
   id: string
   label: string
   blockId: string
+  timeoutSeconds?: number
 }
 
 interface CachedFile {
@@ -210,6 +222,28 @@ interface BuildingBlock {
   contextRequirements?: string[]
   outputSchema?: string[]
   outputMapping?: Record<string, string>
+  executionType?: 'Prompt' | 'Agentic'
+  allowedTools?: string[]
+  defaultTimeoutSeconds?: number
+  visibility?: 'Personal' | 'Team' | 'Organisation'
+}
+
+// Same six tools offered in CreateBlockForm's checklist (src/types/index.ts's
+// AGENTIC_TOOL_OPTIONS) — never WebSearch/WebFetch/AskUserQuestion. Duplicated here
+// rather than imported since electron/ and src/ are separate compile targets.
+const AGENTIC_TOOL_CEILING = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep']
+
+// Part 4 task 3 — single source of truth for "what tools can this block actually use
+// right now", computed ONCE per step and handed to both the SDK's `tools` option and
+// the PreToolUse hook's allow-check. Resolving it twice (once for the SDK call, once
+// for the hook) risks the two disagreeing — e.g. an empty raw allowedTools in
+// exploration mode would deny everything if the hook re-derived from the raw field
+// instead of using this same resolved value.
+function resolveEffectiveTools(block: BuildingBlock): string[] {
+  const isExploring = (block.visibility ?? 'Personal') === 'Personal'
+    && block.executionType === 'Agentic'
+    && (!block.allowedTools || block.allowedTools.length === 0)
+  return isExploring ? AGENTIC_TOOL_CEILING : (block.allowedTools ?? [])
 }
 
 interface PipelineSnapshot {
@@ -252,6 +286,15 @@ interface ExecutionContext {
   // need to match field names directly (e.g. "producedTitle"), not a nodeId-nested
   // shape, since that's the contract blocks declare against each other.
   flatResults: Record<string, unknown>
+  // True for the entire span runStepLoop is actively executing — set right before
+  // calling it, cleared once it returns/throws by ANY path (pause for a gate, cancel,
+  // failure, full completion). Guards resumeDelivery against being re-entered while a
+  // resume from a PREVIOUS call is still in flight for this same delivery (e.g. a
+  // double-fired Approve click) — unlike startDelivery, which creates a fresh
+  // ExecutionContext each call, resume reuses this same ctx, so a naive re-entrancy
+  // would have two runStepLoop invocations mutating the same ctx.flatResults/
+  // stepResults concurrently and double-executing the resumed node.
+  isLoopActive: boolean
 }
 
 export interface ExecutionProgress {
@@ -345,6 +388,18 @@ async function runStepLoop(
 
     const node = currentNode
     sendProgress({ deliveryId: ctx.deliveryId, type: 'step_started', nodeId: node.id, blockName: node.label })
+    // Registers an accurate StartedAt with the backend before any work happens, so the
+    // later finalize POST (.../steps) can update this same step in place instead of
+    // stamping StartedAt=CompletedAt=now for both. MUST be awaited, not fire-and-forget —
+    // the backend's finalize handler decides append-vs-update by reading the steps array
+    // at the time it runs; for a fast/native block (e.g. human-gate, which resolves
+    // synchronously) the finalize POST can otherwise reach the backend and read the steps
+    // array BEFORE this start call's append has landed, causing it to wrongly append a
+    // second entry instead of updating this one (observed in practice — duplicate
+    // Running + AwaitingApproval entries for the same nodeId). The `.catch` still means a
+    // network failure here doesn't fail the step — only the await ordering matters.
+    await apiPost(`/api/deliveries/${ctx.deliveryId}/steps/start`, { nodeId: node.id, blockId: node.blockId, blockName: node.label }, token, baseUrl)
+      .catch((err) => console.warn(`Failed to register step start: ${err}`))
 
     let output: AgentOutput
     let contextResult: { value: Record<string, unknown>; isTruncated: boolean; fileRef?: string } | undefined
@@ -378,15 +433,28 @@ async function runStepLoop(
         contextResult = await checkAndStoreIfLarge(ctx.workspacePath, 'inputs', node.id, contextSnapshot, getDS1ThresholdBytes())
       }
 
-      output = await runAgentForBlock(block.agentRuntime ?? 'Claude', ctx.credentials, {
-        blockId: node.blockId,
-        blockName: node.label,
-        cachedDefinition,
-        deliveryContext,
-        contextRequirements: block.contextRequirements,
-        outputMapping: block.outputMapping,
-        artifactName: block.artifactName,
-      })
+      const agentic = block.executionType === 'Agentic'
+        ? {
+            workspacePath: ctx.workspacePath,
+            effectiveTools: resolveEffectiveTools(block),
+            timeoutSeconds: node.timeoutSeconds ?? block.defaultTimeoutSeconds ?? 120,
+          }
+        : undefined
+
+      output = await runAgentForBlock(
+        block.agentRuntime ?? 'Claude',
+        ctx.credentials,
+        {
+          blockId: node.blockId,
+          blockName: node.label,
+          cachedDefinition,
+          deliveryContext,
+          contextRequirements: block.contextRequirements,
+          outputMapping: block.outputMapping,
+          artifactName: block.artifactName,
+        },
+        agentic,
+      )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       sendProgress({ deliveryId: ctx.deliveryId, type: 'step_failed', nodeId: node.id, blockName: node.label, message })
@@ -581,7 +649,7 @@ async function startDelivery(deliveryId: string): Promise<{ success: boolean; er
 async function startDeliveryInner(deliveryId: string): Promise<{ success: boolean; error?: string }> {
   const baseUrl = (store.get('backendUrl') as string) || 'http://localhost:3000'
   const token = await readSecure('axon-access-token')
-  const credentials: Record<string, string> = {}
+  const credentials: Record<string, string> = { Claude: getClaudeKey() }
   for (const [runtime, secureKey] of Object.entries(CREDENTIAL_KEY_BY_RUNTIME)) {
     credentials[runtime] = (await readSecure(secureKey)) ?? ''
   }
@@ -685,14 +753,18 @@ async function startDeliveryInner(deliveryId: string): Promise<{ success: boolea
     blocks,
     stepResults: {},
     flatResults: {},
+    isLoopActive: false,
   }
   activeExecutions.set(deliveryId, ctx)
 
   // Run async — don't await
-  runStepLoop(ctx, startNode.id, nodes, edges, baseUrl, token).catch((err) => {
-    sendProgress({ deliveryId, type: 'failed', nodeId: '', message: String(err) })
-    activeExecutions.delete(deliveryId)
-  })
+  ctx.isLoopActive = true
+  runStepLoop(ctx, startNode.id, nodes, edges, baseUrl, token)
+    .catch((err) => {
+      sendProgress({ deliveryId, type: 'failed', nodeId: '', message: String(err) })
+      activeExecutions.delete(deliveryId)
+    })
+    .finally(() => { ctx.isLoopActive = false })
 
   return { success: true }
 }
@@ -714,6 +786,10 @@ async function resumeDelivery(deliveryId: string): Promise<{ success: boolean; e
 
   const ctx = activeExecutions.get(deliveryId)
   if (!ctx) return { success: false, error: 'No active execution context — restart delivery' }
+  // Guards against a double-fired resume (e.g. a double-click on Approve) re-entering
+  // the loop for this same ctx while a previous resume is still actively running —
+  // see ExecutionContext.isLoopActive's doc comment for why that would be unsafe.
+  if (ctx.isLoopActive) return { success: false, error: 'Delivery is already resuming/running' }
 
   let nodes: PipelineNode[] = delivery.pipelineSnapshot?.nodes ?? ctx.delivery.pipelineSnapshot?.nodes ?? []
   let edges: PipelineEdge[] = delivery.pipelineSnapshot?.edges ?? ctx.delivery.pipelineSnapshot?.edges ?? []
@@ -747,10 +823,13 @@ async function resumeDelivery(deliveryId: string): Promise<{ success: boolean; e
   ctx.isCancelled = false
   await apiPatch(`/api/deliveries/${deliveryId}/status`, { status: 'Running' }, token, baseUrl)
 
-  runStepLoop(ctx, resumeNode.id, nodes, edges, baseUrl, token).catch((err) => {
-    sendProgress({ deliveryId, type: 'failed', nodeId: '', message: String(err) })
-    activeExecutions.delete(deliveryId)
-  })
+  ctx.isLoopActive = true
+  runStepLoop(ctx, resumeNode.id, nodes, edges, baseUrl, token)
+    .catch((err) => {
+      sendProgress({ deliveryId, type: 'failed', nodeId: '', message: String(err) })
+      activeExecutions.delete(deliveryId)
+    })
+    .finally(() => { ctx.isLoopActive = false })
 
   return { success: true }
 }

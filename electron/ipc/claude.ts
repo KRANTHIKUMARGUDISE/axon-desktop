@@ -8,6 +8,17 @@ export interface AgentOutput {
   errorMessage?: string
   errorCode?: string
   recoverable?: boolean
+  // Part 3 — distinct tool names actually permitted and invoked during an Agentic run,
+  // observed via the PreToolUse hook. Always undefined for Prompt-mode blocks.
+  toolsUsed?: string[]
+  // Distinct tool names the agent attempted but were blocked by the PreToolUse hook
+  // (outside the resolved effective tools list). Kept separate from toolsUsed — a
+  // denied attempt must never end up in the "restrict to these" suggestion (Task 5).
+  toolsDenied?: string[]
+  // Set when a Failed status is specifically caused by the block's configured
+  // timeoutSeconds elapsing — lets the UI call this out explicitly instead of relying on
+  // matching errorMessage text. Only ever set by claudeAgentic.ts's runAgenticBlock.
+  timedOut?: boolean
   // DS1 — set by executor.ts after this output is produced, when `result` is too
   // large to store inline. Not set by runAgent() itself.
   isTruncated?: boolean
@@ -36,6 +47,68 @@ function getByPath(obj: unknown, path: string): unknown {
     (acc, key) => (acc && typeof acc === 'object' ? (acc as Record<string, unknown>)[key] : undefined),
     obj,
   )
+}
+
+// Strips a markdown code fence if present, then — since compliance with "respond with
+// ONLY the JSON" can't be guaranteed, especially from the Agentic path's conversational
+// final message (it may prefix the JSON with explanatory prose) — falls back to slicing
+// from the first `{` to the last `}` rather than requiring the whole string to be JSON.
+function extractJsonObject(rawText: string): string {
+  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  const firstBrace = cleaned.indexOf('{')
+  const lastBrace = cleaned.lastIndexOf('}')
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) return cleaned
+  return cleaned.slice(firstBrace, lastBrace + 1)
+}
+
+// Shared by both the Prompt-mode path (runAgent, below) and the Agentic path
+// (claudeAgentic.ts's runAgenticBlock) — takes the agent's raw final text and produces
+// the canonical AgentOutput envelope. Must not be duplicated between the two paths.
+export function normalizeAgentOutput(rawText: string, outputMapping?: Record<string, string>): AgentOutput {
+  let agentOutput: Partial<AgentOutput>
+  try {
+    agentOutput = JSON.parse(extractJsonObject(rawText)) as Partial<AgentOutput>
+  } catch {
+    console.error(`Failed to parse agent response as JSON: ${rawText}`)
+    return {
+      status: 'failed',
+      confidence: 0,
+      summary: 'Failed to parse agent response',
+      result: { rawResponse: rawText },
+    }
+  }
+
+  // Apply outputMapping (if the block declares one) before validation, so a
+  // non-canonical agent response shape gets resolved into the canonical fields first.
+  if (outputMapping && Object.keys(outputMapping).length > 0) {
+    for (const field of ['status', 'errorMessage', 'errorCode', 'recoverable'] as const) {
+      const mapPath = outputMapping[field]
+      if (mapPath) {
+        (agentOutput as Record<string, unknown>)[field] = getByPath(agentOutput, mapPath)
+      }
+    }
+  }
+
+  // Validate required fields — only `status` is required, and it must resolve to
+  // one of the three canonical values (no fuzzy matching).
+  if (!agentOutput.status || !['success', 'partial', 'failed'].includes(agentOutput.status)) {
+    return {
+      status: 'failed',
+      confidence: 0,
+      summary: 'Agent response missing or invalid required field: status',
+      result: agentOutput,
+    }
+  }
+
+  return {
+    status: agentOutput.status,
+    confidence: agentOutput.confidence,
+    summary: agentOutput.summary || '',
+    result: agentOutput.result || {},
+    errorMessage: agentOutput.errorMessage,
+    errorCode: agentOutput.errorCode,
+    recoverable: agentOutput.recoverable,
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -179,54 +252,9 @@ ${inputFieldsText || inputFieldsFallback}`
 
   try {
     const response = await callClaude(claudeApiKey, systemPrompt, userMessage)
-
-    // Parse JSON response — some models (e.g. Haiku) wrap it in a markdown code
-    // fence despite being told not to. Strip one if present before parsing.
-    let agentOutput: Partial<AgentOutput>
-    try {
-      const cleaned = response.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-      agentOutput = JSON.parse(cleaned) as Partial<AgentOutput>
-    } catch {
-      console.error(`Failed to parse Claude response as JSON: ${response}`)
-      return {
-        status: 'failed',
-        confidence: 0,
-        summary: 'Failed to parse agent response',
-        result: { rawResponse: response },
-      }
-    }
-
-    // Apply outputMapping (if the block declares one) before validation, so a
-    // non-canonical agent response shape gets resolved into the canonical fields first.
-    if (outputMapping && Object.keys(outputMapping).length > 0) {
-      for (const field of ['status', 'errorMessage', 'errorCode', 'recoverable'] as const) {
-        const mapPath = outputMapping[field]
-        if (mapPath) {
-          (agentOutput as Record<string, unknown>)[field] = getByPath(agentOutput, mapPath)
-        }
-      }
-    }
-
-    // Validate required fields — only `status` is required, and it must resolve to
-    // one of the three canonical values (no fuzzy matching).
-    if (!agentOutput.status || !['success', 'partial', 'failed'].includes(agentOutput.status)) {
-      return {
-        status: 'failed',
-        confidence: 0,
-        summary: 'Agent response missing or invalid required field: status',
-        result: agentOutput,
-      }
-    }
-
-    return {
-      status: agentOutput.status,
-      confidence: agentOutput.confidence,
-      summary: agentOutput.summary || '',
-      result: agentOutput.result || {},
-      errorMessage: agentOutput.errorMessage,
-      errorCode: agentOutput.errorCode,
-      recoverable: agentOutput.recoverable,
-    }
+    // Some models (e.g. Haiku) wrap the JSON in a markdown code fence despite being
+    // told not to — normalizeAgentOutput strips one if present before parsing.
+    return normalizeAgentOutput(response, outputMapping)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return {

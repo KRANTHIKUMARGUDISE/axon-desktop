@@ -27,6 +27,19 @@ function isTextFile(filename: string, content: string): boolean {
   return true
 }
 
+export async function readSingleFile(
+  filePath: string,
+  readFile: (path: string) => Promise<string>
+): Promise<{ cachedFile: CachedFile | null; skipped: boolean }> {
+  const normalizedPath = filePath.replace(/\\/g, '/')
+  const fileName = normalizedPath.split('/').pop() || normalizedPath
+  const content = await readFile(filePath)
+  if (!isTextFile(fileName, content)) {
+    return { cachedFile: null, skipped: true }
+  }
+  return { cachedFile: { relativePath: fileName, content }, skipped: false }
+}
+
 export async function readFilesFromFolder(
   folderPath: string,
   listFilesRecursive: (path: string, maxDepth?: number) => Promise<string[]>,

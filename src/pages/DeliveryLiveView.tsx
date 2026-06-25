@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
+  ReactFlow, ReactFlowProvider, Background, Controls,
   type Node, type Edge, type NodeTypes, type EdgeTypes, type ReactFlowInstance,
 } from '@xyflow/react'
 import { useDelivery, useApproveGate, useRejectGate, useCreateDelivery } from '../hooks/useDeliveries'
@@ -31,7 +31,7 @@ import { getRuntimeIcon, RUNTIME_LABELS } from '../utils/runtimeIcons'
 import type { ExecutionStatus } from '../components/pipeline/nodes/BaseNode'
 import { toast } from 'sonner'
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '../components/ui/collapsible'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, FolderOpen, Code2, Copy } from 'lucide-react'
 
 type AvailabilityStatus = 'available' | 'missing' | 'empty'
 
@@ -201,7 +201,7 @@ export default function DeliveryLiveView() {
   const [viewerData, setViewerData] = useState<{ title: string; data: string | Record<string, unknown> } | null>(null)
   const [viewerLoading, setViewerLoading] = useState(false)
   const autoStartedRef = useRef(false)
-  const lastProgressEventRef = useRef<string | null>(null)
+  const lastProgressEventRef = useRef<{ signature: string; at: number } | null>(null)
   const seededDeliveryIdRef = useRef<string | null>(null)
   const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null)
 
@@ -211,6 +211,7 @@ export default function DeliveryLiveView() {
     if (seededDeliveryIdRef.current !== null && seededDeliveryIdRef.current !== id) {
       setLocalSteps([])
       setTimeline([])
+      setLocalStatus(null)
       lastProgressEventRef.current = null
       autoStartedRef.current = false
     }
@@ -218,27 +219,54 @@ export default function DeliveryLiveView() {
   }, [id])
 
   // Sync localSteps from initial fetch + auto-start.
-  // Once the backend has persisted steps (run finished), that's the source of truth.
-  // Until then, seed Pending placeholders from the pipeline snapshot once, so the
-  // live step_started/completed/failed handlers below have something to flip —
-  // but don't re-seed on every periodic refetch, or we'd wipe out live progress.
+  // Once the backend has persisted steps (run finished), that's the source of truth for
+  // those specific nodes — but it only ever covers nodes that have already run. Merge
+  // persisted steps into one entry per pipeline node rather than replacing the array
+  // wholesale: a wholesale replace would drop the Pending/Running placeholders for nodes
+  // further down the pipeline that haven't persisted yet (e.g. right after a gate step
+  // persists as AwaitingApproval), and once dropped, the live step_started/completed
+  // handlers below — which use .map() to flip an existing entry's status — become no-ops
+  // for those nodes since there's nothing left in the array for them to match.
   useEffect(() => {
     if (!delivery) return
-    setLocalStatus(null)
+    // NOTE: localStatus is intentionally NOT reset here. This effect re-runs on every
+    // delivery refetch (e.g. the periodic 5s poll), not just on first load — clearing an
+    // optimistic 'Running' override (set by handleStart) here would race against the
+    // backend's own status update still being in flight, flickering the UI back to
+    // "Pending". localStatus is only reset on an actual delivery-id change (above) or
+    // explicitly superseded by a definitive event (step/gate/completed/failed handlers).
     if (delivery.prUrl) {
       setPrUrl(delivery.prUrl)
     }
+
+    const pipelineNodes = delivery.pipelineSnapshot?.nodes ?? []
+    const nodeLabelById = new Map(pipelineNodes.map((n) => [n.id, n.label]))
+    // The backend's persisted DeliveryStep only carries `nodeId`/`blockName` — there is
+    // no `id`/`name`/`nodeName` field on the wire. Always derive `id` from `nodeId` and
+    // the display label from the pipeline snapshot's node.label, so step lookup by node
+    // id and the title don't silently go blank/unmatched on a reloaded delivery.
+    const persistedByNodeId = new Map(
+      delivery.steps.map((s) => [s.nodeId ?? s.id, { ...s, id: s.nodeId ?? s.id, nodeName: nodeLabelById.get(s.nodeId ?? s.id) ?? s.nodeName ?? s.name }])
+    )
+
+    if (pipelineNodes.length > 0) {
+      setLocalSteps((prev) => {
+        const prevById = new Map(prev.map((s) => [s.id, s]))
+        return pipelineNodes.map((n) =>
+          persistedByNodeId.get(n.id)
+            // Not yet persisted — keep whatever live progress we already have locally
+            // (e.g. Running from a step_started event), else seed a fresh Pending entry.
+            ?? prevById.get(n.id)
+            ?? { id: n.id, name: n.label, nodeName: n.label, status: 'Pending' as DeliveryStep['status'] }
+        )
+      })
+    } else if (delivery.steps.length > 0) {
+      // No pipelineSnapshot.nodes available (shouldn't normally happen) — fall back to
+      // exactly whatever the backend persisted.
+      setLocalSteps(Array.from(persistedByNodeId.values()))
+    }
+
     if (delivery.steps.length > 0) {
-      // The backend's persisted DeliveryStep only carries `nodeId`/`blockName` — there is
-      // no `id`/`name`/`nodeName` field on the wire. Always derive `id` from `nodeId` and
-      // the display label from the pipeline snapshot's node.label, so step lookup by node
-      // id and the title don't silently go blank/unmatched on a reloaded delivery.
-      const nodeLabelById = new Map((delivery.pipelineSnapshot?.nodes ?? []).map((n) => [n.id, n.label]))
-      setLocalSteps(delivery.steps.map((s) => ({
-        ...s,
-        id: s.nodeId ?? s.id,
-        nodeName: nodeLabelById.get(s.nodeId ?? s.id) ?? s.nodeName ?? s.name,
-      })))
       // Live Signals are otherwise purely in-memory (never persisted) — if we're
       // loading a delivery that already has persisted step data and haven't seen
       // any live IPC events this session (fresh mount / reopened later), reconstruct
@@ -268,17 +296,6 @@ export default function DeliveryLiveView() {
         // Newest first, matching how addTimelineEvent() prepends live events
         return synthesized.reverse().slice(0, 10)
       })
-    } else {
-      setLocalSteps((prev) =>
-        prev.length > 0
-          ? prev
-          : (delivery.pipelineSnapshot?.nodes ?? []).map((n) => ({
-              id: n.id,
-              name: n.label,
-              nodeName: n.label,
-              status: 'Pending' as DeliveryStep['status'],
-            }))
-      )
     }
   }, [delivery, id])
 
@@ -355,6 +372,7 @@ export default function DeliveryLiveView() {
   const selectedStep = localSteps.find((s) => s.id === selectedNodeId)
   const selectedNode = flowNodes.find((n) => n.id === selectedNodeId)
   const selectedBlock = selectedNode ? blockMap.get((selectedNode.data as { blockId: string }).blockId) : undefined
+  const selectedNodeTimeoutSeconds = delivery?.pipelineSnapshot?.nodes?.find((n) => n.id === selectedNodeId)?.timeoutSeconds
   const isSelectedNodeActiveGate = selectedNodeId === delivery?.currentNodeId && delivery?.status === 'Paused'
 
   // Gate cards describe the *previous* step's output, not the gate block's own (the
@@ -442,6 +460,7 @@ export default function DeliveryLiveView() {
       if (res.data?.status !== 'Pending') return
       autoStartedRef.current = true
       setLocalStatus('Running')
+      warnIfClaudeKeyMissing()
       window.axon.executor.start(id).then((startRes) => {
         if (!startRes.success) {
           console.error('Auto-start failed:', startRes.error)
@@ -479,11 +498,16 @@ export default function DeliveryLiveView() {
     const handler = (_event: unknown, data: ExecutionProgress) => {
       if (data.deliveryId !== id) return
       // Guard against the same event being delivered twice in quick succession
-      // (observed in practice; exact cause not isolated — this is a safe mitigation
-      // since two legitimate distinct events never collide on this signature).
+      // (observed in practice; exact cause not isolated). Deliberately time-windowed,
+      // not "ever seen this signature in this session" — a node genuinely re-running
+      // (gate resume, a retried step after tuning timeoutSeconds, etc.) produces a
+      // second, legitimate step_started with an IDENTICAL signature (same type/nodeId,
+      // no message) to its first run. An unbounded dedup would silently swallow that
+      // second occurrence forever for the life of this component instance.
       const signature = `${data.type}|${data.nodeId}|${data.message ?? ''}`
-      if (lastProgressEventRef.current === signature) return
-      lastProgressEventRef.current = signature
+      const now = Date.now()
+      if (lastProgressEventRef.current?.signature === signature && now - lastProgressEventRef.current.at < 1000) return
+      lastProgressEventRef.current = { signature, at: now }
       if (data.type === 'workspace_provisioning') {
         addTimelineEvent('WorkspaceProvisioning', 'Workspace provisioning…')
       } else if (data.type === 'workspace_provisioned') {
@@ -513,6 +537,8 @@ export default function DeliveryLiveView() {
                     ...s.agentOutput,
                     summary: data.output?.summary,
                     confidence: data.output?.confidence,
+                    toolsUsed: data.output?.toolsUsed,
+                    toolsDenied: data.output?.toolsDenied,
                   },
                 }
               : s
@@ -523,7 +549,19 @@ export default function DeliveryLiveView() {
         setLocalSteps((prev) =>
           prev.map((s) =>
             s.id === data.nodeId
-              ? { ...s, status: 'Failed' as DeliveryStep['status'], errorMessage: data.message }
+              ? {
+                  ...s,
+                  status: 'Failed' as DeliveryStep['status'],
+                  completedAt: new Date().toISOString(),
+                  errorMessage: data.message,
+                  agentOutput: {
+                    ...s.agentOutput,
+                    summary: data.output?.summary,
+                    toolsUsed: data.output?.toolsUsed,
+                    toolsDenied: data.output?.toolsDenied,
+                    timedOut: data.output?.timedOut,
+                  },
+                }
               : s
           )
         )
@@ -594,11 +632,23 @@ export default function DeliveryLiveView() {
     queryClient.invalidateQueries({ queryKey: ['deliveries'] })
   }
 
+  const warnIfClaudeKeyMissing = useCallback(async () => {
+    const usesClaude = (delivery?.pipelineSnapshot?.nodes ?? []).some(
+      (n) => blockMap.get(n.blockId)?.agentRuntime === 'Claude'
+    )
+    if (!usesClaude) return
+    const status = await window.axon.claudeKey.getStatus().catch(() => null)
+    if (status && !status.hasKey) {
+      toast.warning('No Claude API key resolved — this pipeline has Claude-runtime steps that will fail until one is set in Settings.')
+    }
+  }, [delivery, blockMap])
+
   const handleStart = async () => {
     if (!id) return
     autoStartedRef.current = true
     setIsStarting(true)
     setLocalStatus('Running')
+    await warnIfClaudeKeyMissing()
     try {
       const res = await window.axon.executor.start(id)
       if (!res.success) {
@@ -680,6 +730,24 @@ export default function DeliveryLiveView() {
     } finally {
       setIsClearingWorkspace(false)
     }
+  }
+
+  const handleOpenWorkspace = async () => {
+    if (!delivery?.workspacePath) return
+    const res = await window.axon.shell.openPath(delivery.workspacePath)
+    if (!res.success) toast.error(res.error ? `Failed to open folder: ${res.error}` : 'Failed to open folder')
+  }
+
+  const handleOpenInVSCode = async () => {
+    if (!delivery?.workspacePath) return
+    const res = await window.axon.shell.openInVSCode(delivery.workspacePath)
+    if (!res.success) toast.error(res.error ? `Failed to open VS Code: ${res.error}` : 'Failed to open VS Code')
+  }
+
+  const handleCopyRepoLink = async () => {
+    if (!delivery?.repoUrl) return
+    await navigator.clipboard.writeText(delivery.repoUrl)
+    toast.success('Repo link copied')
   }
 
   const addTimelineEvent = (type: TimelineEvent['type'], body: string) => {
@@ -769,7 +837,7 @@ export default function DeliveryLiveView() {
     : undefined
 
   return (
-    <div style={{ padding: 22 }}>
+    <div style={{ padding: 22, height: '100vh', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Topbar */}
       <div style={{
         height: 50, background: 'var(--axon-bg2)', borderBottom: '1px solid var(--axon-border)',
@@ -856,31 +924,31 @@ export default function DeliveryLiveView() {
       )}
 
       {/* Main grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {/* Left: pipeline graph */}
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)', marginBottom: 10 }}>
-            Pipeline Execution
+        <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10, flexShrink: 0, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)' }}>
+              Pipeline Execution
+            </div>
+            <div style={{ display: 'flex', gap: 8, fontSize: 10, color: 'var(--axon-t3)' }}>
+              {([
+                ['Pending', '#64748b'], ['Running', '#3b82f6'], ['Success', '#22c55e'],
+                ['Needs Human', '#f59e0b'], ['Failed', '#ef4444'],
+              ] as const).map(([label, color]) => (
+                <span key={label} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 5,
+                  background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
+                  borderRadius: 20, padding: '3px 9px',
+                }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
+                  {label}
+                </span>
+              ))}
+            </div>
           </div>
           <div style={{
-            display: 'flex', gap: 8, marginBottom: 10, fontSize: 10, color: 'var(--axon-t3)',
-          }}>
-            {([
-              ['Pending', '#64748b'], ['Running', '#3b82f6'], ['Success', '#22c55e'],
-              ['Needs Human', '#f59e0b'], ['Failed', '#ef4444'],
-            ] as const).map(([label, color]) => (
-              <span key={label} style={{
-                display: 'inline-flex', alignItems: 'center', gap: 5,
-                background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
-                borderRadius: 20, padding: '3px 9px',
-              }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
-                {label}
-              </span>
-            ))}
-          </div>
-          <div style={{
-            height: 480, background: '#0f1117', border: '1px solid var(--axon-border)',
+            flex: 1, minHeight: 0, background: '#0f1117', border: '1px solid var(--axon-border)',
             borderRadius: 12, overflow: 'hidden', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.02)',
           }}>
             <ReactFlowProvider>
@@ -896,24 +964,19 @@ export default function DeliveryLiveView() {
                 onPaneClick={onPaneClick}
                 onInit={(instance) => { reactFlowInstanceRef.current = instance }}
                 fitView
+                fitViewOptions={{ maxZoom: 0.85, padding: 0.25 }}
                 proOptions={{ hideAttribution: true }}
                 style={{ background: '#0f1117' }}
               >
                 <Background color="#1e293b" gap={20} />
                 <Controls showInteractive={false} />
-                <MiniMap
-                  style={{ background: '#111827', border: '1px solid #1e293b' }}
-                  nodeColor="#334155"
-                  pannable
-                  zoomable
-                />
               </ReactFlow>
             </ReactFlowProvider>
           </div>
         </div>
 
         {/* Right: node detail (when selected) or Signals + Job details */}
-        <div style={{ minWidth: 0 }}>
+        <div style={{ minWidth: 0, overflowY: 'auto' }}>
           {selectedStep && selectedNode ? (
             <div style={{
               background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
@@ -969,8 +1032,12 @@ export default function DeliveryLiveView() {
                   {selectedStep.status}
                 </span>
                 {selectedStep.startedAt && <span>Started <b style={{ color: 'var(--axon-t1)', fontWeight: 600 }}>{new Date(selectedStep.startedAt).toLocaleTimeString()}</b></span>}
+                {selectedStep.completedAt && <span>Ended <b style={{ color: 'var(--axon-t1)', fontWeight: 600 }}>{new Date(selectedStep.completedAt).toLocaleTimeString()}</b></span>}
                 {selectedStep.startedAt && selectedStep.completedAt && (
                   <span>Duration <b style={{ color: 'var(--axon-t1)', fontWeight: 600 }}>{formatTotalDuration(selectedStep.startedAt, selectedStep.completedAt)}</b></span>
+                )}
+                {selectedStep.startedAt && !selectedStep.completedAt && selectedStep.status === 'Running' && (
+                  <span>Running for <b style={{ color: 'var(--axon-t1)', fontWeight: 600 }}>{formatTotalDuration(selectedStep.startedAt)}</b></span>
                 )}
               </div>
 
@@ -1059,9 +1126,17 @@ export default function DeliveryLiveView() {
                   background: 'var(--axon-red-d)', border: '1px solid rgba(239,68,68,0.3)',
                   borderRadius: 8, padding: 11, marginBottom: 14,
                 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-red)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                    ✕ Error
+                  <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-red)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {selectedStep.agentOutput?.timedOut ? '⏱ Timed Out' : '✕ Error'}
                   </div>
+                  {selectedStep.agentOutput?.timedOut && (
+                    <div style={{ fontSize: 10.5, color: 'var(--axon-t2)', marginBottom: 6 }}>
+                      This block didn't finish within its configured timeout
+                      {selectedNodeTimeoutSeconds != null && (
+                        <> (<b style={{ color: 'var(--axon-t1)' }}>{selectedNodeTimeoutSeconds}</b>s)</>
+                      )}.
+                    </div>
+                  )}
                   <div style={{ fontSize: 11, color: 'var(--axon-t2)', lineHeight: 1.5 }}>
                     {selectedStep.errorMessage ?? 'An error occurred during this step.'}
                   </div>
@@ -1124,6 +1199,30 @@ export default function DeliveryLiveView() {
                 View full output
               </Button>
 
+              {/* Tools Used / Denied — only meaningful for Agentic-mode blocks; absent
+                  entirely (both undefined) for Prompt-mode blocks, so this section just
+                  doesn't render rather than showing an empty "none" state for every
+                  Prompt block in every delivery. */}
+              {((selectedStep.agentOutput?.toolsUsed?.length ?? 0) > 0 || (selectedStep.agentOutput?.toolsDenied?.length ?? 0) > 0) && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-t3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 7 }}>
+                    Tools
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                    {selectedStep.agentOutput?.toolsUsed?.map((tool) => (
+                      <Badge key={`used-${tool}`} variant="outline" className="border-emerald-600/30 bg-emerald-500/10 text-emerald-500" title="Used">
+                        ✓ {tool}
+                      </Badge>
+                    ))}
+                    {selectedStep.agentOutput?.toolsDenied?.map((tool) => (
+                      <Badge key={`denied-${tool}`} variant="outline" className="border-red-600/30 bg-red-500/10 text-red-500" title="Attempted, blocked">
+                        ✕ {tool}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {selectedStep.agentOutput?.confidence != null && (
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 5 }}>
@@ -1181,17 +1280,35 @@ export default function DeliveryLiveView() {
                 borderBottom: i < arr.length - 1 ? '1px solid var(--axon-border)' : 'none',
               }}>
                 <span style={{ color: 'var(--axon-t3)', flexShrink: 0 }}>{k}</span>
-                <span style={{
-                  color: 'var(--axon-t1)', fontWeight: 500,
-                  fontFamily: mono ? 'var(--font-mono)' : 'inherit',
-                  fontSize: mono ? 10 : 11,
-                  marginLeft: 8, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                }} title={typeof v === 'string' ? v : undefined}>
-                  {v}
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, marginLeft: 8 }}>
+                  <span style={{
+                    color: 'var(--axon-t1)', fontWeight: 500,
+                    fontFamily: mono ? 'var(--font-mono)' : 'inherit',
+                    fontSize: mono ? 10 : 11,
+                    minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }} title={typeof v === 'string' ? v : undefined}>
+                    {v}
+                  </span>
+                  {k === 'Repo' && delivery.repoUrl && (
+                    <Button variant="outline" size="icon-sm" className="size-5 shrink-0" onClick={handleCopyRepoLink} title="Copy repository link">
+                      <Copy size={11} />
+                    </Button>
+                  )}
                 </span>
               </div>
             ))}
           </div>
+
+          {delivery.workspacePath && (
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              <Button variant="outline" size="sm" className="flex-1 gap-1.5" onClick={handleOpenWorkspace} title="Open workspace folder in Explorer">
+                <FolderOpen size={13} /> Explorer
+              </Button>
+              <Button variant="outline" size="sm" className="flex-1 gap-1.5" onClick={handleOpenInVSCode} title="Open workspace folder in VS Code">
+                <Code2 size={13} /> VS Code
+              </Button>
+            </div>
+          )}
 
           {delivery.retriedFromDeliveryId && (
             <button

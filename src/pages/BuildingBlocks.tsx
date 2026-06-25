@@ -31,6 +31,7 @@ export default function BuildingBlocks() {
   const [search, setSearch] = useState('')
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
+  const [editingBlock, setEditingBlock] = useState<BuildingBlock | null>(null)
   const [showShapeLegend, setShowShapeLegend] = useState(false)
   const queryClient = useQueryClient()
 
@@ -54,8 +55,16 @@ export default function BuildingBlocks() {
 
   const handleCreated = (block: BuildingBlock) => {
     queryClient.invalidateQueries({ queryKey: ['blocks'] })
+    if (editingBlock) queryClient.invalidateQueries({ queryKey: ['block', block.id] })
     setShowCreateForm(false)
+    setEditingBlock(null)
     setSelectedBlockId(block.id)
+  }
+
+  const handleEdit = (block: BuildingBlock) => {
+    setEditingBlock(block)
+    setShowCreateForm(true)
+    setSelectedBlockId(null)
   }
 
   const showRightPanel = selectedBlockId !== null || showCreateForm
@@ -82,7 +91,7 @@ export default function BuildingBlocks() {
               ↑ Import
             </button>
             <button
-              onClick={() => { setShowCreateForm(true); setSelectedBlockId(null) }}
+              onClick={() => { setEditingBlock(null); setShowCreateForm(true); setSelectedBlockId(null) }}
               style={{
                 padding: '8px 14px', borderRadius: 7, border: 'none',
                 background: 'var(--axon-nexus)', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer',
@@ -205,6 +214,7 @@ export default function BuildingBlocks() {
                   onClick={() => {
                     setSelectedBlockId(block.id)
                     setShowCreateForm(false)
+                    setEditingBlock(null)
                   }}
                 />
               ))}
@@ -216,13 +226,15 @@ export default function BuildingBlocks() {
         {showRightPanel && (
           showCreateForm ? (
             <CreateBlockForm
-              onClose={() => setShowCreateForm(false)}
+              existingBlock={editingBlock ?? undefined}
+              onClose={() => { setShowCreateForm(false); setEditingBlock(null) }}
               onCreated={handleCreated}
             />
           ) : selectedBlockId ? (
             <BlockDetailPanel
               blockId={selectedBlockId}
               onClose={() => setSelectedBlockId(null)}
+              onEdit={handleEdit}
             />
           ) : null
         )}

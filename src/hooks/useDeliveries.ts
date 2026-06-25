@@ -14,6 +14,9 @@ export function useDeliveries(params?: DeliveryFilter, enabled = true) {
     queryKey: ['deliveries', params],
     queryFn: () => getDeliveries(params),
     enabled,
+    // Same reasoning as useDelivery below — the list's running/paused statuses are live
+    // state, not safe to serve from the app-wide 30s stale cache on revisit.
+    staleTime: 0,
   })
   return { data, isLoading, isError, error }
 }
@@ -23,6 +26,11 @@ export function useDelivery(id: string) {
     queryKey: ['delivery', id],
     queryFn: () => getDelivery(id),
     enabled: !!id,
+    // Deliveries change fast (live execution) and the app-wide default staleTime is 30s
+    // (App.tsx) — without overriding it here, navigating away and back to a delivery
+    // within that window serves a stale cached snapshot with no fresh network fetch,
+    // showing outdated status/steps. DeliveryLiveView's callers already assumed this.
+    staleTime: 0,
   })
 }
 

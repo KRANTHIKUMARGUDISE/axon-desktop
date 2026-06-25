@@ -49,11 +49,14 @@ export default function Pipelines() {
     loadUserInfo()
   }, [])
 
-  // Create a map of blockId -> block type for MiniFlowPreview
+  // Create a map of blockId -> block type for MiniFlowPreview. `role` is the current
+  // field; `type` is legacy and almost always undefined on real blocks now — falling
+  // back to it (rather than the other way around) is why every card's icons collapsed
+  // to the 'Execution' default regardless of each block's actual role.
   const blockTypeMap = useMemo(() => {
     const map = new Map<string, string>()
     blocks.forEach(block => {
-      map.set(block.id, block.type)
+      map.set(block.id, block.role ?? block.type)
     })
     return map
   }, [blocks])

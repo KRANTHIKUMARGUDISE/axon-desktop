@@ -12,6 +12,13 @@ export interface ExecutionProgress {
   prUrl?: string
 }
 
+export interface ClaudeKeyStatus {
+  hasKey: boolean
+  masked: string | null
+  source: string | null
+  conflict: { claudeJson: string; configJson: string } | null
+}
+
 export interface AxonBridge {
   auth: {
     storeToken(token: string): Promise<void>
@@ -52,11 +59,18 @@ export interface AxonBridge {
   claude: {
     call(prompt: string, apiKey: string): Promise<{ success: boolean; error?: string; data?: string }>
   }
+  claudeKey: {
+    getStatus(): Promise<ClaudeKeyStatus>
+    set(value: string): Promise<ClaudeKeyStatus>
+  }
   dialog: {
     openDirectory(): Promise<string | null>
+    openFile(): Promise<string | null>
   }
   shell: {
     openExternal(url: string): Promise<{ success: boolean; error?: string }>
+    openPath(path: string): Promise<{ success: boolean; error?: string }>
+    openInVSCode(path: string): Promise<{ success: boolean; error?: string }>
   }
   system: {
     getInfo(): Promise<{ electronVersion: string; nodeVersion: string; platform: string; appVersion: string }>

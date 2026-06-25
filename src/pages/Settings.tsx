@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { CheckCircle, XCircle, Loader2, Save, ExternalLink, Eye, EyeOff } from 'lucide-react'
+import type { ClaudeKeyStatus } from '../types'
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
@@ -25,12 +26,11 @@ export default function Settings() {
   const [connError, setConnError] = useState('')
   const [currentUser, setCurrentUser] = useState<CurrentUser>({})
 
-  // Claude
-  const [claudeKey, setClaudeKey] = useState('')
-  const [claudeKeySuffix, setClaudeKeySuffix] = useState('')
+  // Claude — resolved in-memory only (detected from ~/.claude.json /
+  // ~/.claude/config.json on launch, or manually overridden for this session).
+  // Never persisted to disk; see CLAUDE.md "BUILD — Claude key resolution".
+  const [claudeKeyStatus, setClaudeKeyStatus] = useState<ClaudeKeyStatus | null>(null)
   const [claudeSaved, setClaudeSaved] = useState<SaveStatus>('idle')
-  const [claudeKeySet, setClaudeKeySet] = useState(false)
-  const [showClaudeKey, setShowClaudeKey] = useState(false)
   const [showClaudeModal, setShowClaudeModal] = useState(false)
   const [newClaudeKey, setNewClaudeKey] = useState('')
 
@@ -66,11 +66,8 @@ export default function Settings() {
       setConfidenceThreshold((all.confidenceThreshold as number) || 0.75)
       setMaxContextSnapshotSizeKb((all.maxContextSnapshotSizeKb as number) || 50)
 
-      // Check if keys are set and load their suffixes
-      const claudeKey = await window.axon.auth.getSecure('axon-claude-key')
-      setClaudeKeySet(!!claudeKey)
-      const claudeSuffix = await window.axon.settings.get('claudeKeySuffix')
-      if (claudeSuffix) setClaudeKeySuffix(claudeSuffix as string)
+      const claudeStatus = await window.axon.claudeKey.getStatus()
+      setClaudeKeyStatus(claudeStatus)
 
       const gitToken = await window.axon.auth.getSecure('axon-git-token')
       setGitTokenSet(!!gitToken)
@@ -126,15 +123,13 @@ export default function Settings() {
       setClaudeSaved('error')
       return
     }
-    await window.axon.auth.storeSecure('axon-claude-key', newClaudeKey)
-    const suffix = newClaudeKey.slice(-4)
-    await window.axon.settings.set('claudeKeySuffix', suffix)
-    setClaudeKeySuffix(suffix)
-    setClaudeKeySet(true)
+    const status = await window.axon.claudeKey.set(newClaudeKey)
+    setClaudeKeyStatus(status)
     setClaudeSaved('saved')
     setNewClaudeKey('')
     setShowClaudeModal(false)
     setTimeout(() => setClaudeSaved('idle'), 2000)
+    window.dispatchEvent(new CustomEvent('axon:claudeKeyChanged'))
   }
 
   async function browseWorkspace() {
@@ -288,24 +283,11 @@ export default function Settings() {
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <div style={{
                   flex: 1, padding: '8px 12px', borderRadius: 6, border: '1px solid var(--axon-border)',
-                  background: 'var(--axon-bg2)', color: claudeKeySet ? 'var(--axon-t2)' : 'var(--axon-t4)', fontSize: 13,
-                  fontStyle: claudeKeySet ? 'normal' : 'italic', fontFamily: 'monospace',
+                  background: 'var(--axon-bg2)', color: claudeKeyStatus?.hasKey ? 'var(--axon-t2)' : 'var(--axon-t4)', fontSize: 13,
+                  fontStyle: claudeKeyStatus?.hasKey ? 'normal' : 'italic', fontFamily: 'monospace',
                 }}>
-                  {claudeKeySet && showClaudeKey ? `sk-ant-...${claudeKeySuffix}` : claudeKeySet ? '••••' : 'Not set'}
+                  {claudeKeyStatus?.hasKey ? claudeKeyStatus.masked : 'Not set'}
                 </div>
-                {claudeKeySet && (
-                  <button
-                    onClick={() => setShowClaudeKey(!showClaudeKey)}
-                    style={{
-                      padding: '8px 10px', borderRadius: 6, border: '1px solid var(--axon-border)',
-                      background: 'transparent', color: 'var(--axon-t2)', cursor: 'pointer',
-                      display: 'flex', alignItems: 'center',
-                    }}
-                    title={showClaudeKey ? 'Hide' : 'Show'}
-                  >
-                    {showClaudeKey ? <Eye size={14} /> : <EyeOff size={14} />}
-                  </button>
-                )}
                 <button
                   onClick={() => { setShowClaudeModal(true); setNewClaudeKey('') }}
                   style={{
@@ -314,12 +296,32 @@ export default function Settings() {
                     cursor: 'pointer',
                   }}
                 >
-                  Update Key
+                  {claudeKeyStatus?.hasKey ? 'Update Key' : 'Enter Key'}
                 </button>
               </div>
-              <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '8px 0 0 0' }}>
-                Get your key at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" style={{ color: 'var(--axon-nexus2)', textDecoration: 'none' }}>console.anthropic.com</a>
-              </p>
+              {claudeKeyStatus?.hasKey && claudeKeyStatus.source && (
+                <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '8px 0 0 0' }}>
+                  Resolved from <span style={{ color: 'var(--axon-t2)' }}>{claudeKeyStatus.source}</span> — not stored on disk, re-detected on every launch.
+                </p>
+              )}
+              {claudeKeyStatus?.conflict && (
+                <div style={{ marginTop: 8, padding: 10, borderRadius: 6, background: 'rgba(217,119,6,0.1)', border: '1px solid var(--axon-amber)' }}>
+                  <p style={{ fontSize: 12, color: 'var(--axon-amber)', margin: 0, fontWeight: 500 }}>
+                    Conflicting keys detected — pick one manually below
+                  </p>
+                  <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '6px 0 0 0', fontFamily: 'monospace' }}>
+                    ~/.claude.json: {claudeKeyStatus.conflict.claudeJson}
+                  </p>
+                  <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '2px 0 0 0', fontFamily: 'monospace' }}>
+                    ~/.claude/config.json: {claudeKeyStatus.conflict.configJson}
+                  </p>
+                </div>
+              )}
+              {!claudeKeyStatus?.hasKey && !claudeKeyStatus?.conflict && (
+                <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '8px 0 0 0' }}>
+                  Get your key at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" style={{ color: 'var(--axon-nexus2)', textDecoration: 'none' }}>console.anthropic.com</a>
+                </p>
+              )}
             </div>
             <div style={{ padding: 12, borderRadius: 6, background: 'var(--axon-bg3)', border: '1px solid var(--axon-border)' }}>
               <div style={{ fontSize: 12, color: 'var(--axon-t3)' }}>

@@ -206,4 +206,20 @@
     font-size: 15px !important;
     height: 48px !important;
   }
+
+  /* React Flow's Controls (+/-/fit-view/lock) default to a light-theme button look —
+     against this app's dark canvas the icon glyphs end up low/no-contrast. Force a
+     dark-theme-consistent look everywhere ReactFlow's Controls are used (Pipeline
+     Creator, Delivery Live View) instead of relying on the library default. */
+  .react-flow__controls-button {
+    background: var(--axon-bg4) !important;
+    border-bottom: 1px solid var(--axon-border2) !important;
+    color: var(--axon-t1) !important;
+  }
+  .react-flow__controls-button:hover {
+    background: var(--axon-bg5) !important;
+  }
+  .react-flow__controls-button svg {
+    fill: var(--axon-t1) !important;
+  }
 }

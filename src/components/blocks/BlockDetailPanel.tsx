@@ -5,7 +5,7 @@ import { toast } from 'sonner'
 import { getBlock } from '../../services/blocksService'
 import { getBlockTypeIcon } from '../../utils/blockTypeIcons'
 import { getRuntimeIcon, RUNTIME_LABELS } from '../../utils/runtimeIcons'
-import type { BlockType } from '../../types'
+import type { BlockType, BuildingBlock } from '../../types'
 
 const TYPE_COLORS: Record<string, string> = {
   Decision: '#f472b6',
@@ -59,9 +59,10 @@ function formatCachedAt(iso?: string): string {
 interface Props {
   blockId: string
   onClose: () => void
+  onEdit: (block: BuildingBlock) => void
 }
 
-export default function BlockDetailPanel({ blockId, onClose }: Props) {
+export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
   const navigate = useNavigate()
   const [tab, setTab] = useState<'details' | 'usedin'>('details')
 
@@ -513,7 +514,7 @@ export default function BlockDetailPanel({ blockId, onClose }: Props) {
               ↺ Sync
             </button>
             <button
-              onClick={() => toast.info('Edit coming soon')}
+              onClick={() => onEdit(block)}
               style={{
                 flex: 1,
                 padding: '7px 0',

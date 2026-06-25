@@ -10,10 +10,6 @@ const STEPS = [
   'Welcome',
   'Backend',
   'Login',
-  'Claude API',
-  'Workspace',
-  'Git',
-  'Done',
 ]
 
 type ConnectionStatus = 'idle' | 'loading' | 'ok' | 'error'
@@ -22,30 +18,17 @@ export default function Setup({ onComplete }: { onComplete?: () => void }) {
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
 
-  // Step 2 — Backend
+  // Step 1 — Backend
   const [backendUrl, setBackendUrl] = useState('https://localhost:7027')
   const [connStatus, setConnStatus] = useState<ConnectionStatus>('idle')
   const [connError, setConnError] = useState('')
 
-  // Step 3 — Login
+  // Step 2 — Login
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loginStatus, setLoginStatus] = useState<ConnectionStatus>('idle')
   const [loginError, setLoginError] = useState('')
-
-  // Step 4 — Claude API
-  const [claudeKey, setClaudeKey] = useState('')
-  const [claudeStatus, setClaudeStatus] = useState<ConnectionStatus>('idle')
-  const [claudeError, setClaudeError] = useState('')
-
-  // Step 5 — Workspace
-  const [workspacePath, setWorkspacePath] = useState('')
-  const [workspaceExists, setWorkspaceExists] = useState<boolean | null>(null)
-
-  // Step 6 — Git
-  const [gitProvider, setGitProvider] = useState<'github' | 'azure'>('github')
-  const [gitToken, setGitToken] = useState('')
-  const [gitSkipped, setGitSkipped] = useState(false)
+  const [finishing, setFinishing] = useState(false)
 
   async function testConnection() {
     setConnStatus('loading')
@@ -100,39 +83,8 @@ export default function Setup({ onComplete }: { onComplete?: () => void }) {
     }
   }
 
-  async function verifyClaudeKey() {
-    setClaudeStatus('loading')
-    setClaudeError('')
-    if (!claudeKey.startsWith('sk-ant-')) {
-      setClaudeStatus('error')
-      setClaudeError('API key must start with "sk-ant-"')
-      return
-    }
-    await window.axon.auth.storeSecure('axon-claude-key', claudeKey)
-    setClaudeStatus('ok')
-  }
-
-  async function browseWorkspace() {
-    const selected = await window.axon.dialog.openDirectory()
-    if (selected) {
-      setWorkspacePath(selected)
-      const exists = await window.axon.workspace.exists(selected)
-      setWorkspaceExists(exists)
-    }
-  }
-
-  async function confirmWorkspace() {
-    await window.axon.settings.set('workspaceRoot', workspacePath)
-  }
-
-  async function saveGitConfig() {
-    await window.axon.settings.set('gitProvider', gitProvider)
-    if (gitToken) {
-      await window.axon.auth.storeSecure('axon-git-token', gitToken)
-    }
-  }
-
   async function finishSetup() {
+    setFinishing(true)
     await window.axon.settings.set('setupComplete', true)
     onComplete?.()
     navigate('/dashboard')
@@ -142,7 +94,7 @@ export default function Setup({ onComplete }: { onComplete?: () => void }) {
     setStep(s => s + 1)
   }
 
-  const progressSteps = STEPS.slice(1, -1) // exclude Welcome and Done
+  const progressSteps = STEPS.slice(1) // exclude Welcome
 
   return (
     <div
@@ -162,8 +114,8 @@ export default function Setup({ onComplete }: { onComplete?: () => void }) {
           <img src={axonTitle} alt="AXON" className="h-4" />
         </div>
 
-        {/* Progress indicator (shown on steps 1–5) */}
-        {step > 0 && step < STEPS.length - 1 && (
+        {/* Progress indicator (shown on steps 1–2) */}
+        {step > 0 && (
           <div className="flex items-center gap-1.5 mb-8">
             {progressSteps.map((label, i) => {
               const stepIndex = i + 1
@@ -227,8 +179,8 @@ export default function Setup({ onComplete }: { onComplete?: () => void }) {
               </p>
               <p className="text-sm leading-relaxed" style={{ color: 'var(--axon-t2)' }}>
                 AXON runs AI-powered delivery pipelines locally on your machine. In the next
-                few steps we'll connect to your backend, sign you in, and configure your
-                development environment.
+                few steps we'll connect to your backend and sign you in. Workspace and Git
+                settings can be configured later from Settings.
               </p>
             </div>
             <Button
@@ -353,225 +305,15 @@ export default function Setup({ onComplete }: { onComplete?: () => void }) {
                 Sign In
               </Button>
               <Button
-                className="flex-1"
-                disabled={loginStatus !== 'ok'}
+                className="flex-1 gap-2"
+                disabled={loginStatus !== 'ok' || finishing}
                 style={{ background: loginStatus === 'ok' ? 'var(--axon-nexus)' : undefined, color: '#fff' }}
-                onClick={next}
+                onClick={finishSetup}
               >
-                Next
+                {finishing && <Loader2 size={14} className="animate-spin" />}
+                Continue to Dashboard
               </Button>
             </div>
-          </div>
-        )}
-
-        {/* Step 3 — Claude API Key */}
-        {step === 3 && (
-          <div className="space-y-5">
-            <div>
-              <h2 className="text-lg font-semibold mb-1" style={{ color: 'var(--axon-t1)' }}>
-                Claude API Key
-              </h2>
-              <p className="text-sm" style={{ color: 'var(--axon-t2)' }}>
-                AXON uses Claude to power its AI pipeline steps.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <label className="text-xs font-medium" style={{ color: 'var(--axon-t2)' }}>
-                API Key
-              </label>
-              <Input
-                type="password"
-                value={claudeKey}
-                onChange={e => { setClaudeKey(e.target.value); setClaudeStatus('idle') }}
-                placeholder="sk-ant-..."
-                className="bg-[var(--axon-bg4)] border-[var(--axon-border2)] text-[var(--axon-t1)]"
-              />
-              <a
-                href="https://console.anthropic.com"
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs hover:underline"
-                style={{ color: 'var(--axon-nexus2)' }}
-              >
-                Get your API key at console.anthropic.com
-              </a>
-            </div>
-            {claudeStatus === 'error' && (
-              <p className="text-sm flex items-center gap-1.5" style={{ color: 'var(--axon-red)' }}>
-                <XCircle size={14} /> {claudeError}
-              </p>
-            )}
-            {claudeStatus === 'ok' && (
-              <p className="text-sm flex items-center gap-1.5" style={{ color: 'var(--axon-green)' }}>
-                <CheckCircle size={14} /> Key saved to keychain
-              </p>
-            )}
-            <div className="flex gap-3">
-              <Button
-                variant="outline"
-                onClick={verifyClaudeKey}
-                disabled={claudeStatus === 'loading' || !claudeKey}
-                className="flex-1 gap-2 border-[var(--axon-border2)] text-[var(--axon-t1)] hover:bg-[var(--axon-bg4)]"
-              >
-                {claudeStatus === 'loading' && <Loader2 size={14} className="animate-spin" />}
-                Verify Key
-              </Button>
-              <Button
-                className="flex-1"
-                disabled={claudeStatus !== 'ok'}
-                style={{ background: claudeStatus === 'ok' ? 'var(--axon-nexus)' : undefined, color: '#fff' }}
-                onClick={next}
-              >
-                Next
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* Step 4 — Workspace Root */}
-        {step === 4 && (
-          <div className="space-y-5">
-            <div>
-              <h2 className="text-lg font-semibold mb-1" style={{ color: 'var(--axon-t1)' }}>
-                Workspace Root
-              </h2>
-              <p className="text-sm" style={{ color: 'var(--axon-t2)' }}>
-                Choose the directory where AXON will clone and manage repositories.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <label className="text-xs font-medium" style={{ color: 'var(--axon-t2)' }}>
-                Directory Path
-              </label>
-              <div className="flex gap-2">
-                <Input
-                  value={workspacePath}
-                  onChange={e => { setWorkspacePath(e.target.value); setWorkspaceExists(null) }}
-                  placeholder="C:/dev or ~/code"
-                  className="bg-[var(--axon-bg4)] border-[var(--axon-border2)] text-[var(--axon-t1)]"
-                />
-                <Button
-                  variant="outline"
-                  onClick={browseWorkspace}
-                  className="shrink-0 border-[var(--axon-border2)] text-[var(--axon-t1)] hover:bg-[var(--axon-bg4)]"
-                >
-                  Browse
-                </Button>
-              </div>
-              {workspaceExists === true && (
-                <p className="text-xs flex items-center gap-1" style={{ color: 'var(--axon-green)' }}>
-                  <CheckCircle size={12} /> Directory exists and is accessible
-                </p>
-              )}
-              {workspaceExists === false && (
-                <p className="text-xs flex items-center gap-1" style={{ color: 'var(--axon-amber)' }}>
-                  Directory not found — it will be created
-                </p>
-              )}
-            </div>
-            <Button
-              className="w-full"
-              disabled={!workspacePath}
-              style={{ background: workspacePath ? 'var(--axon-nexus)' : undefined, color: '#fff' }}
-              onClick={async () => { await confirmWorkspace(); next() }}
-            >
-              Next
-            </Button>
-          </div>
-        )}
-
-        {/* Step 5 — Git Configuration */}
-        {step === 5 && (
-          <div className="space-y-5">
-            <div>
-              <h2 className="text-lg font-semibold mb-1" style={{ color: 'var(--axon-t1)' }}>
-                Git Configuration
-              </h2>
-              <p className="text-sm" style={{ color: 'var(--axon-t2)' }}>
-                Connect AXON to your Git provider so it can clone repos and push branches.
-              </p>
-            </div>
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-xs font-medium" style={{ color: 'var(--axon-t2)' }}>
-                  Git Provider
-                </label>
-                <div className="flex gap-2">
-                  {(['github', 'azure'] as const).map(p => (
-                    <button
-                      key={p}
-                      onClick={() => setGitProvider(p)}
-                      className="flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-all"
-                      style={{
-                        background: gitProvider === p ? 'var(--axon-nx-glow)' : 'var(--axon-bg4)',
-                        borderColor: gitProvider === p ? 'var(--axon-nexus)' : 'var(--axon-border2)',
-                        color: gitProvider === p ? 'var(--axon-nexus2)' : 'var(--axon-t2)',
-                      }}
-                    >
-                      {p === 'github' ? 'GitHub' : 'Azure DevOps'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium" style={{ color: 'var(--axon-t2)' }}>
-                  Personal Access Token
-                </label>
-                <Input
-                  type="password"
-                  value={gitToken}
-                  onChange={e => setGitToken(e.target.value)}
-                  placeholder="ghp_... or azure PAT"
-                  disabled={gitSkipped}
-                  className="bg-[var(--axon-bg4)] border-[var(--axon-border2)] text-[var(--axon-t1)]"
-                />
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <Button
-                variant="outline"
-                onClick={async () => { setGitSkipped(true); next() }}
-                className="flex-1 border-[var(--axon-border2)] text-[var(--axon-t2)] hover:bg-[var(--axon-bg4)]"
-              >
-                Skip for now
-              </Button>
-              <Button
-                className="flex-1"
-                disabled={!gitToken}
-                style={{ background: gitToken ? 'var(--axon-nexus)' : undefined, color: '#fff' }}
-                onClick={async () => { await saveGitConfig(); next() }}
-              >
-                Save & Continue
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* Step 6 — Done */}
-        {step === 6 && (
-          <div className="space-y-6 text-center">
-            <div
-              className="flex items-center justify-center w-16 h-16 rounded-full mx-auto"
-              style={{ background: 'var(--axon-green-d)', border: '1px solid var(--axon-green)' }}
-            >
-              <CheckCircle size={32} style={{ color: 'var(--axon-green)' }} />
-            </div>
-            <div>
-              <h2 className="text-xl font-bold mb-2" style={{ color: 'var(--axon-t1)' }}>
-                Setup complete. AXON is ready.
-              </h2>
-              <p className="text-sm" style={{ color: 'var(--axon-t2)' }}>
-                Your environment is configured. You can update any settings later from the
-                Settings page.
-              </p>
-            </div>
-            <Button
-              className="w-full text-base py-5"
-              style={{ background: 'var(--axon-nexus)', color: '#fff' }}
-              onClick={finishSetup}
-            >
-              Open AXON
-            </Button>
           </div>
         )}
       </div>

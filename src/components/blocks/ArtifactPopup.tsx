@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { parseSkillFrontmatter } from '../../utils/skillParser'
-import { readFilesFromFolder, type CachedFile } from '../../utils/fileHandler'
+import { readFilesFromFolder, readSingleFile, type CachedFile } from '../../utils/fileHandler'
 
 
 interface ArtifactData {
@@ -18,6 +18,7 @@ interface ArtifactPopupProps {
 }
 
 export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps) {
+  const [mode, setMode] = useState<'folder' | 'file'>('folder')
   const [folderPath, setFolderPath] = useState<string | null>(null)
   const [cachedFiles, setCachedFiles] = useState<CachedFile[]>([])
   const [entryPointPath, setEntryPointPath] = useState<string | null>(null)
@@ -26,6 +27,43 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
   const [error, setError] = useState<string | null>(null)
   const [skippedCount, setSkippedCount] = useState(0)
 
+  const switchMode = (next: 'folder' | 'file') => {
+    setMode(next)
+    setFolderPath(null)
+    setCachedFiles([])
+    setEntryPointPath(null)
+    setSkillMeta(null)
+    setError(null)
+    setSkippedCount(0)
+  }
+
+  const handleSelectFile = async () => {
+    try {
+      setError(null)
+      setLoading(true)
+      const selected = await window.axon.dialog.openFile()
+      if (!selected) return
+
+      setFolderPath(selected)
+
+      const { cachedFile, skipped } = await readSingleFile(selected, window.axon.workspace.readFile)
+      if (skipped || !cachedFile) {
+        setError("Couldn't read that file as text. Choose a different one.")
+        setEntryPointPath(null)
+        setSkillMeta(null)
+        return
+      }
+
+      setCachedFiles([cachedFile])
+      setEntryPointPath(cachedFile.relativePath)
+      setSkillMeta(parseSkillFrontmatter(cachedFile.content))
+    } catch (err) {
+      setError("Couldn't read that file. Choose a different one.")
+      console.error('Error selecting file:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const handleSelectFolder = async () => {
     try {
@@ -75,7 +113,7 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
       return
     }
 
-    const artifactName = skillMeta?.name || 'Artifact'
+    const artifactName = skillMeta?.name || (mode === 'file' ? entryPointPath : 'Artifact')
     onAttach({
       folderPath,
       cachedFiles,
@@ -149,13 +187,36 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
         <div style={{ flex: 1, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
           {!folderPath ? (
             <>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {(['folder', 'file'] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => switchMode(m)}
+                    style={{
+                      flex: 1,
+                      padding: '7px 0',
+                      borderRadius: 6,
+                      border: `1px solid ${mode === m ? 'var(--axon-nexus)' : 'var(--axon-border2)'}`,
+                      background: mode === m ? 'rgba(111,95,232,0.15)' : 'var(--axon-bg4)',
+                      color: mode === m ? 'var(--axon-nexus2)' : 'var(--axon-t3)',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {m === 'folder' ? 'Folder' : 'Single File'}
+                  </button>
+                ))}
+              </div>
               <p style={{ fontSize: 13, color: 'var(--axon-t2)', margin: 0, lineHeight: 1.5 }}>
-                Select a folder containing a SKILL.md file. AXON will read the skill definition and
-                attach it to this block.
+                {mode === 'folder'
+                  ? 'Select a folder containing a SKILL.md file. AXON will read the skill definition and attach it to this block.'
+                  : 'Select a single file to attach. No SKILL.md naming required — the chosen file is the entry point.'}
               </p>
               <button
                 type="button"
-                onClick={handleSelectFolder}
+                onClick={mode === 'folder' ? handleSelectFolder : handleSelectFile}
                 disabled={loading}
                 style={{
                   padding: '10px 14px',
@@ -168,7 +229,7 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
                   opacity: loading ? 0.6 : 1,
                 }}
               >
-                {loading ? 'Reading…' : 'Browse Folder'}
+                {loading ? 'Reading…' : mode === 'folder' ? 'Browse Folder' : 'Browse File'}
               </button>
             </>
           ) : (
@@ -191,7 +252,7 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
               {!error && (
                 <>
                   <div style={{ fontSize: 11.5, color: 'var(--axon-t3)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    Folder
+                    {mode === 'folder' ? 'Folder' : 'File'}
                   </div>
                   <div
                     style={{
@@ -298,7 +359,7 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
 
                   <button
                     type="button"
-                    onClick={handleSelectFolder}
+                    onClick={mode === 'folder' ? handleSelectFolder : handleSelectFile}
                     disabled={loading}
                     style={{
                       padding: '8px 12px',
@@ -311,7 +372,7 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
                       marginTop: 4,
                     }}
                   >
-                    Choose Different Folder
+                    {mode === 'folder' ? 'Choose Different Folder' : 'Choose Different File'}
                   </button>
                 </>
               )}

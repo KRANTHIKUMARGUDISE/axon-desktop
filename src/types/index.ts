@@ -6,6 +6,10 @@ export type BlockType = 'Decision' | 'Execution' | 'Knowledge' | 'Control' | 'IO
 export type SourceType = 'Axon' | 'Local' | 'Marketplace' | 'CDF'
 export type AgentRuntime = 'Axon' | 'Claude' | 'Codex'
 export type ArtifactFormat = 'Native' | 'Skill'
+export type ExecutionType = 'Prompt' | 'Agentic'
+export type BuildingBlockVisibility = 'Personal' | 'Team' | 'Organisation'
+export const AGENTIC_TOOL_OPTIONS = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'] as const
+export type AgenticTool = (typeof AGENTIC_TOOL_OPTIONS)[number]
 
 export interface BranchCondition {
   expression: string
@@ -70,6 +74,9 @@ export interface StepAgentOutput {
   rejectedBy?: string
   rejectedAt?: string
   reviewComment?: string
+  toolsUsed?: string[]
+  toolsDenied?: string[]
+  timedOut?: boolean
   isTruncated?: boolean
   outputFileRef?: string
 }
@@ -186,6 +193,12 @@ export interface BuildingBlock {
   marketplacePath?: string
   marketplaceVersion?: string
   cachedAt?: string
+  visibility?: BuildingBlockVisibility
+  executionType?: ExecutionType
+  allowedTools?: string[]
+  defaultTimeoutSeconds?: number
+  executionAgreementAcceptedAt?: string
+  executionAgreementAcceptedBy?: string
   // Legacy fields for backward compatibility (to be removed)
   type?: BlockType
   adapterType?: AdapterType
@@ -239,9 +252,24 @@ export interface ExecutionProgress {
   deliveryId: string
   nodeId: string
   blockName?: string
-  output?: { status: string; confidence: number; summary: string; result: Record<string, unknown> }
+  output?: {
+    status: string
+    confidence: number
+    summary: string
+    result: Record<string, unknown>
+    toolsUsed?: string[]
+    toolsDenied?: string[]
+    timedOut?: boolean
+  }
   message?: string
   prUrl?: string
+}
+
+export interface ClaudeKeyStatus {
+  hasKey: boolean
+  masked: string | null
+  source: string | null
+  conflict: { claudeJson: string; configJson: string } | null
 }
 
 export interface CreateBlockRequest {

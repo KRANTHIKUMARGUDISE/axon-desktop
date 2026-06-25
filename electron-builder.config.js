@@ -13,6 +13,15 @@ module.exports = {
     'package.json'
   ],
   extraMetadata: { main: 'dist-electron/main.js' },
+  // The Claude Agent SDK's platform packages (claude-agent-sdk-win32-x64, -darwin-arm64,
+  // etc.) ship a native claude.exe/claude binary. Native executables can't be spawned from
+  // inside an asar archive — only unpacked, on-disk files can be exec'd by the OS — so
+  // these must be unpacked into app.asar.unpacked rather than packed into app.asar like
+  // everything else. Without this, the binary "exists" (asar's virtual fs can stat it) but
+  // fails to launch as a child process.
+  asarUnpack: [
+    'node_modules/@anthropic-ai/claude-agent-sdk*/**/*'
+  ],
   electronDownload: {
     cache: path.join(os.tmpdir(), 'axon-electron-cache')
   },

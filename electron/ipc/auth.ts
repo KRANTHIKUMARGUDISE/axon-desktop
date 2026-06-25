@@ -16,6 +16,24 @@ export async function readSecure(key: string): Promise<string | null> {
   }
 }
 
+// One-time migration helper: decrypts a legacy secure-storage file (if present)
+// and deletes it unconditionally, regardless of whether the value is used —
+// callers retiring disk persistence for a key call this once on launch.
+export async function consumeSecureFile(key: string): Promise<string | null> {
+  const filePath = path.join(app.getPath('userData'), `${key}.enc`)
+  let value: string | null = null
+  try {
+    const encrypted = await fs.readFile(filePath)
+    if (safeStorage.isEncryptionAvailable()) {
+      value = safeStorage.decryptString(encrypted)
+    }
+  } catch {
+    value = null
+  }
+  await fs.unlink(filePath).catch(() => {})
+  return value
+}
+
 export function registerAuthHandlers() {
   ipcMain.handle('auth:storeToken', async (_event, token: string) => {
     if (!safeStorage.isEncryptionAvailable()) {

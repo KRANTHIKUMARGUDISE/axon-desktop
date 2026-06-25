@@ -22,8 +22,38 @@ const NODE_COLORS: Record<NodeType, string> = {
   Utility: '#c084fc',
 }
 
-function MiniFlowPreview({ nodes, blockMap }: { nodes: Pipeline['nodes']; blockMap?: Map<string, string> }) {
+// `pipeline.nodes` is array-insertion order, not execution order (nodes can be added to
+// the canvas in any sequence) — walk it via `edges` so the icon row actually reflects the
+// real start-to-finish flow. Linear-only pipelines (current MVP — see executor.ts's
+// identical findStartNode/nextNode pattern), so each node has at most one outgoing edge.
+function orderNodesByFlow(nodes: Pipeline['nodes'], edges: Pipeline['edges']): Pipeline['nodes'] {
   const safeNodes = nodes ?? []
+  const safeEdges = edges ?? []
+  if (safeNodes.length === 0 || safeEdges.length === 0) return safeNodes
+
+  const byId = new Map(safeNodes.map((n) => [n.id, n]))
+  const hasIncoming = new Set(safeEdges.map((e) => e.targetNodeId))
+  const start = safeNodes.find((n) => !hasIncoming.has(n.id)) ?? safeNodes[0]
+
+  const ordered: typeof safeNodes = []
+  const visited = new Set<string>()
+  let current = start
+  while (current && !visited.has(current.id)) {
+    ordered.push(current)
+    visited.add(current.id)
+    const outgoing = safeEdges.filter((e) => e.sourceNodeId === current!.id)
+    const edge = outgoing.find((e) => e.isDefault) ?? outgoing[0]
+    current = edge ? byId.get(edge.targetNodeId) : undefined
+  }
+  // Any node edges didn't reach (disconnected/orphaned) still needs to show up somewhere.
+  for (const n of safeNodes) {
+    if (!visited.has(n.id)) ordered.push(n)
+  }
+  return ordered
+}
+
+function MiniFlowPreview({ nodes, edges, blockMap }: { nodes: Pipeline['nodes']; edges?: Pipeline['edges']; blockMap?: Map<string, string> }) {
+  const safeNodes = orderNodesByFlow(nodes, edges)
   const visible = safeNodes.slice(0, 6)
   const extra = safeNodes.length - 6
 
@@ -36,12 +66,16 @@ function MiniFlowPreview({ nodes, blockMap }: { nodes: Pipeline['nodes']; blockM
   }
 
   const getNodeType = (node: any) => {
-    // Try node.type first, then look up from block map, default to Execution
-    let type = node.type
-    if (!type && blockMap && (node as any).blockId) {
-      type = blockMap.get((node as any).blockId) || 'Execution'
+    // Prefer the block's CURRENT role from the live block map — node.type is cached at
+    // node-creation time on the pipeline itself and never updated if the block's role
+    // changes later (e.g. via block edit mode), so trusting it first was showing stale/
+    // wrong icons. Only fall back to node.type if the block can't be found at all (e.g.
+    // it was since deleted).
+    if (blockMap && (node as any).blockId) {
+      const fromBlock = blockMap.get((node as any).blockId)
+      if (fromBlock) return fromBlock
     }
-    return type || 'Execution'
+    return node.type || 'Execution'
   }
 
   const normalizedType = (type: string): BlockType => {
@@ -221,7 +255,7 @@ export default function PipelineCard({ pipeline, blockTypeMap, onRun, onEdit, on
       )}
 
       {/* Mini flow preview */}
-      <MiniFlowPreview nodes={pipeline.nodes ?? []} blockMap={blockTypeMap} />
+      <MiniFlowPreview nodes={pipeline.nodes ?? []} edges={pipeline.edges ?? []} blockMap={blockTypeMap} />
 
       {/* Stats */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>

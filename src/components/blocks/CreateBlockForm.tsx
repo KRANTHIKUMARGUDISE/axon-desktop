@@ -1,16 +1,28 @@
 import { useState, useRef, useEffect } from 'react'
 import { toast } from 'sonner'
-import { createBlock } from '../../services/blocksService'
+import { createBlock, updateBlock } from '../../services/blocksService'
 import { getBlockTypeIcon } from '../../utils/blockTypeIcons'
 import { getRuntimeIcon, RUNTIME_LABELS } from '../../utils/runtimeIcons'
 import ArtifactPopup from './ArtifactPopup'
-import type { BuildingBlock, BlockType, SourceType, AgentRuntime, ArtifactFormat } from '../../types'
+import type { BuildingBlock, BlockType, SourceType, AgentRuntime, ArtifactFormat, ExecutionType, BuildingBlockVisibility } from '../../types'
+import { AGENTIC_TOOL_OPTIONS } from '../../types'
 import type { CachedFile } from '../../utils/fileHandler'
 
 const BLOCK_TYPES: BlockType[] = ['Decision', 'Execution', 'Knowledge', 'Control', 'Utility', 'IO']
 const SOURCE_TYPES: SourceType[] = ['Axon', 'Local', 'Marketplace', 'CDF']
 // Only Claude and Codex are user-selectable; Axon is set by backend only
 const RUNTIME_OPTIONS: AgentRuntime[] = ['Claude', 'Codex']
+const EXECUTION_TYPES: ExecutionType[] = ['Prompt', 'Agentic']
+const VISIBILITY_OPTIONS: BuildingBlockVisibility[] = ['Personal', 'Team', 'Organisation']
+
+const AGREEMENT_CLAUSES: Record<(typeof AGENTIC_TOOL_OPTIONS)[number], string> = {
+  Read: 'may read files in the repository',
+  Glob: 'may search the repository file tree',
+  Grep: 'may search file contents in the repository',
+  Write: 'may create new files in the repository',
+  Edit: 'may modify existing files in the repository',
+  Bash: 'may execute shell commands in the workspace',
+}
 
 const CTX_CHIPS = [
   { key: 'ticket', desc: 'Jira ticket details' },
@@ -203,27 +215,51 @@ function CollapsibleSection({ label, children }: { label: string; children: Reac
 interface CreateBlockFormProps {
   onClose: () => void
   onCreated: (block: BuildingBlock) => void
+  existingBlock?: BuildingBlock
 }
 
-export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormProps) {
-  const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
-  const [role, setRole] = useState<BlockType>('Execution')
-  const [runtime, setRuntime] = useState<AgentRuntime>('Claude')
-  const [sourceType, setSourceType] = useState<SourceType>('Local')
-  const [artifactData, setArtifactData] = useState<{ cachedFiles: CachedFile[]; entryPointPath: string; artifactName: string; skillMeta?: { name?: string; description?: string } } | null>(null)
+function cachedFileEntries(files: BuildingBlock['cachedFiles']): CachedFile[] {
+  if (!files) return []
+  return files.map((f) => (typeof f === 'string' ? { relativePath: f, content: '' } : f))
+}
+
+export default function CreateBlockForm({ onClose, onCreated, existingBlock }: CreateBlockFormProps) {
+  const isEditing = !!existingBlock
+  const [name, setName] = useState(existingBlock?.name ?? '')
+  const [description, setDescription] = useState(existingBlock?.description ?? '')
+  const [role, setRole] = useState<BlockType>(existingBlock?.role ?? 'Execution')
+  const [runtime, setRuntime] = useState<AgentRuntime>(existingBlock?.agentRuntime ?? 'Claude')
+  const [sourceType, setSourceType] = useState<SourceType>(existingBlock?.sourceType ?? 'Local')
+  const [artifactData, setArtifactData] = useState<{ cachedFiles: CachedFile[]; entryPointPath: string; artifactName: string; skillMeta?: { name?: string; description?: string } } | null>(
+    existingBlock?.entryPointPath
+      ? {
+          cachedFiles: cachedFileEntries(existingBlock.cachedFiles),
+          entryPointPath: existingBlock.entryPointPath,
+          artifactName: existingBlock.artifactName ?? '',
+        }
+      : null
+  )
+  // Tracks whether the artifact was actively re-attached during this edit session (real
+  // content read from disk) vs just carried over for display from the existing block —
+  // we must never PUT empty/placeholder content over a block's real cached files.
+  const [artifactReattached, setArtifactReattached] = useState(false)
   const [tagInput, setTagInput] = useState('')
-  const [tags, setTags] = useState<string[]>([])
-  const [ctxSelected, setCtxSelected] = useState<string[]>([])
+  const [tags, setTags] = useState<string[]>(existingBlock?.tags ?? [])
+  const [ctxSelected, setCtxSelected] = useState<string[]>(existingBlock?.contextRequirements ?? [])
   const [ctxCustom, setCtxCustom] = useState('')
-  const [outSelected, setOutSelected] = useState<string[]>([])
+  const [outSelected, setOutSelected] = useState<string[]>(existingBlock?.outputSchema ?? [])
   const [outCustom, setOutCustom] = useState('')
+  const [visibility, setVisibility] = useState<BuildingBlockVisibility>(existingBlock?.visibility ?? 'Personal')
+  const [executionType, setExecutionType] = useState<ExecutionType>(existingBlock?.executionType ?? 'Prompt')
+  const [allowedTools, setAllowedTools] = useState<string[]>(existingBlock?.allowedTools ?? [])
+  const [defaultTimeoutSeconds, setDefaultTimeoutSeconds] = useState(existingBlock?.defaultTimeoutSeconds ?? 120)
+  const [agreementAccepted, setAgreementAccepted] = useState(!!existingBlock?.executionAgreementAcceptedAt)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState(false)
   const [showArtifactPopup, setShowArtifactPopup] = useState(false)
   const [nameFromSkill, setNameFromSkill] = useState(false)
   const [descriptionFromArtifact, setDescriptionFromArtifact] = useState(false)
-  const [descriptionEditable, setDescriptionEditable] = useState(false)
+  const [descriptionEditable, setDescriptionEditable] = useState(isEditing)
 
   const nameRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -249,8 +285,24 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
     setOutCustom('')
   }
 
+  const toggleTool = (tool: string) => {
+    setAllowedTools((prev) => {
+      const isOn = prev.includes(tool)
+      // Edit/Write without Read access has no realistic path to succeed — don't allow that combination.
+      if (isOn) {
+        if (tool === 'Read' && (prev.includes('Write') || prev.includes('Edit'))) return prev
+        return prev.filter((t) => t !== tool)
+      }
+      const next = [...prev, tool]
+      if ((tool === 'Write' || tool === 'Edit') && !next.includes('Read')) next.push('Read')
+      return next
+    })
+    setAgreementAccepted(false)
+  }
+
   const handleArtifactAttach = (data: { skillMeta?: { name?: string; description?: string }; cachedFiles: CachedFile[]; entryPointPath: string; artifactName: string }) => {
     setArtifactData(data)
+    setArtifactReattached(true)
     setShowArtifactPopup(false)
 
     // Name: prefill only if empty (user-authored)
@@ -278,6 +330,10 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
     if (!runtime) errs.runtime = 'Runtime is required'
     if (!sourceType) errs.sourceType = 'Source Type is required'
     if (sourceType === 'Local' && !artifactData) errs.artifact = 'Artifact is required for Local blocks'
+    if (sourceType === 'Local' && executionType === 'Agentic') {
+      if (allowedTools.length === 0) errs.allowedTools = 'Select at least one tool for an Agentic block'
+      if (!agreementAccepted) errs.agreement = 'Execution agreement must be accepted'
+    }
     if (sourceType === 'Marketplace' || sourceType === 'CDF') {
       errs.sourceType = 'Coming soon'
       setErrors(errs)
@@ -290,26 +346,39 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
     setErrors({})
     setSubmitting(true)
     try {
-      const newBlock = await createBlock({
+      const isAgentic = sourceType === 'Local' && executionType === 'Agentic'
+      // In edit mode, only send artifact fields if the author actively re-attached during
+      // this session — sending the display-only placeholder would overwrite real cached
+      // file content with blanks.
+      const sendArtifact = !isEditing || artifactReattached
+      const payload = {
         name: name.trim(),
         role,
         description: description.trim(),
         sourceType,
         agentRuntime: runtime,
-        artifactFormat: 'Skill',
-        artifactName: artifactData?.artifactName,
-        cachedFiles: artifactData?.cachedFiles,
-        entryPointPath: artifactData?.entryPointPath,
+        artifactFormat: 'Skill' as ArtifactFormat,
+        artifactName: sendArtifact ? artifactData?.artifactName : undefined,
+        cachedFiles: sendArtifact ? artifactData?.cachedFiles : undefined,
+        entryPointPath: sendArtifact ? artifactData?.entryPointPath : undefined,
         tags,
         contextRequirements: ctxSelected,
         outputSchema: outSelected,
-      })
-      toast.success('Block created')
-      onCreated(newBlock)
+        visibility: sourceType === 'Local' ? visibility : undefined,
+        executionType: sourceType === 'Local' ? executionType : undefined,
+        allowedTools: isAgentic ? allowedTools : undefined,
+        defaultTimeoutSeconds,
+        executionAgreementAccepted: isAgentic ? agreementAccepted : undefined,
+      }
+      const savedBlock = isEditing
+        ? await updateBlock(existingBlock!.id, payload)
+        : await createBlock(payload)
+      toast.success(isEditing ? 'Block updated' : 'Block created')
+      onCreated(savedBlock)
       onClose()
     } catch (err) {
-      console.error('Block creation error:', err)
-      toast.error('Failed to create block')
+      console.error('Block save error:', err)
+      toast.error(isEditing ? 'Failed to update block' : 'Failed to create block')
     } finally {
       setSubmitting(false)
     }
@@ -322,7 +391,8 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
     sourceType &&
     (sourceType !== 'Local' || artifactData) &&
     sourceType !== 'Marketplace' &&
-    sourceType !== 'CDF'
+    sourceType !== 'CDF' &&
+    (sourceType !== 'Local' || executionType !== 'Agentic' || (allowedTools.length > 0 && agreementAccepted))
   )
 
   const runtimeIsAxon = sourceType === 'Axon'
@@ -352,7 +422,7 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
             flexShrink: 0,
           }}
         >
-          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--axon-t1)' }}>Create Block</span>
+          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--axon-t1)' }}>{isEditing ? 'Edit Block' : 'Create Block'}</span>
           <button
             type="button"
             onClick={onClose}
@@ -495,6 +565,7 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
             </label>
             <select
               value={sourceType}
+              disabled={isEditing}
               onChange={(e) => {
                 const newSourceType = e.target.value as SourceType
                 setSourceType(newSourceType)
@@ -504,9 +575,12 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
                   setDescriptionEditable(false)
                   setDescriptionFromArtifact(false)
                   setArtifactData(null)
+                  setExecutionType('Prompt')
+                  setAllowedTools([])
+                  setAgreementAccepted(false)
                 }
               }}
-              style={inp}
+              style={{ ...inp, ...(isEditing ? { opacity: 0.6, cursor: 'not-allowed' } : {}) }}
             >
               {SOURCE_TYPES.filter(s => s !== 'Axon').map((s) => (
                 <option key={s} value={s}>
@@ -515,6 +589,7 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
               ))}
             </select>
             {errors.sourceType && <span style={{ ...helper, color: '#ef4444' }}>{errors.sourceType}</span>}
+            {isEditing && <span style={helper}>Source Type can't be changed after creation</span>}
           </div>
 
           {/* ── Artifact ──────────────────────────────────────────────── */}
@@ -588,6 +663,152 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
                 Browse and attach from {sourceType} coming in a future release
               </div>
             </div>
+          )}
+
+          {sourceType === 'Local' && (
+            <>
+              <div style={divider} />
+
+              {/* ── Execution Profile ──────────────────────────────────── */}
+              <div style={secHdr}>Execution Profile</div>
+              <div style={{ marginBottom: 12 }}>
+                <label style={lbl}>Visibility</label>
+                <select value={visibility} onChange={(e) => setVisibility(e.target.value as BuildingBlockVisibility)} style={inp}>
+                  {VISIBILITY_OPTIONS.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+                <span style={helper}>
+                  {visibility === 'Personal'
+                    ? 'Only you can see and run this block.'
+                    : visibility === 'Team'
+                      ? 'Visible to your team.'
+                      : 'Visible to everyone in the organisation.'}
+                </span>
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <label style={lbl}>Execution Type</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 10 }}>
+                  {EXECUTION_TYPES.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => {
+                        setExecutionType(t)
+                        if (t === 'Prompt') {
+                          setAllowedTools([])
+                          setAgreementAccepted(false)
+                        }
+                      }}
+                      style={{
+                        padding: '8px 0',
+                        borderRadius: 7,
+                        border: executionType === t ? '2px solid var(--axon-nexus)' : '1px solid var(--axon-border)',
+                        background: executionType === t ? 'rgba(111,95,232,0.15)' : 'var(--axon-bg4)',
+                        color: executionType === t ? 'var(--axon-nexus2)' : 'var(--axon-t3)',
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+                <span style={helper}>
+                  {executionType === 'Prompt'
+                    ? 'A single text-only completion call — no file or system access.'
+                    : 'Runs via the Claude Agent SDK with the tools selected below.'}
+                </span>
+              </div>
+
+              {executionType === 'Agentic' && (
+                <div style={{ marginBottom: 12 }}>
+                  <label style={lbl}>
+                    Allowed Tools <span style={{ color: '#ef4444' }}>*</span>
+                  </label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {AGENTIC_TOOL_OPTIONS.map((tool) => {
+                      const on = allowedTools.includes(tool)
+                      const lockedOn = tool === 'Read' && (allowedTools.includes('Write') || allowedTools.includes('Edit'))
+                      return (
+                        <button
+                          key={tool}
+                          type="button"
+                          onClick={() => toggleTool(tool)}
+                          title={lockedOn ? 'Required because Write/Edit is selected' : undefined}
+                          style={{
+                            padding: '5px 11px',
+                            borderRadius: 12,
+                            fontSize: 12,
+                            cursor: 'pointer',
+                            border: `1px solid ${on ? '#22d3b8' : 'var(--axon-border2)'}`,
+                            background: on ? 'rgba(34,211,184,0.15)' : 'var(--axon-bg4)',
+                            color: on ? '#22d3b8' : 'var(--axon-t3)',
+                            fontWeight: on ? 600 : 400,
+                          }}
+                        >
+                          {tool}
+                          {lockedOn ? ' 🔒' : ''}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {errors.allowedTools && <span style={{ ...helper, color: '#ef4444' }}>{errors.allowedTools}</span>}
+                </div>
+              )}
+
+              <div style={{ marginBottom: 12 }}>
+                <label style={lbl}>Default Timeout (seconds)</label>
+                <input
+                  type="number"
+                  min={1}
+                  style={inp}
+                  value={defaultTimeoutSeconds}
+                  onChange={(e) => setDefaultTimeoutSeconds(Number(e.target.value) || 0)}
+                />
+                <span style={helper}>Prefills the node timeout when this block is dragged onto a pipeline canvas.</span>
+              </div>
+
+              {executionType === 'Agentic' && (
+                <>
+                  <div style={divider} />
+                  <div style={secHdr}>Execution Agreement</div>
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      padding: '10px 12px',
+                      borderRadius: 6,
+                      background: 'rgba(245,158,11,0.08)',
+                      border: '1px solid rgba(245,158,11,0.2)',
+                    }}
+                  >
+                    <div style={{ fontSize: 12, color: 'var(--axon-t1)', marginBottom: 6, fontWeight: 500 }}>
+                      This block will run autonomously with the following capabilities:
+                    </div>
+                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: 'var(--axon-t2)', lineHeight: 1.6 }}>
+                      {allowedTools.length === 0 && <li>No tools selected yet</li>}
+                      {allowedTools.map((tool) => (
+                        <li key={tool}>{AGREEMENT_CLAUSES[tool as keyof typeof AGREEMENT_CLAUSES] ?? tool}</li>
+                      ))}
+                    </ul>
+                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10, fontSize: 12, color: 'var(--axon-t1)', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={agreementAccepted}
+                        onChange={(e) => setAgreementAccepted(e.target.checked)}
+                        style={{ marginTop: 2 }}
+                      />
+                      I understand and accept that this block can act on the repository as described above.
+                    </label>
+                    {errors.agreement && <span style={{ ...helper, color: '#ef4444' }}>{errors.agreement}</span>}
+                  </div>
+                </>
+              )}
+            </>
           )}
 
           <div style={divider} />
@@ -780,7 +1001,7 @@ export default function CreateBlockForm({ onClose, onCreated }: CreateBlockFormP
               transition: 'background 0.15s',
             }}
           >
-            {submitting ? 'Creating…' : 'Create Block'}
+            {submitting ? (isEditing ? 'Saving…' : 'Creating…') : isEditing ? 'Save Changes' : 'Create Block'}
           </button>
         </div>
       </div>

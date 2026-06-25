@@ -1,5 +1,6 @@
 import { app, BrowserWindow, session, dialog, ipcMain, shell } from 'electron'
 import path from 'path'
+import { execFile } from 'child_process'
 import { registerAuthHandlers } from './ipc/auth'
 import { registerSettingsHandlers } from './ipc/settings'
 import { registerWorkspaceHandlers } from './ipc/workspace'
@@ -7,6 +8,7 @@ import { registerGitHandlers } from './ipc/git'
 import { registerExecutorHandlers } from './ipc/executor'
 import { registerClaudeHandlers } from './ipc/claude'
 import { registerSystemHandlers } from './ipc/system'
+import { initClaudeKey, registerClaudeKeyHandlers } from './ipc/claudeKeyStore'
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -79,7 +81,7 @@ app.on('second-instance', () => {
   }
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   registerAuthHandlers()
   registerSettingsHandlers()
   registerWorkspaceHandlers()
@@ -87,11 +89,21 @@ app.whenReady().then(() => {
   registerExecutorHandlers()
   registerClaudeHandlers()
   registerSystemHandlers()
+  registerClaudeKeyHandlers()
+  await initClaudeKey()
 
   ipcMain.handle('dialog:openDirectory', async () => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openDirectory'],
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+
+  ipcMain.handle('dialog:openFile', async () => {
+    if (!mainWindow) return null
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
     })
     return result.canceled ? null : result.filePaths[0]
   })
@@ -102,6 +114,40 @@ app.whenReady().then(() => {
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('shell:openPath', async (_event, path: string) => {
+    try {
+      // shell.openPath resolves to an error STRING on failure (e.g. path doesn't exist),
+      // not a rejected promise — unlike most Electron APIs.
+      const error = await shell.openPath(path)
+      return error ? { success: false, error } : { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('shell:openInVSCode', async (_event, path: string) => {
+    try {
+      // Prefer the `code` CLI (correctly opens the folder as a VS Code *workspace*,
+      // not a single-file view) — falls back to the vscode:// URI handler, which VS
+      // Code's installer registers by default, if the CLI isn't on PATH.
+      // -n/--new-window: without this, `code <path>` reuses whatever VS Code window is
+      // already open and replaces ITS folder — e.g. opening a delivery's workspace while
+      // editing axon-desktop itself would swap that window away from axon-desktop
+      // entirely. A delivery's workspace must always open as its own separate window.
+      await new Promise<void>((resolve, reject) => {
+        execFile('code', ['-n', path], (err) => (err ? reject(err) : resolve()))
+      })
+      return { success: true }
+    } catch {
+      try {
+        await shell.openExternal(`vscode://file/${path.replace(/\\/g, '/')}`)
+        return { success: true }
+      } catch (err) {
+        return { success: false, error: String(err) }
+      }
     }
   })
 

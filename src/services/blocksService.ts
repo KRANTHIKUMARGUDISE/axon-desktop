@@ -1,5 +1,5 @@
 import client from './apiClient'
-import type { BuildingBlock, SourceType, AgentRuntime, ArtifactFormat } from '../types'
+import type { BuildingBlock, SourceType, AgentRuntime, ArtifactFormat, ExecutionType, BuildingBlockVisibility } from '../types'
 import type { CachedFile } from '../utils/fileHandler'
 
 export interface BlockFilter {
@@ -22,6 +22,11 @@ export interface CreateBlockRequest {
   tags: string[]
   contextRequirements?: string[]
   outputSchema?: string[]
+  visibility?: BuildingBlockVisibility
+  executionType?: ExecutionType
+  allowedTools?: string[]
+  defaultTimeoutSeconds?: number
+  executionAgreementAccepted?: boolean
 }
 
 export interface MarketplaceImportRequest {

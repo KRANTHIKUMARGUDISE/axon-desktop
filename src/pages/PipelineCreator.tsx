@@ -119,6 +119,7 @@ function FlowCanvas({
       edgeTypes={edgeTypes}
       deleteKeyCode="Delete"
       fitView
+      fitViewOptions={{ maxZoom: 0.85, padding: 0.25 }}
       proOptions={{ hideAttribution: true }}
       style={{ background: '#0f1117' }}
     >

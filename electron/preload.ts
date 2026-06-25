@@ -46,11 +46,18 @@ contextBridge.exposeInMainWorld('axon', {
   claude: {
     call: (prompt: string, apiKey: string) => ipcRenderer.invoke('claude:call', prompt, apiKey),
   },
+  claudeKey: {
+    getStatus: () => ipcRenderer.invoke('claudeKey:status'),
+    set: (value: string) => ipcRenderer.invoke('claudeKey:set', value),
+  },
   dialog: {
     openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+    openFile: () => ipcRenderer.invoke('dialog:openFile'),
   },
   shell: {
     openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+    openPath: (path: string) => ipcRenderer.invoke('shell:openPath', path),
+    openInVSCode: (path: string) => ipcRenderer.invoke('shell:openInVSCode', path),
   },
   system: {
     getInfo: () => ipcRenderer.invoke('system:getInfo'),

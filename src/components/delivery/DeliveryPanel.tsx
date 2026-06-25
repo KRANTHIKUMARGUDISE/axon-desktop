@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { toast } from 'sonner'
+import { FolderOpen, Code2, Copy } from 'lucide-react'
 import { useDelivery } from '@/hooks/useDeliveries'
 import type { DeliveryStep } from '@/types'
 
@@ -88,6 +90,24 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
   const [tab, setTab] = useState<'overview' | 'timeline' | 'logs'>('overview')
 
   const tabs = ['overview', 'timeline', 'logs'] as const
+
+  const handleOpenWorkspace = async () => {
+    if (!delivery?.workspacePath) return
+    const res = await window.axon.shell.openPath(delivery.workspacePath)
+    if (!res.success) toast.error(res.error ? `Failed to open folder: ${res.error}` : 'Failed to open folder')
+  }
+
+  const handleOpenInVSCode = async () => {
+    if (!delivery?.workspacePath) return
+    const res = await window.axon.shell.openInVSCode(delivery.workspacePath)
+    if (!res.success) toast.error(res.error ? `Failed to open VS Code: ${res.error}` : 'Failed to open VS Code')
+  }
+
+  const handleCopyRepoLink = async () => {
+    if (!delivery?.repoUrl) return
+    await navigator.clipboard.writeText(delivery.repoUrl)
+    toast.success('Repo link copied')
+  }
 
   return (
     <div style={{
@@ -223,10 +243,59 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
                   ].map(([label, value]) => (
                     <div key={label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0' }}>
                       <span style={{ fontSize: 11, color: 'var(--axon-t3)' }}>{label}</span>
-                      <span style={{ fontSize: 11, fontWeight: 500, color: 'var(--axon-t2)' }}>{value}</span>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <span style={{
+                          fontSize: 11, fontWeight: 500, color: 'var(--axon-t2)',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }} title={typeof value === 'string' ? value : undefined}>
+                          {value}
+                        </span>
+                        {label === 'Repo' && delivery.repoUrl && (
+                          <button
+                            onClick={handleCopyRepoLink}
+                            title="Copy repository link"
+                            style={{
+                              width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              borderRadius: 4, cursor: 'pointer', border: '1px solid var(--axon-border2)',
+                              background: 'var(--axon-bg3)', color: 'var(--axon-t2)', flexShrink: 0, padding: 0,
+                            }}
+                          >
+                            <Copy size={11} />
+                          </button>
+                        )}
+                      </span>
                     </div>
                   ))}
                 </div>
+
+                {delivery.workspacePath && (
+                  <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                    <button
+                      onClick={handleOpenWorkspace}
+                      title="Open workspace folder in Explorer"
+                      style={{
+                        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                        padding: '6px 0', borderRadius: 6, fontSize: 10.5, fontWeight: 600,
+                        cursor: 'pointer', border: '1px solid var(--axon-border2)',
+                        background: 'var(--axon-bg3)', color: 'var(--axon-t2)', fontFamily: 'inherit',
+                      }}
+                    >
+                      <FolderOpen size={12} /> Explorer
+                    </button>
+                    <button
+                      onClick={handleOpenInVSCode}
+                      title="Open workspace folder in VS Code"
+                      style={{
+                        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                        padding: '6px 0', borderRadius: 6, fontSize: 10.5, fontWeight: 600,
+                        cursor: 'pointer', border: '1px solid var(--axon-border2)',
+                        background: 'var(--axon-bg3)', color: 'var(--axon-t2)', fontFamily: 'inherit',
+                      }}
+                    >
+                      <Code2 size={12} /> VS Code
+                    </button>
+                  </div>
+                )}
               </>
             )}
           </div>
