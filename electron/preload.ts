@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('axon', {
   executor: {
     start: (deliveryId: string) => ipcRenderer.invoke('executor:start', deliveryId),
     resume: (deliveryId: string) => ipcRenderer.invoke('executor:resume', deliveryId),
+    previewResume: (deliveryId: string) => ipcRenderer.invoke('executor:previewResume', deliveryId),
     cancel: (deliveryId: string) => ipcRenderer.invoke('executor:cancel', deliveryId),
     onProgress: (callback: (event: Electron.IpcRendererEvent, data: unknown) => void) =>
       ipcRenderer.on('execution:progress', callback),

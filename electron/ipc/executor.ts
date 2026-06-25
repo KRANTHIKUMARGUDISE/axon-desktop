@@ -35,6 +35,7 @@ async function runAgentForBlock(
     workspacePath: string
     effectiveTools: string[]
     timeoutSeconds: number
+    externalSignal?: AbortSignal
   },
 ): Promise<AgentOutput> {
   const apiKey = credentials[runtime] ?? ''
@@ -264,7 +265,7 @@ interface DeliveryFromApi {
   storeFullContext?: boolean
   currentNodeId?: string
   pipelineSnapshot?: PipelineSnapshot
-  steps: Array<{ nodeId: string; blockName: string }>
+  steps: Array<{ nodeId: string; blockName: string; status: string; output?: { result?: Record<string, unknown> } }>
   inputs?: Record<string, unknown>
   jobNumber: number
   branch?: string | null
@@ -295,6 +296,14 @@ interface ExecutionContext {
   // would have two runStepLoop invocations mutating the same ctx.flatResults/
   // stepResults concurrently and double-executing the resumed node.
   isLoopActive: boolean
+  // Lives for the whole delivery (created once in startDeliveryInner, never replaced on
+  // resume). cancelDelivery calls .abort() on this directly — isCancelled alone is only
+  // checked at the TOP of runStepLoop's while loop, so it does nothing while a step's
+  // agent call is actually in flight (the common case — a real Agentic run can take
+  // minutes). This signal is threaded into runAgentForBlock so the in-flight SDK/fetch
+  // call itself gets interrupted immediately instead of running to completion regardless
+  // of Stop being clicked.
+  abortController: AbortController
 }
 
 export interface ExecutionProgress {
@@ -368,6 +377,59 @@ function nextNode(currentId: string, nodes: PipelineNode[], edges: PipelineEdge[
   return nodes.find((n) => n.id === edge.targetNodeId)
 }
 
+// Derives the true resume point by walking the pipeline graph from the start and finding
+// the first node WITHOUT a Completed step record — deliberately NOT trusting
+// delivery.currentNodeId, which is only ever patched when pausing at a gate or on
+// failure, never advanced during ordinary step-to-step progress. A delivery cancelled (or
+// the app closed) mid-pipeline, well past the last gate, leaves currentNodeId stuck
+// pointing at that old gate even though later steps completed successfully afterward —
+// confirmed in practice (KVOICE-1100, job #49: currentNodeId stuck at gate1's id while
+// code-implementor, two nodes downstream, shows Completed with real output).
+function resolveResumeNode(
+  nodes: PipelineNode[],
+  edges: PipelineEdge[],
+  steps: DeliveryFromApi['steps'],
+): PipelineNode | undefined {
+  return resolvePipelineProgress(nodes, edges, steps).resumeNode
+}
+
+// Richer version of the same walk — also reports the last node that actually completed,
+// for previewResume's confirmation UI ("this will resume after X, at Y").
+function resolvePipelineProgress(
+  nodes: PipelineNode[],
+  edges: PipelineEdge[],
+  steps: DeliveryFromApi['steps'],
+): { lastCompletedNode?: PipelineNode; resumeNode?: PipelineNode } {
+  const completedNodeIds = new Set(steps.filter((s) => s.status === 'Completed').map((s) => s.nodeId))
+  let lastCompletedNode: PipelineNode | undefined
+  let node = findStartNode(nodes, edges)
+  while (node && completedNodeIds.has(node.id)) {
+    lastCompletedNode = node
+    node = nextNode(node.id, nodes, edges)
+  }
+  return { lastCompletedNode, resumeNode: node }
+}
+
+// Rebuilds the cross-step result pool an in-memory ExecutionContext would normally have
+// accumulated live — needed when reconstructing a context from scratch (no in-memory ctx
+// survived a cancel or app restart) rather than carrying one forward across a pause.
+// Pulled from each Completed step's output.result, which is ALWAYS persisted regardless
+// of storeFullContext (that flag only gates the separate, debug-only input context
+// snapshot — see CLAUDE.md/conversation history for why these are not the same thing).
+function reconstructFlatResults(steps: DeliveryFromApi['steps']): {
+  stepResults: Record<string, unknown>
+  flatResults: Record<string, unknown>
+} {
+  const stepResults: Record<string, unknown> = {}
+  let flatResults: Record<string, unknown> = {}
+  for (const step of steps) {
+    if (step.status !== 'Completed' || !step.output?.result) continue
+    stepResults[step.nodeId] = step.output.result
+    flatResults = { ...flatResults, ...step.output.result }
+  }
+  return { stepResults, flatResults }
+}
+
 async function runStepLoop(
   ctx: ExecutionContext,
   startNodeId: string,
@@ -438,6 +500,7 @@ async function runStepLoop(
             workspacePath: ctx.workspacePath,
             effectiveTools: resolveEffectiveTools(block),
             timeoutSeconds: node.timeoutSeconds ?? block.defaultTimeoutSeconds ?? 120,
+            externalSignal: ctx.abortController.signal,
           }
         : undefined
 
@@ -457,6 +520,18 @@ async function runStepLoop(
       )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      // The error thrown here can be a direct CONSEQUENCE of cancelDelivery's abort() —
+      // don't let that get persisted/reported as a genuine failure and overwrite the
+      // Cancelled status cancelDelivery already patched. isCancelled is checked, not the
+      // error message, since different runtimes surface an abort differently (a thrown
+      // AbortError, a rejected fetch, etc.) and matching text would be fragile.
+      if (ctx.isCancelled) {
+        sendProgress({ deliveryId: ctx.deliveryId, type: 'cancelled', nodeId: node.id })
+        await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Cancelled' }, token, baseUrl)
+          .catch((patchErr) => console.warn(`Failed to persist cancelled status: ${patchErr}`))
+        activeExecutions.delete(ctx.deliveryId)
+        return
+      }
       sendProgress({ deliveryId: ctx.deliveryId, type: 'step_failed', nodeId: node.id, blockName: node.label, message })
       await apiPost(
         `/api/deliveries/${ctx.deliveryId}/steps`,
@@ -475,6 +550,19 @@ async function runStepLoop(
         baseUrl,
       )
       await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Failed', currentNodeId: node.id }, token, baseUrl)
+      activeExecutions.delete(ctx.deliveryId)
+      return
+    }
+
+    // Same reasoning as the catch block above — the agent call can return a normal
+    // (non-throwing) `status: 'failed'` AgentOutput as the direct result of being
+    // aborted (e.g. claudeAgentic.ts's graceful no-result-message path), which must not
+    // get persisted/reported as a genuine failure and overwrite the Cancelled status
+    // cancelDelivery already patched.
+    if (ctx.isCancelled) {
+      sendProgress({ deliveryId: ctx.deliveryId, type: 'cancelled', nodeId: node.id })
+      await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Cancelled' }, token, baseUrl)
+        .catch((err) => console.warn(`Failed to persist cancelled status: ${err}`))
       activeExecutions.delete(ctx.deliveryId)
       return
     }
@@ -531,6 +619,15 @@ async function runStepLoop(
     }
 
     sendProgress({ deliveryId: ctx.deliveryId, type: 'step_completed', nodeId: node.id, blockName: node.label, output })
+    // Advance currentNodeId on ordinary progress too, not just at a pause/failure —
+    // otherwise it goes stale the moment a delivery runs past its last gate without
+    // pausing again, and resolveResumeNode's doc comment becomes the only thing keeping
+    // resume correct. Keep both: this field stays meaningful for anything that reads it
+    // directly (display, support/debugging), resolveResumeNode stays the source of truth
+    // resume itself relies on.
+    await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Running', currentNodeId: node.id }, token, baseUrl)
+      .catch((err) => console.warn(`Failed to advance currentNodeId: ${err}`))
+    ctx.delivery.currentNodeId = node.id
     currentNode = nextNode(node.id, nodes, edges)
   }
 
@@ -754,6 +851,7 @@ async function startDeliveryInner(deliveryId: string): Promise<{ success: boolea
     stepResults: {},
     flatResults: {},
     isLoopActive: false,
+    abortController: new AbortController(),
   }
   activeExecutions.set(deliveryId, ctx)
 
@@ -769,6 +867,93 @@ async function startDeliveryInner(deliveryId: string): Promise<{ success: boolea
   return { success: true }
 }
 
+export interface ResumePreview {
+  resumeNodeId: string
+  resumeNodeLabel: string
+  resumeNodeRole?: string
+  lastCompletedNodeLabel?: string
+  // True when the resume node already has a step record (Running/Failed/Cancelled, never
+  // Completed — if it were Completed, resolvePipelineProgress would have walked past it).
+  // Means this exact node was attempted before and didn't finish cleanly — if it's an
+  // Execution/Agentic block with Write/Edit/Bash, it may have left partial, uncommitted
+  // changes in the workspace that resuming will NOT roll back; it just runs again on top
+  // of whatever's already there.
+  hasPriorAttempt: boolean
+  reconstructedContextKeys: string[]
+  workspacePath?: string
+  branch?: string
+  allNodesCompleted: boolean
+}
+
+// Read-only — computes what resumeDelivery WOULD do without doing any of it (no
+// activeExecutions entry, no status patch, no step started). Lets the UI show the user
+// exactly where they're resuming from and what context it'll carry forward, and warn
+// about partial workspace changes, before they commit to it.
+async function previewResume(deliveryId: string): Promise<{ success: boolean; error?: string; preview?: ResumePreview }> {
+  const baseUrl = (store.get('backendUrl') as string) || 'http://localhost:3000'
+  const token = await readSecure('axon-access-token')
+
+  let delivery: DeliveryFromApi
+  try {
+    delivery = await apiGet<DeliveryFromApi>(`/api/deliveries/${deliveryId}`, token, baseUrl)
+  } catch (err) {
+    return { success: false, error: `Failed to fetch delivery: ${err}` }
+  }
+
+  let nodes: PipelineNode[] = delivery.pipelineSnapshot?.nodes ?? []
+  let edges: PipelineEdge[] = delivery.pipelineSnapshot?.edges ?? []
+  if (!nodes.length) {
+    try {
+      const pipeline = await apiGet<{ nodes: PipelineNode[]; edges: PipelineEdge[] }>(
+        `/api/pipelines/${delivery.pipelineId}`,
+        token,
+        baseUrl,
+      )
+      nodes = pipeline.nodes
+      edges = pipeline.edges
+    } catch {
+      return { success: false, error: 'Could not load pipeline nodes' }
+    }
+  }
+
+  const { lastCompletedNode, resumeNode } = resolvePipelineProgress(nodes, edges, delivery.steps)
+  const { flatResults } = reconstructFlatResults(delivery.steps)
+
+  if (!resumeNode) {
+    return {
+      success: true,
+      preview: {
+        resumeNodeId: '',
+        resumeNodeLabel: '',
+        lastCompletedNodeLabel: lastCompletedNode?.label,
+        hasPriorAttempt: false,
+        reconstructedContextKeys: Object.keys(flatResults),
+        workspacePath: delivery.workspacePath ?? undefined,
+        branch: delivery.branch ?? undefined,
+        allNodesCompleted: true,
+      },
+    }
+  }
+
+  const { blocks } = await fetchBlocks([resumeNode.blockId], token, baseUrl)
+  const hasPriorAttempt = delivery.steps.some((s) => s.nodeId === resumeNode.id)
+
+  return {
+    success: true,
+    preview: {
+      resumeNodeId: resumeNode.id,
+      resumeNodeLabel: resumeNode.label,
+      resumeNodeRole: blocks.get(resumeNode.blockId)?.role,
+      lastCompletedNodeLabel: lastCompletedNode?.label,
+      hasPriorAttempt,
+      reconstructedContextKeys: Object.keys(flatResults),
+      workspacePath: delivery.workspacePath ?? undefined,
+      branch: delivery.branch ?? undefined,
+      allNodesCompleted: false,
+    },
+  }
+}
+
 async function resumeDelivery(deliveryId: string): Promise<{ success: boolean; error?: string }> {
   const baseUrl = (store.get('backendUrl') as string) || 'http://localhost:3000'
   const token = await readSecure('axon-access-token')
@@ -780,19 +965,22 @@ async function resumeDelivery(deliveryId: string): Promise<{ success: boolean; e
     return { success: false, error: `Failed to fetch delivery: ${err}` }
   }
 
-  if (delivery.status !== 'Paused') {
-    return { success: false, error: `Delivery is ${delivery.status}, not paused` }
+  // Cancelled is resumable too, not just Paused — continuing a delivery past wherever it
+  // actually stopped (which may be well past the last gate, not just "at" one) is a real
+  // workflow: a user cancels mid-step, or just closes AXON overnight while sitting at a
+  // gate (which also wipes the in-memory context below, identically to a cancel).
+  if (delivery.status !== 'Paused' && delivery.status !== 'Cancelled') {
+    return { success: false, error: `Delivery is ${delivery.status}, cannot resume` }
   }
 
-  const ctx = activeExecutions.get(deliveryId)
-  if (!ctx) return { success: false, error: 'No active execution context — restart delivery' }
+  let ctx = activeExecutions.get(deliveryId)
   // Guards against a double-fired resume (e.g. a double-click on Approve) re-entering
   // the loop for this same ctx while a previous resume is still actively running —
   // see ExecutionContext.isLoopActive's doc comment for why that would be unsafe.
-  if (ctx.isLoopActive) return { success: false, error: 'Delivery is already resuming/running' }
+  if (ctx?.isLoopActive) return { success: false, error: 'Delivery is already resuming/running' }
 
-  let nodes: PipelineNode[] = delivery.pipelineSnapshot?.nodes ?? ctx.delivery.pipelineSnapshot?.nodes ?? []
-  let edges: PipelineEdge[] = delivery.pipelineSnapshot?.edges ?? ctx.delivery.pipelineSnapshot?.edges ?? []
+  let nodes: PipelineNode[] = delivery.pipelineSnapshot?.nodes ?? ctx?.delivery.pipelineSnapshot?.nodes ?? []
+  let edges: PipelineEdge[] = delivery.pipelineSnapshot?.edges ?? ctx?.delivery.pipelineSnapshot?.edges ?? []
 
   if (!nodes.length) {
     try {
@@ -808,28 +996,71 @@ async function resumeDelivery(deliveryId: string): Promise<{ success: boolean; e
     }
   }
 
-  const pausedNodeId = ctx.delivery.currentNodeId
-  if (!pausedNodeId) return { success: false, error: 'No paused node id in context' }
-
-  const resumeNode = nextNode(pausedNodeId, nodes, edges)
+  // Deliberately NOT delivery.currentNodeId — see resolveResumeNode's doc comment for why
+  // that field can't be trusted here (only patched at a pause/failure, never advanced
+  // during ordinary progress, so it can point well behind the real last-completed step).
+  const resumeNode = resolveResumeNode(nodes, edges, delivery.steps)
   if (!resumeNode) {
-    // Was the last node — mark complete
-    sendProgress({ deliveryId, type: 'completed', nodeId: pausedNodeId })
+    // Every node already has a Completed record — nothing left to resume into.
+    sendProgress({ deliveryId, type: 'completed', nodeId: '' })
     await apiPatch(`/api/deliveries/${deliveryId}/status`, { status: 'Completed' }, token, baseUrl)
     activeExecutions.delete(deliveryId)
     return { success: true }
   }
 
-  ctx.isCancelled = false
+  if (!ctx) {
+    // No in-memory context survived (cancelled, or AXON was closed and reopened since) —
+    // rebuild one from the persisted delivery record instead of failing outright.
+    if (!delivery.workspacePath) {
+      return { success: false, error: 'No workspace path recorded for this delivery — cannot resume without restarting it' }
+    }
+
+    const credentials: Record<string, string> = { Claude: getClaudeKey() }
+    for (const [runtime, secureKey] of Object.entries(CREDENTIAL_KEY_BY_RUNTIME)) {
+      credentials[runtime] = (await readSecure(secureKey)) ?? ''
+    }
+    const gitToken = await readSecure('git-token')
+
+    const blockIds = nodes.map((n) => n.blockId)
+    const { blocks, errors: blockErrors } = await fetchBlocks(blockIds, token, baseUrl)
+    if (blocks.size === 0) {
+      return { success: false, error: `Could not load any blocks for the pipeline: ${blockErrors.join('; ')}` }
+    }
+
+    // Rebuilds the cross-step result pool a live context would have accumulated as it
+    // ran — see reconstructFlatResults' doc comment for why this works regardless of
+    // storeFullContext.
+    const { stepResults, flatResults } = reconstructFlatResults(delivery.steps)
+
+    ctx = {
+      deliveryId,
+      delivery,
+      workspacePath: delivery.workspacePath,
+      credentials,
+      gitToken: gitToken ?? undefined,
+      branch: delivery.branch ?? undefined,
+      isCancelled: false,
+      blocks,
+      stepResults,
+      flatResults,
+      isLoopActive: false,
+      abortController: new AbortController(),
+    }
+    activeExecutions.set(deliveryId, ctx)
+  } else {
+    ctx.isCancelled = false
+  }
+
   await apiPatch(`/api/deliveries/${deliveryId}/status`, { status: 'Running' }, token, baseUrl)
 
-  ctx.isLoopActive = true
-  runStepLoop(ctx, resumeNode.id, nodes, edges, baseUrl, token)
+  const resumedCtx = ctx
+  resumedCtx.isLoopActive = true
+  runStepLoop(resumedCtx, resumeNode.id, nodes, edges, baseUrl, token)
     .catch((err) => {
       sendProgress({ deliveryId, type: 'failed', nodeId: '', message: String(err) })
       activeExecutions.delete(deliveryId)
     })
-    .finally(() => { ctx.isLoopActive = false })
+    .finally(() => { resumedCtx.isLoopActive = false })
 
   return { success: true }
 }
@@ -838,7 +1069,18 @@ async function cancelDelivery(deliveryId: string): Promise<{ success: boolean; e
   const ctx = activeExecutions.get(deliveryId)
   if (ctx) {
     ctx.isCancelled = true
-    // The running loop will pick this up and update status
+    // isCancelled alone is only checked between steps — abort() interrupts whatever's
+    // actually in flight (an Agentic SDK call, a Prompt-mode fetch) right now, instead of
+    // letting it run to completion regardless of Stop being clicked.
+    ctx.abortController.abort()
+    // Patch the backend status immediately rather than waiting for the loop to unwind
+    // and notice isCancelled on its own — that could be a long wait (or never happen
+    // promptly) if the in-flight call doesn't honor the abort signal for some reason.
+    // Reopening the delivery should show Cancelled right away, not stale Running.
+    const baseUrl = (store.get('backendUrl') as string) || 'http://localhost:3000'
+    const token = await readSecure('axon-access-token')
+    await apiPatch(`/api/deliveries/${deliveryId}/status`, { status: 'Cancelled' }, token, baseUrl)
+      .catch((err) => console.warn(`Failed to persist cancelled status: ${err}`))
     return { success: true }
   }
 
@@ -856,5 +1098,6 @@ async function cancelDelivery(deliveryId: string): Promise<{ success: boolean; e
 export function registerExecutorHandlers() {
   ipcMain.handle('executor:start', (_event, deliveryId: string) => startDelivery(deliveryId))
   ipcMain.handle('executor:resume', (_event, deliveryId: string) => resumeDelivery(deliveryId))
+  ipcMain.handle('executor:previewResume', (_event, deliveryId: string) => previewResume(deliveryId))
   ipcMain.handle('executor:cancel', (_event, deliveryId: string) => cancelDelivery(deliveryId))
 }

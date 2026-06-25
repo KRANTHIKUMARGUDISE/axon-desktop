@@ -67,6 +67,10 @@ export interface AgenticStepInput {
   // allowedTools. This function does not do that resolution itself (see Part 4 task 3).
   effectiveTools: string[]
   timeoutSeconds: number
+  // Delivery-lifetime signal from executor.ts's ExecutionContext.abortController — fires
+  // when the user clicks Stop. Merged with this function's own per-step timeout abort
+  // below so either one interrupts the in-flight SDK call immediately.
+  externalSignal?: AbortSignal
 }
 
 function buildUserMessage(input: AgenticStepInput): string {
@@ -113,13 +117,19 @@ When you are done, respond with ONLY a valid JSON object (no preamble, no markdo
 }
 
 export async function runAgenticBlock(input: AgenticStepInput): Promise<AgentOutput> {
-  const { cachedDefinition, claudeApiKey, workspacePath, effectiveTools, timeoutSeconds, outputMapping } = input
+  const { cachedDefinition, claudeApiKey, workspacePath, effectiveTools, timeoutSeconds, outputMapping, externalSignal } = input
 
   const toolsUsed = new Set<string>()
   const toolsDenied = new Set<string>()
   const abortController = new AbortController()
   const timeoutMs = Math.max(1, timeoutSeconds) * 1000
   const timer = setTimeout(() => abortController.abort(), timeoutMs)
+  // The SDK call below needs a LOCAL AbortController (it calls .abort() on it for the
+  // timeout) — relay the delivery-lifetime externalSignal into it too, so a user-clicked
+  // Stop interrupts this call exactly like a timeout would, instead of only taking effect
+  // once this step finishes naturally.
+  const onExternalAbort = () => abortController.abort()
+  externalSignal?.addEventListener('abort', onExternalAbort)
 
   try {
     const { query } = await importEsm('@anthropic-ai/claude-agent-sdk')
@@ -187,26 +197,34 @@ export async function runAgenticBlock(input: AgenticStepInput): Promise<AgentOut
       return { status: 'failed', confidence: 0, summary: resultError, result: {}, errorMessage: resultError, toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied) }
     }
     if (resultText === undefined) {
-      // When the timeout's AbortController fires mid-run, the SDK's async generator can
-      // end gracefully (the `for await` loop just exits) rather than throwing — landing
-      // here instead of the catch block below. Without this check, a real timeout gets
-      // misreported as a generic "no result message", losing the actual cause.
-      const timedOut = abortController.signal.aborted
-      const message = timedOut
-        ? `Agentic execution timed out after ${timeoutSeconds}s`
-        : 'Agentic execution produced no result message'
+      // When the timeout's (or an externally-relayed Stop's) AbortController fires
+      // mid-run, the SDK's async generator can end gracefully (the `for await` loop just
+      // exits) rather than throwing — landing here instead of the catch block below.
+      // Without this check, a real timeout/cancel gets misreported as a generic
+      // "no result message", losing the actual cause.
+      const cancelled = externalSignal?.aborted === true
+      const timedOut = !cancelled && abortController.signal.aborted
+      const message = cancelled
+        ? 'Agentic execution cancelled'
+        : timedOut
+          ? `Agentic execution timed out after ${timeoutSeconds}s`
+          : 'Agentic execution produced no result message'
       return { status: 'failed', confidence: 0, summary: message, result: {}, errorMessage: message, toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied), timedOut: timedOut || undefined }
     }
 
     const normalized = normalizeAgentOutput(resultText, outputMapping)
     return { ...normalized, toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied) }
   } catch (err) {
-    const timedOut = abortController.signal.aborted
-    const message = timedOut
-      ? `Agentic execution timed out after ${timeoutSeconds}s`
-      : `Agentic execution failed: ${err instanceof Error ? err.message : String(err)}`
+    const cancelled = externalSignal?.aborted === true
+    const timedOut = !cancelled && abortController.signal.aborted
+    const message = cancelled
+      ? 'Agentic execution cancelled'
+      : timedOut
+        ? `Agentic execution timed out after ${timeoutSeconds}s`
+        : `Agentic execution failed: ${err instanceof Error ? err.message : String(err)}`
     return { status: 'failed', confidence: 0, summary: message, result: {}, errorMessage: message, toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied), timedOut: timedOut || undefined }
   } finally {
     clearTimeout(timer)
+    externalSignal?.removeEventListener('abort', onExternalAbort)
   }
 }

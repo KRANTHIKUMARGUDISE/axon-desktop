@@ -45,6 +45,37 @@ function AppRoutes() {
     return () => window.removeEventListener('axon:auth:expired', handler)
   }, [navigate])
 
+  // TEMP DIAGNOSTIC — remove once the "inputs become unfocusable during Agentic
+  // execution" issue is pinned down. Logs window focus/blur, document visibility, a
+  // periodic snapshot of the focused element, and every executor progress event (all
+  // timestamped) to the DevTools console, so a freeze can be correlated with whatever
+  // was happening in the main process at that exact moment.
+  useEffect(() => {
+    const log = (...args: unknown[]) => console.log('[diag]', new Date().toISOString(), ...args)
+    const onFocus = () => log('window focus')
+    const onBlur = () => log('window blur')
+    const onVisibility = () => log('visibilitychange', document.visibilityState)
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('blur', onBlur)
+    document.addEventListener('visibilitychange', onVisibility)
+
+    const interval = setInterval(() => {
+      const el = document.activeElement as HTMLElement | null
+      log('activeElement', el?.tagName, el?.className?.slice(0, 60) || '')
+    }, 3000)
+
+    const progressHandler = (_event: unknown, data: unknown) => log('progress', data)
+    window.axon.executor.onProgress(progressHandler)
+
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('blur', onBlur)
+      document.removeEventListener('visibilitychange', onVisibility)
+      clearInterval(interval)
+      window.axon.executor.offProgress(progressHandler)
+    }
+  }, [])
+
   if (setupComplete === null) {
     return (
       <div

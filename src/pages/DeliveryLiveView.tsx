@@ -191,6 +191,12 @@ export default function DeliveryLiveView() {
   const [localSteps, setLocalSteps] = useState<DeliveryStep[]>([])
   const [timeline, setTimeline] = useState<TimelineEvent[]>([])
   const [localStatus, setLocalStatus] = useState<string | null>(null)
+  // Live-updated from workspace_provisioned/git_prepared progress events — the backend
+  // record's own workspacePath/branch only land on the next full delivery refetch, which
+  // could be a while away (periodic poll only runs once status reads Running, and a
+  // refetch isn't otherwise triggered by these specific events).
+  const [localWorkspacePath, setLocalWorkspacePath] = useState<string | null>(null)
+  const [localBranch, setLocalBranch] = useState<string | null>(null)
   const [prUrl, setPrUrl] = useState<string | null>(null)
   const [isStarting, setIsStarting] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
@@ -212,6 +218,8 @@ export default function DeliveryLiveView() {
       setLocalSteps([])
       setTimeline([])
       setLocalStatus(null)
+      setLocalWorkspacePath(null)
+      setLocalBranch(null)
       lastProgressEventRef.current = null
       autoStartedRef.current = false
     }
@@ -394,10 +402,11 @@ export default function DeliveryLiveView() {
   const onPaneClick = useCallback(() => setSelectedNodeId(null), [])
 
   const viewFullFile = useCallback(async (relativeRef: string, title: string) => {
-    if (!delivery?.workspacePath) return
+    const wsPath = localWorkspacePath ?? delivery?.workspacePath
+    if (!wsPath) return
     try {
-      const fullPath = await window.axon.workspace.exists(delivery.workspacePath)
-        ? `${delivery.workspacePath}/${relativeRef}`.replace(/\\/g, '/')
+      const fullPath = await window.axon.workspace.exists(wsPath)
+        ? `${wsPath}/${relativeRef}`.replace(/\\/g, '/')
         : relativeRef
       const content = await window.axon.workspace.readFile(fullPath)
       setViewerData({ title, data: content })
@@ -405,7 +414,7 @@ export default function DeliveryLiveView() {
       const message = err instanceof Error ? err.message : String(err)
       toast.error(`Could not read file — is the developer's machine/workspace available? (${message})`)
     }
-  }, [delivery])
+  }, [delivery, localWorkspacePath])
 
   // Lazy-loads the field this step's main payload no longer carries inline
   // (contextSnapshot / output.result are excluded from GET /deliveries/{id} —
@@ -512,10 +521,12 @@ export default function DeliveryLiveView() {
         addTimelineEvent('WorkspaceProvisioning', 'Workspace provisioning…')
       } else if (data.type === 'workspace_provisioned') {
         addTimelineEvent('WorkspaceProvisioned', `Workspace provisioned${data.message ? ` — ${data.message}` : ''}`)
+        if (data.message) setLocalWorkspacePath(data.message)
       } else if (data.type === 'git_preparing') {
         addTimelineEvent('GitPreparing', `Preparing codebase…${data.message ? ` ${data.message}` : ''}`)
       } else if (data.type === 'git_prepared') {
         addTimelineEvent('GitPrepared', `Codebase prepared${data.message ? ` — branch ${data.message}` : ''}`)
+        if (data.message) setLocalBranch(data.message)
       } else if (data.type === 'step_started') {
         setLocalSteps((prev) =>
           prev.map((s) =>
@@ -618,7 +629,13 @@ export default function DeliveryLiveView() {
     if (!id) return
     await approveGate.mutateAsync(comment || undefined)
     setGateComment('')
+    // Same reasoning as handleStart — without this, displayStatus stays stuck on the
+    // last-fetched 'Paused' (so the Running badge/Stop button never appear) because the
+    // periodic poll only runs once delivery.status itself reads Running, which it won't
+    // until a refetch happens to land after the backend's own status flip.
+    setLocalStatus('Running')
     await window.axon.executor.resume(id)
+    queryClient.invalidateQueries({ queryKey: ['delivery', id] })
   }
 
   const handleReject = async (comment: string) => {
@@ -684,6 +701,75 @@ export default function DeliveryLiveView() {
     }
   }
 
+  // Continues THIS delivery from wherever it actually stopped (resumeDelivery derives
+  // the real resume point from which steps have a Completed record — not from
+  // currentNodeId, which only reflects the last gate/failure, not ordinary progress).
+  // Distinct from Retry, which creates a brand new delivery and re-runs everything from
+  // the start — this resumes in place, skipping already-completed steps. Previews the
+  // resolved resume point and reconstructed context first and asks for confirmation,
+  // rather than just doing it — so the user isn't guessing what "Resume" will actually do.
+  const handleResume = async () => {
+    if (!id) return
+    let previewMessage: string
+    try {
+      const previewRes = await window.axon.executor.previewResume(id)
+      if (!previewRes.success || !previewRes.preview) {
+        toast.error(previewRes.error ? `Could not preview resume: ${previewRes.error}` : 'Could not preview resume')
+        return
+      }
+      const p = previewRes.preview
+      if (p.allNodesCompleted) {
+        previewMessage = 'Every step already has a completed record — resuming will just mark this delivery Completed, nothing will run.'
+      } else {
+        const lines = [
+          p.lastCompletedNodeLabel
+            ? `Resuming after "${p.lastCompletedNodeLabel}", starting at "${p.resumeNodeLabel}".`
+            : `Resuming from the very first step: "${p.resumeNodeLabel}".`,
+          p.reconstructedContextKeys.length > 0
+            ? `Carrying forward context from prior steps: ${p.reconstructedContextKeys.join(', ')}.`
+            : `No prior step output to carry forward.`,
+        ]
+        // hasPriorAttempt means THIS exact node was already started once and didn't
+        // finish cleanly (it has a step record, just never one marked Completed) — if it
+        // can touch files (Execution/Agentic with Write/Edit/Bash), it may have left
+        // partial, uncommitted changes in the workspace already. AXON has no snapshot to
+        // roll back to; resuming just runs the node again on top of whatever's there now.
+        // Steps that already completed cleanly need no such warning — their changes are
+        // final and intentional, not partial.
+        if (p.hasPriorAttempt) {
+          lines.push(
+            `\n⚠ "${p.resumeNodeLabel}" was already attempted once and didn't finish cleanly — it may have left partial, uncommitted changes in the workspace${p.workspacePath ? ` (${p.workspacePath})` : ''}${p.branch ? ` on branch ${p.branch}` : ''}. AXON does not roll those back; resuming runs this step again on top of whatever's already there. Review the workspace first if you're unsure.`,
+          )
+        }
+        previewMessage = lines.join('\n')
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      toast.error(`Could not preview resume: ${message}`)
+      return
+    }
+
+    if (!window.confirm(`Resume this delivery?\n\n${previewMessage}`)) return
+
+    setIsStarting(true)
+    setLocalStatus('Running')
+    try {
+      const res = await window.axon.executor.resume(id)
+      if (!res.success) {
+        setLocalStatus(null)
+        toast.error(res.error ? `Failed to resume delivery: ${res.error}` : 'Failed to resume delivery')
+        return
+      }
+      queryClient.invalidateQueries({ queryKey: ['delivery', id] })
+    } catch (err) {
+      setLocalStatus(null)
+      const message = err instanceof Error ? err.message : String(err)
+      toast.error(`Failed to resume delivery: ${message}`)
+    } finally {
+      setIsStarting(false)
+    }
+  }
+
   const handleRetry = async () => {
     if (!delivery) return
     const actionLabel = delivery.status === 'Completed' ? 'Run this delivery again' : 'Retry this delivery'
@@ -708,17 +794,18 @@ export default function DeliveryLiveView() {
   }
 
   const handleClearWorkspace = async () => {
-    if (!delivery?.workspacePath) return
+    const wsPath = localWorkspacePath ?? delivery?.workspacePath
+    if (!wsPath) return
     if (displayStatus === 'Running' || displayStatus === 'Paused') {
       toast.error('Stop the delivery before clearing its workspace')
       return
     }
     if (!window.confirm(
-      `Permanently delete this workspace folder?\n\n${delivery.workspacePath}\n\nThis removes the local clone and any uncommitted changes. This cannot be undone.`,
+      `Permanently delete this workspace folder?\n\n${wsPath}\n\nThis removes the local clone and any uncommitted changes. This cannot be undone.`,
     )) return
     setIsClearingWorkspace(true)
     try {
-      const res = await window.axon.workspace.clear(delivery.workspacePath)
+      const res = await window.axon.workspace.clear(wsPath)
       if (!res.success) {
         toast.error(res.error ? `Failed to clear workspace: ${res.error}` : 'Failed to clear workspace')
         return
@@ -733,14 +820,16 @@ export default function DeliveryLiveView() {
   }
 
   const handleOpenWorkspace = async () => {
-    if (!delivery?.workspacePath) return
-    const res = await window.axon.shell.openPath(delivery.workspacePath)
+    const wsPath = localWorkspacePath ?? delivery?.workspacePath
+    if (!wsPath) return
+    const res = await window.axon.shell.openPath(wsPath)
     if (!res.success) toast.error(res.error ? `Failed to open folder: ${res.error}` : 'Failed to open folder')
   }
 
   const handleOpenInVSCode = async () => {
-    if (!delivery?.workspacePath) return
-    const res = await window.axon.shell.openInVSCode(delivery.workspacePath)
+    const wsPath = localWorkspacePath ?? delivery?.workspacePath
+    if (!wsPath) return
+    const res = await window.axon.shell.openInVSCode(wsPath)
     if (!res.success) toast.error(res.error ? `Failed to open VS Code: ${res.error}` : 'Failed to open VS Code')
   }
 
@@ -829,11 +918,15 @@ export default function DeliveryLiveView() {
   const completedCount = localSteps.filter((s) => s.status === 'Completed').length
   const pipelineName = delivery.pipelineSnapshot?.name ?? delivery.pipelineName
   const createdBy = delivery.createdByName ?? 'Unknown'
+  // Prefer the live progress-event value over the delivery record's own field — the
+  // record only catches up on the next full refetch, which can lag well behind when
+  // provisioning actually finished (see workspace_provisioned/git_prepared handling).
+  const effectiveWorkspacePath = localWorkspacePath ?? delivery.workspacePath ?? undefined
   // No fallback guess — the real branch name (or lack of one, e.g. no git token
   // configured) is what actually matters here, not a plausible-looking placeholder.
-  const branch = delivery.branch ?? '—'
-  const workspace = delivery.workspacePath
-    ? delivery.workspacePath.split('/').pop()
+  const branch = localBranch ?? delivery.branch ?? '—'
+  const workspace = effectiveWorkspacePath
+    ? effectiveWorkspacePath.split('/').pop()
     : undefined
 
   return (
@@ -896,6 +989,23 @@ export default function DeliveryLiveView() {
             }}
           >
             {isStopping ? 'Stopping…' : '■ Stop'}
+          </button>
+        )}
+
+        {displayStatus === 'Cancelled' && (
+          <button
+            onClick={handleResume}
+            disabled={isStarting}
+            title="Continue this same delivery from wherever it stopped, skipping already-completed steps"
+            style={{
+              background: 'var(--axon-green-d)', color: 'var(--axon-green)',
+              border: '1px solid rgba(16,185,129,0.3)',
+              padding: '5px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+              cursor: isStarting ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+              opacity: isStarting ? 0.6 : 1,
+            }}
+          >
+            {isStarting ? 'Resuming…' : '▶ Resume'}
           </button>
         )}
 
@@ -1299,7 +1409,7 @@ export default function DeliveryLiveView() {
             ))}
           </div>
 
-          {delivery.workspacePath && (
+          {effectiveWorkspacePath && (
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
               <Button variant="outline" size="sm" className="flex-1 gap-1.5" onClick={handleOpenWorkspace} title="Open workspace folder in Explorer">
                 <FolderOpen size={13} /> Explorer
@@ -1323,7 +1433,7 @@ export default function DeliveryLiveView() {
             </button>
           )}
 
-          {delivery.workspacePath && displayStatus !== 'Running' && displayStatus !== 'Paused' && (
+          {effectiveWorkspacePath && displayStatus !== 'Running' && displayStatus !== 'Paused' && (
             <button
               onClick={handleClearWorkspace}
               disabled={isClearingWorkspace}
@@ -1417,8 +1527,11 @@ export default function DeliveryLiveView() {
                 }}>
                   {sig.body}
                 </span>
-                <span style={{ fontSize: 9, color: 'var(--axon-t4)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
-                  {timeAgo(sig.timestamp)}
+                <span
+                  style={{ fontSize: 9, color: 'var(--axon-t4)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}
+                  title={timeAgo(sig.timestamp)}
+                >
+                  {new Date(sig.timestamp).toLocaleTimeString()}
                 </span>
               </div>
             ))

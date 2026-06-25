@@ -12,6 +12,18 @@ export interface ExecutionProgress {
   prUrl?: string
 }
 
+export interface ResumePreview {
+  resumeNodeId: string
+  resumeNodeLabel: string
+  resumeNodeRole?: string
+  lastCompletedNodeLabel?: string
+  hasPriorAttempt: boolean
+  reconstructedContextKeys: string[]
+  workspacePath?: string
+  branch?: string
+  allNodesCompleted: boolean
+}
+
 export interface ClaudeKeyStatus {
   hasKey: boolean
   masked: string | null
@@ -52,6 +64,7 @@ export interface AxonBridge {
   executor: {
     start(deliveryId: string): Promise<{ success: boolean; error?: string }>
     resume(deliveryId: string): Promise<{ success: boolean; error?: string }>
+    previewResume(deliveryId: string): Promise<{ success: boolean; error?: string; preview?: ResumePreview }>
     cancel(deliveryId: string): Promise<{ success: boolean; error?: string }>
     onProgress(callback: (event: unknown, data: ExecutionProgress) => void): void
     offProgress(callback: (event: unknown, data: ExecutionProgress) => void): void
