@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { LayoutGrid, Play, GitBranch, Box, Info, Workflow, Settings, KeyRound } from 'lucide-react'
+import { LayoutGrid, Play, GitBranch, Box, Info, Workflow, Settings, KeyRound, BarChart2 } from 'lucide-react'
 import { useDeliveries } from '@/hooks/useDeliveries'
 import { useAuthReady } from '@/hooks/useAuthReady'
 import type { ClaudeKeyStatus } from '@/types'
@@ -8,6 +8,7 @@ import type { ClaudeKeyStatus } from '@/types'
 const workspaceItems = [
   { to: '/dashboard', icon: LayoutGrid, label: 'Dashboard', end: true },
   { to: '/deliveries', icon: Play, label: 'Deliveries' },
+  { to: '/intelligence', icon: BarChart2, label: 'Intelligence' },
 ]
 
 const designItems = [

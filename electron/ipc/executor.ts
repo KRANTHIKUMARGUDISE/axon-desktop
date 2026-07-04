@@ -3,7 +3,7 @@ import path from 'path'
 import fs from 'fs/promises'
 import { Agent } from 'undici'
 import { store } from './settings'
-import { readSecure } from './auth'
+import { readSecure, writeSecure } from './auth'
 import { getClaudeKey } from './claudeKeyStore'
 import { runAgent as runClaudeAgent } from './claude'
 import type { AgentOutput, DeliveryContext } from './claude'
@@ -327,41 +327,103 @@ function sendProgress(event: ExecutionProgress) {
   win?.webContents.send('execution:progress', event)
 }
 
+// Single in-process cache for the current access/refresh token pair — there's only ever
+// one logged-in user per AXON desktop instance, so this is correctly a singleton, not
+// per-delivery. Access tokens expire in 15 minutes (Axon.API/appsettings.json,
+// Jwt.AccessTokenExpiryMinutes) — well within a single Agentic step's own timeout (e.g.
+// 900s), so the token captured once at delivery-start WILL go stale mid-delivery. Without
+// this cache, that 401 was being silently swallowed by callers' .catch(warn), leaving a
+// step's backend record permanently stuck at its /steps/start placeholder (confirmed in
+// practice — see KVOICE-1128, job #52 investigation).
+let cachedAccessToken: string | null = null
+let cachedRefreshToken: string | null = null
+let refreshInFlight: Promise<string | null> | null = null
+
+async function refreshAccessToken(baseUrl: string): Promise<string | null> {
+  // Coalesce concurrent refresh attempts into one. The backend ROTATES the refresh token
+  // on every use (AuthController.Refresh issues a new one and invalidates the old) — two
+  // independent refresh calls racing each other would have the second one fail with
+  // "Invalid refresh token" since the first already rotated it away.
+  if (refreshInFlight) return refreshInFlight
+  refreshInFlight = (async () => {
+    try {
+      if (cachedRefreshToken === null) cachedRefreshToken = await readSecure('axon-refresh-token')
+      if (!cachedRefreshToken) return null
+      const res = await fetch(`${baseUrl}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: cachedRefreshToken }),
+        dispatcher: dispatcherFor(baseUrl),
+      } as RequestInit)
+      if (!res.ok) return null
+      const data = (await res.json()) as { accessToken?: string; refreshToken?: string }
+      if (data.accessToken) {
+        cachedAccessToken = data.accessToken
+        await writeSecure('axon-access-token', data.accessToken).catch((err) => console.warn(`Failed to persist refreshed access token: ${err}`))
+      }
+      if (data.refreshToken) {
+        // Same key the renderer's own axios interceptor (apiClient.ts) reads/writes —
+        // keeps both refresh paths looking at the same rotated value, not two that
+        // silently diverge. (They can still race each other across the two processes;
+        // not fully solved here — see executor.ts's token-cache comment.)
+        cachedRefreshToken = data.refreshToken
+        await writeSecure('axon-refresh-token', data.refreshToken).catch((err) => console.warn(`Failed to persist refreshed refresh token: ${err}`))
+      }
+      return data.accessToken ?? null
+    } catch (err) {
+      console.warn(`Token refresh failed: ${err}`)
+      return null
+    } finally {
+      refreshInFlight = null
+    }
+  })()
+  return refreshInFlight
+}
+
+// The cache (kept current by refreshAccessToken) always wins over whatever a given call
+// site captured at delivery-start — that stale capture is exactly what expires
+// mid-delivery. Falls back to it only before any refresh has ever happened.
+function currentToken(fallback: string | null): string | null {
+  return cachedAccessToken ?? fallback
+}
+
+async function authedFetch(baseUrl: string, path: string, token: string | null, init: RequestInit): Promise<Response> {
+  const attempt = (tok: string | null) =>
+    fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), ...(tok ? { Authorization: `Bearer ${tok}` } : {}) },
+      dispatcher: dispatcherFor(baseUrl),
+    } as RequestInit)
+
+  let res = await attempt(currentToken(token))
+  if (res.status === 401) {
+    const refreshed = await refreshAccessToken(baseUrl)
+    if (refreshed) res = await attempt(refreshed)
+  }
+  return res
+}
+
 async function apiGet<T>(path: string, token: string | null, baseUrl: string): Promise<T> {
-  const res = await fetch(`${baseUrl}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    dispatcher: dispatcherFor(baseUrl),
-  } as RequestInit)
+  const res = await authedFetch(baseUrl, path, token, { headers: { 'Content-Type': 'application/json' } })
   if (!res.ok) throw new Error(`GET ${path} → ${res.status}`)
   return res.json() as Promise<T>
 }
 
 async function apiPost(path: string, body: unknown, token: string | null, baseUrl: string): Promise<void> {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await authedFetch(baseUrl, path, token, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    dispatcher: dispatcherFor(baseUrl),
-  } as RequestInit)
+  })
   if (!res.ok) throw new Error(`POST ${path} → ${res.status}`)
 }
 
 async function apiPatch(path: string, body: unknown, token: string | null, baseUrl: string): Promise<void> {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await authedFetch(baseUrl, path, token, {
     method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    dispatcher: dispatcherFor(baseUrl),
-  } as RequestInit)
+  })
   if (!res.ok) throw new Error(`PATCH ${path} → ${res.status}`)
 }
 
@@ -581,23 +643,50 @@ async function runStepLoop(
     // pauses for approval regardless of what status the agent itself returned.
     const isGateNode = ctx.blocks.get(node.blockId)?.role === 'Control'
 
-    await apiPost(
-      `/api/deliveries/${ctx.deliveryId}/steps`,
-      {
-        nodeId: node.id,
-        blockId: node.blockId,
-        blockName: node.label,
-        status: isGateNode ? 'AwaitingApproval' : output.status === 'failed' ? 'Failed' : 'Completed',
-        contextSnapshot: contextResult?.value,
-        isContextTruncated: contextResult?.isTruncated ?? false,
-        contextFileRef: contextResult?.fileRef,
-        contextAvailability,
-        outputAvailability,
-        output: persistedOutput,
-      },
-      token,
-      baseUrl,
-    ).catch((err) => console.warn(`Failed to persist step result: ${err}`))
+    const finalizeBody = {
+      nodeId: node.id,
+      blockId: node.blockId,
+      blockName: node.label,
+      status: isGateNode ? 'AwaitingApproval' : output.status === 'failed' ? 'Failed' : 'Completed',
+      contextSnapshot: contextResult?.value,
+      isContextTruncated: contextResult?.isTruncated ?? false,
+      contextFileRef: contextResult?.fileRef,
+      contextAvailability,
+      outputAvailability,
+      output: persistedOutput,
+    }
+
+    // MUST NOT silently swallow a failure here — doing so left this step's backend
+    // record permanently stuck at the bare "Running" placeholder from /steps/start
+    // (Output: null), while the renderer went on to show a green "Completed" tick purely
+    // from the step_completed progress event sent further down regardless of whether
+    // this POST actually landed (observed in practice: code-implementor showed Completed
+    // live, but "View full output" 404'd — GetStepOutput 404s exactly when
+    // step.Output == null — and reopening the delivery showed it as still Running,
+    // because that's what was actually persisted). One retry for a transient blip; if it
+    // still fails, treat this as a real step failure instead of pretending it finalized.
+    let finalizeError: unknown
+    try {
+      await apiPost(`/api/deliveries/${ctx.deliveryId}/steps`, finalizeBody, token, baseUrl)
+    } catch (err) {
+      finalizeError = err
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      try {
+        await apiPost(`/api/deliveries/${ctx.deliveryId}/steps`, finalizeBody, token, baseUrl)
+        finalizeError = undefined
+      } catch (retryErr) {
+        finalizeError = retryErr
+      }
+    }
+    if (finalizeError) {
+      const message = `Failed to persist step result for "${node.label}": ${finalizeError instanceof Error ? finalizeError.message : String(finalizeError)}`
+      console.error(message)
+      sendProgress({ deliveryId: ctx.deliveryId, type: 'step_failed', nodeId: node.id, blockName: node.label, message })
+      await apiPatch(`/api/deliveries/${ctx.deliveryId}/status`, { status: 'Failed', currentNodeId: node.id }, token, baseUrl)
+        .catch((err) => console.warn(`Failed to persist failed status: ${err}`))
+      activeExecutions.delete(ctx.deliveryId)
+      return
+    }
 
     if (output.status === 'failed') {
       sendProgress({ deliveryId: ctx.deliveryId, type: 'step_failed', nodeId: node.id, blockName: node.label, output, message: output.summary })

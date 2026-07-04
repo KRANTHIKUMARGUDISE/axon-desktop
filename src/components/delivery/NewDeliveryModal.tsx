@@ -7,6 +7,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { usePipelines } from '@/hooks/usePipelines'
 import { useCreateDelivery } from '@/hooks/useDeliveries'
 import { useAuthReady } from '@/hooks/useAuthReady'
@@ -102,18 +107,6 @@ export default function NewDeliveryModal({
 
   const canSubmit = ticketId.trim() !== '' && pipelineId !== '' && repoUrl.trim() !== ''
 
-  const inputStyle: React.CSSProperties = {
-    background: 'var(--axon-bg3)',
-    border: '1px solid var(--axon-border2)',
-    borderRadius: 8,
-    padding: '8px 10px',
-    fontSize: 12,
-    color: 'var(--axon-t1)',
-    fontFamily: 'inherit',
-    width: '100%',
-    outline: 'none',
-  }
-
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent
@@ -139,14 +132,12 @@ export default function NewDeliveryModal({
             <label className="block mb-1" style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
               Ticket ID <span style={{ color: 'var(--axon-red)' }}>*</span>
             </label>
-            <input
+            <Input
               ref={ticketRef}
               value={ticketId}
               onChange={(e) => setTicketId(e.target.value)}
               placeholder="e.g. PROJ-2341"
-              style={inputStyle}
-              onFocus={(e) => (e.target.style.borderColor = 'rgba(111,95,232,0.5)')}
-              onBlur={(e) => (e.target.style.borderColor = 'var(--axon-border2)')}
+              className="dark:bg-[var(--axon-bg3)]"
             />
             <p style={{ fontSize: 10, color: 'var(--axon-t3)', marginTop: 6 }}>
               Included in the context every AI agent block sees for this delivery.
@@ -158,25 +149,16 @@ export default function NewDeliveryModal({
             <label className="block mb-1" style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
               Pipeline <span style={{ color: 'var(--axon-red)' }}>*</span>
             </label>
-            <select
-              value={pipelineId}
-              onChange={(e) => setPipelineId(e.target.value)}
-              className="w-full outline-none cursor-pointer appearance-none"
-              style={{
-                ...inputStyle,
-                color: pipelineId ? 'var(--axon-t1)' : 'var(--axon-t3)',
-                backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2364748b'/%3E%3C/svg%3E")`,
-                backgroundRepeat: 'no-repeat',
-                backgroundPosition: 'right 10px center',
-              }}
-            >
-              <option value="" disabled>Select a pipeline…</option>
-              {pipelines?.map((p) => (
-                <option key={p.id} value={p.id} style={{ background: 'var(--axon-bg3)', color: 'var(--axon-t1)' }}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
+            <Select value={pipelineId} onValueChange={setPipelineId}>
+              <SelectTrigger className="w-full dark:bg-[var(--axon-bg3)]">
+                <SelectValue placeholder="Select a pipeline…" />
+              </SelectTrigger>
+              <SelectContent>
+                {pipelines?.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Repo URL */}
@@ -184,13 +166,11 @@ export default function NewDeliveryModal({
             <label className="block mb-1" style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
               Repository URL <span style={{ color: 'var(--axon-red)' }}>*</span>
             </label>
-            <input
+            <Input
               value={repoUrl}
               onChange={(e) => setRepoUrl(e.target.value)}
               placeholder="https://github.com/org/repo"
-              style={inputStyle}
-              onFocus={(e) => (e.target.style.borderColor = 'rgba(111,95,232,0.5)')}
-              onBlur={(e) => (e.target.style.borderColor = 'var(--axon-border2)')}
+              className="dark:bg-[var(--axon-bg3)]"
             />
           </div>
 
@@ -200,19 +180,22 @@ export default function NewDeliveryModal({
               Working Directory
             </label>
             <div style={{ display: 'flex', gap: 6 }}>
-              <button
+              <Button
+                type="button"
+                size="sm"
+                variant={workspaceType === 'Default' ? 'secondary' : 'outline'}
+                className="rounded-full"
+                style={workspaceType === 'Default' ? { color: 'var(--axon-nexus2)', background: 'var(--axon-nx-glow)' } : undefined}
                 onClick={() => { setWorkspaceType('Default'); setBrowsedPath(null) }}
-                style={{
-                  padding: '5px 14px', borderRadius: 20, fontSize: 11, fontWeight: 600,
-                  cursor: 'pointer', fontFamily: 'inherit',
-                  border: workspaceType === 'Default' ? '1.5px solid var(--axon-nexus2)' : '1.5px solid var(--axon-border2)',
-                  color: workspaceType === 'Default' ? 'var(--axon-nexus2)' : 'var(--axon-t2)',
-                  background: workspaceType === 'Default' ? 'var(--axon-nx-glow)' : 'var(--axon-bg3)',
-                }}
               >
                 Default
-              </button>
-              <button
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={workspaceType === 'Browse' ? 'secondary' : 'outline'}
+                className="rounded-full"
+                style={workspaceType === 'Browse' ? { color: 'var(--axon-nexus2)', background: 'var(--axon-nx-glow)' } : undefined}
                 onClick={async () => {
                   const picked = await window.axon.dialog.openDirectory()
                   if (picked) {
@@ -220,16 +203,9 @@ export default function NewDeliveryModal({
                     setBrowsedPath(picked)
                   }
                 }}
-                style={{
-                  padding: '5px 14px', borderRadius: 20, fontSize: 11, fontWeight: 600,
-                  cursor: 'pointer', fontFamily: 'inherit',
-                  border: workspaceType === 'Browse' ? '1.5px solid var(--axon-nexus2)' : '1.5px solid var(--axon-border2)',
-                  color: workspaceType === 'Browse' ? 'var(--axon-nexus2)' : 'var(--axon-t2)',
-                  background: workspaceType === 'Browse' ? 'var(--axon-nx-glow)' : 'var(--axon-bg3)',
-                }}
               >
                 Browse…
-              </button>
+              </Button>
             </div>
             <p style={{ fontSize: 10, color: 'var(--axon-t3)', marginTop: 6 }}>
               {workspaceType === 'Default'
@@ -245,14 +221,12 @@ export default function NewDeliveryModal({
             <label className="block mb-1" style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
               Inputs (JSON, optional)
             </label>
-            <textarea
+            <Textarea
               value={inputsJson}
               onChange={(e) => { setInputsJson(e.target.value); setInputsError(null) }}
               placeholder='{"testMessage": "hello from manual test"}'
               rows={3}
-              style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 11 }}
-              onFocus={(e) => (e.target.style.borderColor = 'rgba(111,95,232,0.5)')}
-              onBlur={(e) => (e.target.style.borderColor = 'var(--axon-border2)')}
+              className="resize-y font-mono text-[11px] dark:bg-[var(--axon-bg3)]"
             />
             {inputsError ? (
               <p style={{ fontSize: 10, color: 'var(--axon-red)', marginTop: 6 }}>{inputsError}</p>
@@ -265,24 +239,23 @@ export default function NewDeliveryModal({
 
           {/* Advanced */}
           <div>
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="sm"
+              className="h-auto p-0 hover:bg-transparent"
+              style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t3)' }}
               onClick={() => setShowAdvanced((v) => !v)}
-              style={{
-                background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit',
-                fontSize: 11, fontWeight: 600, color: 'var(--axon-t3)', display: 'flex', alignItems: 'center', gap: 4,
-              }}
             >
               {showAdvanced ? '▾' : '▸'} Advanced
-            </button>
+            </Button>
             {showAdvanced && (
               <div style={{ marginTop: 10 }}>
                 <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={storeFullContext}
-                    onChange={(e) => setStoreFullContext(e.target.checked)}
-                    style={{ marginTop: 2, cursor: 'pointer' }}
+                    onCheckedChange={(checked) => setStoreFullContext(checked === true)}
+                    className="mt-0.5"
                   />
                   <span>
                     <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)', display: 'block' }}>
@@ -303,40 +276,15 @@ export default function NewDeliveryModal({
           className="flex justify-end gap-2 px-6 py-4 mt-5"
           style={{ borderTop: '1px solid var(--axon-border)' }}
         >
-          <button
-            onClick={onClose}
-            style={{
-              padding: '6px 13px',
-              borderRadius: 8,
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              border: '1px solid var(--axon-border2)',
-              color: 'var(--axon-t2)',
-              background: 'transparent',
-              fontFamily: 'inherit',
-            }}
-          >
+          <Button onClick={onClose} variant="outline">
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={handleSubmit}
             disabled={!canSubmit || createDelivery.isPending}
-            style={{
-              padding: '6px 13px',
-              borderRadius: 8,
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: canSubmit ? 'pointer' : 'not-allowed',
-              border: 'none',
-              color: '#fff',
-              background: canSubmit ? 'var(--axon-nexus)' : 'rgba(111,95,232,0.35)',
-              fontFamily: 'inherit',
-              opacity: createDelivery.isPending ? 0.7 : 1,
-            }}
           >
             {createDelivery.isPending ? 'Starting…' : 'Start Delivery →'}
-          </button>
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

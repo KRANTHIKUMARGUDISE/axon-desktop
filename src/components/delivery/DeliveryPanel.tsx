@@ -1,8 +1,11 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { FolderOpen, Code2, Copy } from 'lucide-react'
+import { FolderOpen, Code2, Copy, X } from 'lucide-react'
 import { useDelivery } from '@/hooks/useDeliveries'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import type { DeliveryStep } from '@/types'
 
 interface Props {
@@ -131,29 +134,23 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
                   <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--axon-t1)', fontFamily: 'var(--font-mono)' }}>
                     {delivery.ticketId}
                   </span>
-                  <span style={{
-                    fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 20,
-                    color: STATUS_COLORS[delivery.status], background: STATUS_BG[delivery.status],
-                    border: `1px solid ${STATUS_COLORS[delivery.status]}33`,
-                  }}>
+                  <Badge
+                    variant="outline"
+                    style={{
+                      color: STATUS_COLORS[delivery.status], background: STATUS_BG[delivery.status],
+                      borderColor: `${STATUS_COLORS[delivery.status]}33`,
+                    }}
+                  >
                     {delivery.status}
-                  </span>
+                  </Badge>
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--axon-t3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {delivery.title} · {delivery.pipelineName}
                 </div>
               </div>
-              <button
-                onClick={onClose}
-                style={{
-                  width: 26, height: 26, borderRadius: 6, border: '1px solid var(--axon-border2)',
-                  background: 'transparent', color: 'var(--axon-t3)', cursor: 'pointer',
-                  fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  flexShrink: 0, fontFamily: 'inherit',
-                }}
-              >
-                ×
-              </button>
+              <Button onClick={onClose} variant="outline" size="icon-sm" className="shrink-0">
+                <X className="size-3.5" />
+              </Button>
             </div>
           </div>
 
@@ -197,24 +194,23 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
           })()}
 
           {/* Tabs */}
-          <div style={{ display: 'flex', borderBottom: '1px solid var(--axon-border)', padding: '0 16px' }}>
-            {tabs.map(t => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                style={{
-                  padding: '8px 12px 7px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                  background: 'transparent', border: 'none', fontFamily: 'inherit',
-                  color: tab === t ? 'var(--axon-nexus2)' : 'var(--axon-t3)',
-                  borderBottom: tab === t ? '2px solid var(--axon-nexus2)' : '2px solid transparent',
-                  marginBottom: -1,
-                  textTransform: 'capitalize',
-                }}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
+          <Tabs value={tab} onValueChange={v => setTab(v as typeof tab)}>
+            <TabsList
+              className="h-auto w-full justify-start gap-0 rounded-none bg-transparent p-0"
+              style={{ padding: '0 16px', borderBottom: '1px solid var(--axon-border)' }}
+            >
+              {tabs.map(t => (
+                <TabsTrigger
+                  key={t}
+                  value={t}
+                  className="rounded-none border-b-2 border-transparent bg-transparent px-3 py-2 capitalize shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                  style={{ color: tab === t ? 'var(--axon-nexus2)' : 'var(--axon-t3)', borderBottomColor: tab === t ? 'var(--axon-nexus2)' : 'transparent' }}
+                >
+                  {t}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
 
           {/* Tab content */}
           <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
@@ -251,17 +247,15 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
                           {value}
                         </span>
                         {label === 'Repo' && delivery.repoUrl && (
-                          <button
+                          <Button
                             onClick={handleCopyRepoLink}
                             title="Copy repository link"
-                            style={{
-                              width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              borderRadius: 4, cursor: 'pointer', border: '1px solid var(--axon-border2)',
-                              background: 'var(--axon-bg3)', color: 'var(--axon-t2)', flexShrink: 0, padding: 0,
-                            }}
+                            variant="outline"
+                            size="icon-xs"
+                            className="dark:bg-[var(--axon-bg3)]"
                           >
-                            <Copy size={11} />
-                          </button>
+                            <Copy className="size-3" />
+                          </Button>
                         )}
                       </span>
                     </div>
@@ -270,30 +264,24 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
 
                 {delivery.workspacePath && (
                   <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-                    <button
+                    <Button
                       onClick={handleOpenWorkspace}
                       title="Open workspace folder in Explorer"
-                      style={{
-                        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                        padding: '6px 0', borderRadius: 6, fontSize: 10.5, fontWeight: 600,
-                        cursor: 'pointer', border: '1px solid var(--axon-border2)',
-                        background: 'var(--axon-bg3)', color: 'var(--axon-t2)', fontFamily: 'inherit',
-                      }}
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 dark:bg-[var(--axon-bg3)]"
                     >
-                      <FolderOpen size={12} /> Explorer
-                    </button>
-                    <button
+                      <FolderOpen className="size-3" /> Explorer
+                    </Button>
+                    <Button
                       onClick={handleOpenInVSCode}
                       title="Open workspace folder in VS Code"
-                      style={{
-                        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                        padding: '6px 0', borderRadius: 6, fontSize: 10.5, fontWeight: 600,
-                        cursor: 'pointer', border: '1px solid var(--axon-border2)',
-                        background: 'var(--axon-bg3)', color: 'var(--axon-t2)', fontFamily: 'inherit',
-                      }}
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 dark:bg-[var(--axon-bg3)]"
                     >
-                      <Code2 size={12} /> VS Code
-                    </button>
+                      <Code2 className="size-3" /> VS Code
+                    </Button>
                   </div>
                 )}
               </>
@@ -302,17 +290,13 @@ export default function DeliveryPanel({ deliveryId, onClose }: Props) {
 
           {/* Footer */}
           <div style={{ padding: '12px 16px', borderTop: '1px solid var(--axon-border)' }}>
-            <button
+            <Button
               onClick={() => navigate(`/deliveries/${deliveryId}`)}
-              style={{
-                width: '100%', padding: '8px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-                cursor: 'pointer', border: '1px solid var(--axon-border2)',
-                background: 'var(--axon-bg3)', color: 'var(--axon-t1)',
-                fontFamily: 'inherit',
-              }}
+              variant="outline"
+              className="w-full dark:bg-[var(--axon-bg3)]"
             >
               View Full Delivery →
-            </button>
+            </Button>
           </div>
         </>
       )}

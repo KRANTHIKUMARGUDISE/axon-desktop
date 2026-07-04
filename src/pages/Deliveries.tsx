@@ -1,10 +1,16 @@
 import { useState, useEffect, useRef } from 'react'
+import { Plus } from 'lucide-react'
 import { useDeliveries } from '@/hooks/useDeliveries'
 import { usePipelines } from '@/hooks/usePipelines'
 import { useAuthReady } from '@/hooks/useAuthReady'
 import NewDeliveryModal, { useNewDeliveryModal } from '@/components/delivery/NewDeliveryModal'
 import DeliveryPanel from '@/components/delivery/DeliveryPanel'
-import type { DeliveryStatus } from '@/types'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Badge } from '@/components/ui/badge'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -40,6 +46,53 @@ const PROGRESS_COLOR: Record<string, string> = {
 const STATUS_TABS = ['All', 'Running', 'Waiting', 'Completed', 'Failed', 'Cancelled'] as const
 type TabStatus = typeof STATUS_TABS[number]
 
+// Tabs that should call out attention with their semantic status color whenever they
+// have a nonzero count — not just when they're the active tab.
+const TAB_ALERT_COLOR: Partial<Record<TabStatus, string>> = {
+  Waiting: 'var(--axon-amber)',
+  Failed: 'var(--axon-red)',
+}
+const TAB_ALERT_BG: Partial<Record<TabStatus, string>> = {
+  Waiting: 'var(--axon-amber-d)',
+  Failed: 'var(--axon-red-d)',
+}
+
+const DATE_RANGES = ['All Time', 'Today', 'This Week', 'This Month', 'Last 30 Days', 'Last 90 Days'] as const
+type DateRange = typeof DATE_RANGES[number]
+
+// Sentinel values for the "reset to All" option — a Select item can't use an empty
+// string, so these stand in for "no filter" and get mapped back to null on change.
+const ALL_PIPELINES_VALUE = '__all-pipelines__'
+const ALL_TEAMS_VALUE = '__all-teams__'
+
+function isWithinDateRange(iso: string | undefined, range: DateRange): boolean {
+  if (range === 'All Time') return true
+  if (!iso) return false
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return false
+  const now = new Date()
+
+  switch (range) {
+    case 'Today':
+      return d.toDateString() === now.toDateString()
+    case 'This Week': {
+      const dayIndex = (now.getDay() + 6) % 7 // days since most recent Monday
+      const monday = new Date(now)
+      monday.setHours(0, 0, 0, 0)
+      monday.setDate(now.getDate() - dayIndex)
+      return d >= monday
+    }
+    case 'This Month':
+      return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()
+    case 'Last 30 Days':
+      return now.getTime() - d.getTime() <= 30 * 86400000
+    case 'Last 90 Days':
+      return now.getTime() - d.getTime() <= 90 * 86400000
+    default:
+      return true
+  }
+}
+
 function fmtStarted(iso?: string) {
   if (!iso) return '—'
   const d = new Date(iso)
@@ -58,13 +111,13 @@ function initials(name: string | undefined | null) {
 // ── skeleton row ───────────────────────────────────────────────────────────────
 function SkeletonRow() {
   return (
-    <tr>
+    <TableRow>
       {[200, 120, 70, 100, 90, 70, 50].map((w, i) => (
-        <td key={i} style={{ padding: '12px 14px' }}>
+        <TableCell key={i} style={{ padding: '12px 14px' }}>
           <div style={{ height: 12, width: w, borderRadius: 4, background: 'var(--axon-bg4)' }} />
-        </td>
+        </TableCell>
       ))}
-    </tr>
+    </TableRow>
   )
 }
 
@@ -84,6 +137,7 @@ export default function Deliveries() {
   const [activeStatus, setActiveStatus] = useState<TabStatus>('All')
   const [activePipelineId, setActivePipelineId] = useState<string | null>(null)
   const [activeTeam, setActiveTeam] = useState<string | null>(null)
+  const [dateRange, setDateRange] = useState<DateRange>('All Time')
   const [page, setPage] = useState(1)
   const [selectedDeliveryId, setSelectedDeliveryId] = useState<string | null>(null)
 
@@ -118,6 +172,7 @@ export default function Deliveries() {
     }
     if (activePipelineId && d.pipelineId !== activePipelineId) return false
     if (activeTeam && d.ownerTeam !== activeTeam) return false
+    if (!isWithinDateRange(d.startedAt, dateRange)) return false
     if (debouncedSearch) {
       const q = debouncedSearch.toLowerCase()
       if (!(d.ticketId ?? '').toLowerCase().includes(q) && !(d.title ?? '').toLowerCase().includes(q) && !(d.pipelineName ?? '').toLowerCase().includes(q)) return false
@@ -157,17 +212,10 @@ export default function Deliveries() {
             <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--axon-t1)' }}>Deliveries</div>
             <div style={{ fontSize: 11, color: 'var(--axon-t3)', marginTop: 1 }}>Track and manage all pipeline executions</div>
           </div>
-          <button
-            onClick={() => modal.open()}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 5,
-              padding: '6px 13px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-              cursor: 'pointer', border: 'none', background: 'var(--axon-nexus)', color: '#fff',
-              fontFamily: 'inherit',
-            }}
-          >
-            + New Delivery
-          </button>
+          <Button onClick={() => modal.open()} size="sm">
+            <Plus className="size-3.5" />
+            New Delivery
+          </Button>
         </div>
 
         {/* Filter row */}
@@ -175,115 +223,127 @@ export default function Deliveries() {
           padding: '10px 22px', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
           background: 'var(--axon-bg2)', borderBottom: '1px solid var(--axon-border)', flexShrink: 0,
         }}>
-          <input
+          <Input
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Search by ticket ID, title, pipeline…"
-            style={{
-              flex: 1, minWidth: 0, background: 'var(--axon-bg3)', border: '1px solid var(--axon-border2)',
-              borderRadius: 8, padding: '7px 10px', fontSize: 12, color: 'var(--axon-t1)',
-              outline: 'none', fontFamily: 'inherit',
-            }}
-            onFocus={e => (e.target.style.borderColor = 'rgba(111,95,232,0.5)')}
-            onBlur={e => (e.target.style.borderColor = 'var(--axon-border2)')}
+            className="flex-1 min-w-0 dark:bg-[var(--axon-bg3)]"
           />
-          <select
-            value={activePipelineId ?? ''}
-            onChange={e => { setActivePipelineId(e.target.value || null); setPage(1) }}
-            style={{
-              background: 'var(--axon-bg3)', border: '1px solid var(--axon-border2)', borderRadius: 8,
-              padding: '7px 10px', fontSize: 12, color: activePipelineId ? 'var(--axon-t1)' : 'var(--axon-t3)',
-              outline: 'none', cursor: 'pointer', fontFamily: 'inherit', appearance: 'none',
-              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2364748b'/%3E%3C/svg%3E")`,
-              backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 26,
-            }}
+          <Select
+            value={activePipelineId ?? ALL_PIPELINES_VALUE}
+            onValueChange={v => { setActivePipelineId(v === ALL_PIPELINES_VALUE ? null : v); setPage(1) }}
           >
-            <option value="">All Pipelines</option>
-            {pipelines.map(p => (
-              <option key={p.id} value={p.id} style={{ background: 'var(--axon-bg3)', color: 'var(--axon-t1)' }}>{p.name}</option>
-            ))}
-          </select>
-          {allTeams.length > 0 && (
-            <select
-              value={activeTeam ?? ''}
-              onChange={e => { setActiveTeam(e.target.value || null); setPage(1) }}
-              style={{
-                background: 'var(--axon-bg3)', border: '1px solid var(--axon-border2)', borderRadius: 8,
-                padding: '7px 10px', fontSize: 12, color: activeTeam ? 'var(--axon-t1)' : 'var(--axon-t3)',
-                outline: 'none', cursor: 'pointer', fontFamily: 'inherit', appearance: 'none',
-                backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2364748b'/%3E%3C/svg%3E")`,
-                backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 26,
-              }}
-            >
-              <option value="">All Teams</option>
-              {allTeams.map(t => (
-                <option key={t} value={t} style={{ background: 'var(--axon-bg3)', color: 'var(--axon-t1)' }}>{t}</option>
+            <SelectTrigger size="sm" className="w-[168px] dark:bg-[var(--axon-bg3)]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_PIPELINES_VALUE}>All Pipelines</SelectItem>
+              {pipelines.map(p => (
+                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
               ))}
-            </select>
+            </SelectContent>
+          </Select>
+
+          {allTeams.length > 0 && (
+            <Select
+              value={activeTeam ?? ALL_TEAMS_VALUE}
+              onValueChange={v => { setActiveTeam(v === ALL_TEAMS_VALUE ? null : v); setPage(1) }}
+            >
+              <SelectTrigger size="sm" className="w-[152px] dark:bg-[var(--axon-bg3)]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_TEAMS_VALUE}>All Teams</SelectItem>
+                {allTeams.map(t => (
+                  <SelectItem key={t} value={t}>{t}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
+
+          <Select value={dateRange} onValueChange={v => { setDateRange(v as DateRange); setPage(1) }}>
+            <SelectTrigger size="sm" className="w-[152px] dark:bg-[var(--axon-bg3)]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {DATE_RANGES.map(range => (
+                <SelectItem key={range} value={range}>{range}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         {/* Status tabs */}
-        <div style={{
-          display: 'flex', gap: 0, padding: '0 22px',
-          background: 'var(--axon-bg2)', borderBottom: '1px solid var(--axon-border)', flexShrink: 0,
-        }}>
-          {STATUS_TABS.map(tab => (
-            <button
-              key={tab}
-              onClick={() => { setActiveStatus(tab); setPage(1) }}
-              style={{
-                padding: '9px 14px 8px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                background: 'transparent', border: 'none', fontFamily: 'inherit',
-                color: activeStatus === tab ? 'var(--axon-nexus2)' : 'var(--axon-t3)',
-                borderBottom: activeStatus === tab ? '2px solid var(--axon-nexus2)' : '2px solid transparent',
-                marginBottom: -1, display: 'flex', alignItems: 'center', gap: 5,
-              }}
-            >
-              {tab}
-              <span style={{
-                fontSize: 10, fontWeight: 700, padding: '1px 5px', borderRadius: 10,
-                background: activeStatus === tab ? 'var(--axon-nx-glow)' : 'var(--axon-bg4)',
-                color: activeStatus === tab ? 'var(--axon-nexus2)' : 'var(--axon-t4)',
-              }}>
-                {counts[tab]}
-              </span>
-            </button>
-          ))}
-        </div>
+        <Tabs
+          value={activeStatus}
+          onValueChange={v => { setActiveStatus(v as TabStatus); setPage(1) }}
+        >
+          <TabsList
+            className="h-auto w-full justify-start gap-0 rounded-none bg-transparent p-0"
+            style={{ padding: '0 22px', background: 'var(--axon-bg2)', borderBottom: '1px solid var(--axon-border)' }}
+          >
+            {STATUS_TABS.map(tab => {
+              const isActive = activeStatus === tab
+              const alertColor = TAB_ALERT_COLOR[tab]
+              const hasAlert = !!alertColor && counts[tab] > 0
+              const accent = isActive ? (alertColor ?? 'var(--axon-nexus2)') : hasAlert ? alertColor : undefined
+
+              return (
+                <TabsTrigger
+                  key={tab}
+                  value={tab}
+                  className="gap-1.5 rounded-none border-b-[3px] border-transparent bg-transparent px-3.5 py-2 shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                  style={{ color: accent ?? 'var(--axon-t3)', borderBottomColor: isActive ? accent : 'transparent' }}
+                >
+                  {tab}
+                  <Badge
+                    variant="outline"
+                    style={{
+                      background: isActive ? 'var(--axon-nx-glow)' : hasAlert ? TAB_ALERT_BG[tab] : 'var(--axon-bg4)',
+                      color: accent ?? 'var(--axon-t4)',
+                      borderColor: 'transparent',
+                    }}
+                  >
+                    {counts[tab]}
+                  </Badge>
+                </TabsTrigger>
+              )
+            })}
+          </TabsList>
+        </Tabs>
 
         {/* Table */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-            <thead>
-              <tr style={{ background: 'var(--axon-bg2)', position: 'sticky', top: 0, zIndex: 1 }}>
+          <Table style={{ fontSize: 12 }}>
+            <TableHeader>
+              <TableRow style={{ background: 'var(--axon-bg2)', position: 'sticky', top: 0, zIndex: 1 }}>
                 {['Job', 'Delivery', 'Pipeline', 'Status', 'Progress', 'Started', 'Duration', 'Triggered by'].map(col => (
-                  <th key={col} style={{
-                    padding: '9px 14px', textAlign: 'left', fontSize: 11, fontWeight: 600,
+                  <TableHead key={col} style={{
+                    padding: '9px 14px', fontSize: 11, fontWeight: 600,
                     color: 'var(--axon-t3)', borderBottom: '1px solid var(--axon-border)',
                     whiteSpace: 'nowrap',
-                  }}>{col}</th>
+                  }}>{col}</TableHead>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {isLoading ? (
                 Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)
               ) : isError ? (
-                <tr>
-                  <td colSpan={8} style={{ padding: '40px 14px', textAlign: 'center' }}>
+                <TableRow>
+                  <TableCell colSpan={8} style={{ padding: '40px 14px', textAlign: 'center' }}>
                     <div style={{ color: 'var(--axon-red)', fontSize: 12, marginBottom: 4 }}>Failed to load deliveries</div>
                     <div style={{ color: 'var(--axon-t4)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>
                       {error instanceof Error ? error.message : String(error)}
                     </div>
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ) : filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={8} style={{ padding: '40px 14px', textAlign: 'center', color: 'var(--axon-t3)', fontSize: 12 }}>
+                <TableRow>
+                  <TableCell colSpan={8} style={{ padding: '40px 14px', textAlign: 'center', color: 'var(--axon-t3)', fontSize: 12 }}>
                     No deliveries found
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ) : (
                 filtered.map(d => {
                   const isSelected = selectedDeliveryId === d.id
@@ -292,7 +352,7 @@ export default function Deliveries() {
                     console.warn(`Status "${d.status}" not found in STATUS_COLOR. Available keys:`, Object.keys(STATUS_COLOR))
                   }
                   return (
-                    <tr
+                    <TableRow
                       key={d.id}
                       onClick={() => handleRowClick(d.id)}
                       style={{
@@ -305,38 +365,39 @@ export default function Deliveries() {
                       onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = isSelected ? 'rgba(111,95,232,0.07)' : 'transparent' }}
                     >
                       {/* Job */}
-                      <td style={{ padding: '11px 14px', color: 'var(--axon-t2)', fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'nowrap' }}>
+                      <TableCell style={{ padding: '11px 14px', color: 'var(--axon-t2)', fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'nowrap' }}>
                         {d.jobNumber ? `#${d.jobNumber}` : '—'}
-                      </td>
+                      </TableCell>
                       {/* Delivery */}
-                      <td style={{ padding: '11px 14px' }}>
+                      <TableCell style={{ padding: '11px 14px' }}>
                         <div style={{ fontWeight: 600, color: 'var(--axon-t1)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{d.ticketId}</div>
                         {d.title && d.title !== d.ticketId && (
                           <div style={{ fontSize: 11, color: 'var(--axon-t3)', marginTop: 2, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</div>
                         )}
-                      </td>
+                      </TableCell>
                       {/* Pipeline */}
-                      <td style={{ padding: '11px 14px', color: 'var(--axon-t2)', whiteSpace: 'nowrap' }}>{d.pipelineName}</td>
+                      <TableCell style={{ padding: '11px 14px', color: 'var(--axon-t2)', whiteSpace: 'nowrap' }}>{d.pipelineName}</TableCell>
                       {/* Status */}
-                      <td style={{ padding: '11px 14px' }}>
-                        <span style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 6,
-                          fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 20,
-                          color: STATUS_COLOR[d.status] || 'var(--axon-t3)',
-                          background: STATUS_BG[d.status] || 'var(--axon-bg4)',
-                          border: `1px solid ${STATUS_COLOR[d.status] || 'var(--axon-t3)'}33`,
-                          whiteSpace: 'nowrap',
-                        }}>
+                      <TableCell style={{ padding: '11px 14px' }}>
+                        <Badge
+                          variant="outline"
+                          className="gap-1.5"
+                          style={{
+                            color: STATUS_COLOR[d.status] || 'var(--axon-t3)',
+                            background: STATUS_BG[d.status] || 'var(--axon-bg4)',
+                            borderColor: `${STATUS_COLOR[d.status] || 'var(--axon-t3)'}33`,
+                          }}
+                        >
                           <span style={{
                             width: 6, height: 6, borderRadius: '50%',
                             background: STATUS_COLOR[d.status] || 'var(--axon-t3)',
                             flexShrink: 0
                           }} />
                           {d.status}
-                        </span>
-                      </td>
+                        </Badge>
+                      </TableCell>
                       {/* Progress */}
-                      <td style={{ padding: '11px 14px', minWidth: 110 }}>
+                      <TableCell style={{ padding: '11px 14px', minWidth: 110 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                           <div style={{ flex: 1, height: 4, borderRadius: 2, background: 'var(--axon-bg4)', overflow: 'hidden' }}>
                             <div style={{
@@ -348,13 +409,13 @@ export default function Deliveries() {
                           </div>
                           <span style={{ fontSize: 11, color: 'var(--axon-t3)', minWidth: 28, textAlign: 'right' }}>{d.progress}%</span>
                         </div>
-                      </td>
+                      </TableCell>
                       {/* Started */}
-                      <td style={{ padding: '11px 14px', color: 'var(--axon-t2)', whiteSpace: 'nowrap', fontSize: 11 }}>{fmtStarted(d.startedAt)}</td>
+                      <TableCell style={{ padding: '11px 14px', color: 'var(--axon-t2)', whiteSpace: 'nowrap', fontSize: 11 }}>{fmtStarted(d.startedAt)}</TableCell>
                       {/* Duration */}
-                      <td style={{ padding: '11px 14px', color: 'var(--axon-t2)', whiteSpace: 'nowrap', fontSize: 11 }}>{d.duration ?? '—'}</td>
+                      <TableCell style={{ padding: '11px 14px', color: 'var(--axon-t2)', whiteSpace: 'nowrap', fontSize: 11 }}>{d.duration ?? '—'}</TableCell>
                       {/* Triggered by */}
-                      <td style={{ padding: '11px 14px' }}>
+                      <TableCell style={{ padding: '11px 14px' }}>
                         <div style={{
                           width: 28, height: 28, borderRadius: '50%',
                           background: 'var(--axon-nx-glow)', border: '1px solid rgba(111,95,232,0.3)',
@@ -363,13 +424,13 @@ export default function Deliveries() {
                         }}>
                           {initials(d.createdByName)}
                         </div>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   )
                 })
               )}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
 
         {/* Pagination */}
@@ -411,19 +472,19 @@ export default function Deliveries() {
 
 function PageBtn({ label, onClick, disabled, active }: { label: string; onClick: () => void; disabled?: boolean; active?: boolean }) {
   return (
-    <button
+    <Button
       onClick={onClick}
       disabled={disabled}
+      variant="outline"
+      size="icon-sm"
+      className="min-w-7"
       style={{
-        minWidth: 28, height: 28, padding: '0 6px', borderRadius: 6,
-        border: active ? '1px solid var(--axon-nexus2)' : '1px solid var(--axon-border2)',
+        borderColor: active ? 'var(--axon-nexus2)' : 'var(--axon-border2)',
         background: active ? 'var(--axon-nx-glow)' : 'transparent',
-        color: active ? 'var(--axon-nexus2)' : disabled ? 'var(--axon-t4)' : 'var(--axon-t2)',
-        fontSize: 11, fontWeight: 600, cursor: disabled ? 'default' : 'pointer',
-        fontFamily: 'inherit',
+        color: active ? 'var(--axon-nexus2)' : undefined,
       }}
     >
       {label}
-    </button>
+    </Button>
   )
 }

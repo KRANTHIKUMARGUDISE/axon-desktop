@@ -16,6 +16,18 @@ export async function readSecure(key: string): Promise<string | null> {
   }
 }
 
+// Directly callable from main-process code (executor.ts's token refresh) — mirrors the
+// 'auth:storeSecure' IPC handler below so a token refreshed mid-delivery lands in the
+// SAME encrypted file the renderer's own axios interceptor reads from, keeping both in
+// sync rather than drifting into two different "current token" values.
+export async function writeSecure(key: string, value: string): Promise<void> {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Safe storage not available on this platform')
+  }
+  const encrypted = safeStorage.encryptString(value)
+  await fs.writeFile(securePath(key), encrypted)
+}
+
 // One-time migration helper: decrypts a legacy secure-storage file (if present)
 // and deletes it unconditionally, regardless of whether the value is used —
 // callers retiring disk persistence for a key call this once on launch.

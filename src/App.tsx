@@ -11,6 +11,7 @@ import DeliveryLiveView from './pages/DeliveryLiveView'
 import PipelineCreator from './pages/PipelineCreator'
 import Pipelines from './pages/Pipelines'
 import BuildingBlocks from './pages/BuildingBlocks'
+import Intelligence from './pages/Intelligence'
 import About from './pages/About'
 import Setup from './pages/Setup'
 import Settings from './pages/Settings'
@@ -105,6 +106,7 @@ function AppRoutes() {
         <Route path="/pipelines/new" element={<PipelineCreator />} />
         <Route path="/pipelines/:id/edit" element={<PipelineCreator />} />
         <Route path="/blocks" element={<BuildingBlocks />} />
+        <Route path="/intelligence" element={<Intelligence />} />
         <Route path="/about" element={<About />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
@@ -118,7 +120,11 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <Toaster theme="dark" position="top-right" />
+        {/* offset.top clears the native Windows titleBarOverlay (minimize/maximize/close),
+            which is drawn by the OS above the window's height:44 title bar — not part of
+            the DOM, so no z-index here can raise toasts above it. Pushing toasts to start
+            below y=44 avoids the overlap entirely. */}
+        <Toaster theme="dark" position="top-right" offset={{ top: 56 }} />
         <HashRouter>
           <AppRoutes />
         </HashRouter>
