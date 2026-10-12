@@ -1,4 +1,7 @@
+import os from 'os'
+import { app, clipboard } from 'electron'
 import { z } from 'zod'
+import { buildDiagnostics } from '../diagnostics'
 import { SETTING_VALIDATORS } from '../../shared'
 import type { RegistryStatus } from '../../shared'
 import { handle } from './guard'
@@ -122,6 +125,18 @@ export function registerRegistryHandlers(deps: RegistryIpcDeps): void {
     log.info(`[jira] account changed (identityChanged=${res.identityChanged})`)
     if (res.identityChanged) deps.onIdentityChanged()
     return { success: true, identityChanged: res.identityChanged, email: res.email }
+  })
+
+  // ---- support: "Copy diagnostics" (allow-listed facts only — see electron/diagnostics.ts)
+  handle('system:copyDiagnostics', z.tuple([]), () => {
+    const s = service.status()
+    const text = buildDiagnostics({
+      appVersion: app.getVersion(), electronVersion: process.versions.electron, nodeVersion: process.versions.node,
+      platform: process.platform, arch: process.arch, osRelease: os.release(),
+      registry: { url: s.registryUrl, state: s.state, lastSyncAt: s.lastSyncAt, queued: s.queued },
+    })
+    clipboard.writeText(text)
+    return text
   })
 
   // ---- sync

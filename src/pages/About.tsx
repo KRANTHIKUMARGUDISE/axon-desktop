@@ -1,280 +1,127 @@
-import { useEffect, useState } from 'react'
-import { ExternalLink } from 'lucide-react'
+import { useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import axonIcon from '@/assets/axon-icon.png'
 import axonTitle from '@/assets/axon-title.png'
 
-interface SystemInfo {
-  electronVersion: string
-  nodeVersion: string
-  platform: string
-  appVersion: string
-}
+// Product page: what AXON is and where data lives. Static copy only — no external links, remote assets or
+// personal information. (Build/support details live in Settings → About.)
 
-interface UserInfo {
-  name?: string
-  email?: string
-  team?: string
-  role?: string
-}
+const WHAT_TEAMS_BUILD = [
+  'Story to pull requests: plan the work, code each repo, review, open linked PRs.',
+  'Epic breakdown: analyse an epic and draft the stories for it.',
+  'Requirement checks: assess whether a ticket is ready for agents to work on.',
+  'Any multi-step task your agents can do, run the same way every time.',
+]
+
+const HOW_IT_WORKS: { title: string; text: string }[] = [
+  { title: 'Start', text: 'by hand, or automatically when a Jira ticket assigned to you is ready.' },
+  { title: 'Pipeline', text: "a published pipeline from your team's registry runs on this computer." },
+  { title: 'Agents', text: "each step runs your team's agent, in the right repo when it needs one." },
+  { title: 'Review', text: 'the run pauses only at gates the pipeline defines.' },
+  { title: 'Results', text: 'PRs, ticket updates or other outputs, plus a record of the run.' },
+]
+
+const PLAIN_CODE_STEPS = [
+  'Repeating a step for each item in a list (ForEach)',
+  'Preparing workspaces and repos',
+  'Opening pull requests',
+  'Pausing for human review',
+  'Reading and updating Jira tickets',
+  'Readiness checks on requirements',
+]
+
+const DATA_LIVES = [
+  'Runs execute on this computer. AXON has no server of its own.',
+  'Secrets (Claude, Jira, GitHub) are encrypted on this machine and never synced.',
+  'The team registry receives pipelines, blocks and run summaries only, never code, prompts or agent output.',
+  "The context an agent works on is sent to Anthropic's API only while that agent runs, using your organisation's key.",
+  'Jira and GitHub are called with your own credentials.',
+]
 
 export default function About() {
-  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
-  const [userInfo, setUserInfo] = useState<UserInfo>({})
-  const [updateStatus, setUpdateStatus] = useState<string>('Checking...')
-  const [loading, setLoading] = useState(true)
-
-  // Set window title
-  useEffect(() => {
-    if (window.axon?.window?.setTitle) {
-      window.axon.window.setTitle('AXON — About')
-    }
-  }, [])
+  const { data } = useQuery({ queryKey: ['system-info'], queryFn: () => window.axon.system.getInfo(), staleTime: Infinity })
 
   useEffect(() => {
-    async function loadData() {
-      try {
-        if (!window.axon?.system || !window.axon?.settings) {
-          setLoading(false)
-          return
-        }
-
-        // Get system info
-        const info = await window.axon.system.getInfo()
-        setSystemInfo(info)
-
-        // Get user info from settings
-        const [name, email, team, role] = await Promise.all([
-          window.axon.settings.get('userName'),
-          window.axon.settings.get('userEmail'),
-          window.axon.settings.get('team'),
-          window.axon.settings.get('userRole'),
-        ])
-        const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined)
-        setUserInfo({ name: str(name), email: str(email), team: str(team), role: str(role) })
-
-        // Check for updates
-        const updates = await window.axon.system.checkForUpdates()
-        setUpdateStatus(updates.message)
-      } catch (err) {
-        console.error('Failed to load about data:', err)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    loadData()
+    window.axon?.window?.setTitle?.('AXON — About')
   }, [])
-
-  if (loading) {
-    return (
-      <div style={{ padding: '24px', color: 'var(--axon-t3)' }}>
-        Loading system information...
-      </div>
-    )
-  }
 
   return (
-    <div style={{ padding: '24px', background: 'var(--axon-bg)', minHeight: '100%' }}>
-      <div style={{ maxWidth: 600, margin: '0 auto' }}>
-        {/* Header */}
-        <div style={{ marginBottom: 32, textAlign: 'center' }}>
-          <div style={{ marginBottom: 12 }}>
-            <img src={axonIcon} alt="AXON" style={{ height: 64, marginBottom: 8, display: 'inline-block' }} />
-            <div>
-              <img src={axonTitle} alt="AXON" style={{ height: 20, display: 'inline-block' }} />
-            </div>
-          </div>
-          <p style={{ fontSize: 13, color: 'var(--axon-t3)', margin: '16px 0 0' }}>
-            Version {systemInfo?.appVersion || 'unknown'}
+    <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-8 py-10">
+      <header className="flex flex-col items-center gap-3 text-center">
+        <img src={axonIcon} alt="" className="h-16" />
+        <img src={axonTitle} alt="AXON" className="h-5" />
+        <p className="text-base font-medium text-foreground">Engineering Intelligence. Automated Delivery.</p>
+        <p className="text-sm text-muted-foreground">
+          Version {data?.appVersion ?? '…'} · Proof of concept for internal evaluation
+        </p>
+      </header>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>What AXON does</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            AXON runs pipelines of AI agents on your machine. Your team builds the agents and designs the pipeline; AXON runs it: in order,
+            in the right place, with the right context, and with a human review wherever the pipeline asks for one.
           </p>
-        </div>
+        </CardContent>
+      </Card>
 
-        {/* Mode */}
-        <div style={{
-          background: 'var(--axon-bg2)',
-          border: '1px solid var(--axon-border)',
-          borderRadius: 10,
-          padding: 16,
-          marginBottom: 16,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <div style={{ width: 12, height: 12, borderRadius: '50%', background: 'var(--axon-green)' }} />
-            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--axon-t1)' }}>Local mode</span>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--axon-t3)' }}>
-            Blocks, pipelines and deliveries are stored on this machine. No server connection is required.
-          </div>
-        </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>What teams build with it</CardTitle>
+          <CardDescription>Examples only.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ul className="flex list-disc flex-col gap-2 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-foreground/60">
+            {WHAT_TEAMS_BUILD.map((t) => <li key={t}>{t}</li>)}
+          </ul>
+        </CardContent>
+      </Card>
 
-        {/* Current User Card */}
-        <div style={{
-          background: 'var(--axon-bg2)',
-          border: '1px solid var(--axon-border)',
-          borderRadius: 10,
-          padding: 16,
-          marginBottom: 16,
-        }}>
-          <h3 style={{ fontSize: 12, fontWeight: 600, color: 'var(--axon-t3)', margin: '0 0 12px', textTransform: 'uppercase' }}>
-            Current User
-          </h3>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            {userInfo.name && (
-              <div
-                style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: '50%',
-                  background: 'linear-gradient(135deg, var(--axon-teal), var(--axon-blue))',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 12,
-                  fontWeight: 700,
-                  color: '#fff',
-                  flexShrink: 0,
-                }}
-              >
-                {userInfo.name.slice(0, 2).toUpperCase()}
-              </div>
-            )}
-            <div>
-              {userInfo.name && (
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)' }}>
-                  {userInfo.name}
-                </div>
-              )}
-              {userInfo.email && (
-                <div style={{ fontSize: 12, color: 'var(--axon-t3)', marginTop: 2 }}>
-                  {userInfo.email}
-                </div>
-              )}
-              {userInfo.team && (
-                <div style={{ fontSize: 11, color: 'var(--axon-t4)', marginTop: 2 }}>
-                  Team: {userInfo.team}
-                  {userInfo.role && ` • ${userInfo.role}`}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* System Info */}
-        <div style={{
-          background: 'var(--axon-bg2)',
-          border: '1px solid var(--axon-border)',
-          borderRadius: 10,
-          padding: 16,
-          marginBottom: 16,
-        }}>
-          <h3 style={{ fontSize: 12, fontWeight: 600, color: 'var(--axon-t3)', margin: '0 0 12px', textTransform: 'uppercase' }}>
-            System Information
-          </h3>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            {[
-              { label: 'Electron', value: systemInfo?.electronVersion },
-              { label: 'Node.js', value: systemInfo?.nodeVersion },
-              { label: 'Platform', value: systemInfo?.platform },
-            ].map((item) => (
-              <div key={item.label}>
-                <div style={{ fontSize: 11, color: 'var(--axon-t4)', marginBottom: 4 }}>
-                  {item.label}
-                </div>
-                <code style={{ fontSize: 12, color: 'var(--axon-t2)', fontFamily: 'monospace' }}>
-                  {item.value || '—'}
-                </code>
-              </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>How it works</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ol className="flex flex-col gap-3">
+            {HOW_IT_WORKS.map((s, i) => (
+              <li key={s.title} className="flex items-start gap-3 text-sm leading-relaxed">
+                <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary">{i + 1}</span>
+                <span className="text-muted-foreground"><strong className="font-medium text-foreground">{s.title}:</strong> {s.text}</span>
+              </li>
             ))}
-          </div>
-        </div>
+          </ol>
+        </CardContent>
+      </Card>
 
-        {/* Check for Updates */}
-        <div style={{
-          background: 'var(--axon-bg2)',
-          border: '1px solid var(--axon-border)',
-          borderRadius: 10,
-          padding: 16,
-          marginBottom: 16,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)', marginBottom: 4 }}>
-              Updates
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--axon-t3)' }}>
-              {updateStatus}
-            </div>
-          </div>
-          <button
-            onClick={() => window.axon.system.checkForUpdates().then(u => setUpdateStatus(u.message))}
-            style={{
-              padding: '8px 14px',
-              borderRadius: 6,
-              border: '1px solid var(--axon-border2)',
-              background: 'var(--axon-bg3)',
-              color: 'var(--axon-t2)',
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              fontFamily: 'inherit',
-            }}
-          >
-            Check Now
-          </button>
-        </div>
-
-        {/* Links */}
-        <div style={{
-          background: 'var(--axon-bg2)',
-          border: '1px solid var(--axon-border)',
-          borderRadius: 10,
-          padding: 0,
-          overflow: 'hidden',
-          marginBottom: 32,
-        }}>
-          {[
-            { label: 'Documentation', url: 'https://docs.axon.dev', external: true },
-            { label: 'Report Issue', url: 'https://github.com/anthropics/axon-desktop/issues', external: true },
-          ].map((link) => (
-            <button
-              key={link.label}
-              onClick={() => window.axon.shell.openExternal(link.url)}
-              style={{
-                width: '100%',
-                padding: '12px 16px',
-                border: 'none',
-                background: 'transparent',
-                borderBottom: '1px solid var(--axon-border)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                cursor: 'pointer',
-                fontSize: 13,
-                color: 'var(--axon-t2)',
-                fontFamily: 'inherit',
-                textAlign: 'left',
-                transition: 'background 0.15s',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--axon-bg3)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <span>{link.label}</span>
-              <ExternalLink size={14} style={{ color: 'var(--axon-t4)' }} />
-            </button>
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div style={{ textAlign: 'center', fontSize: 11, color: 'var(--axon-t4)' }}>
-          <p style={{ margin: 0 }}>
-            AXON Desktop • AI-powered delivery pipelines
+      <Card>
+        <CardHeader>
+          <CardTitle>AI only where it&apos;s needed</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            AXON&apos;s built-in steps run as plain code — no AI, no tokens, the same result every time:
           </p>
-          <p style={{ margin: '4px 0 0' }}>
-            © {new Date().getFullYear()} Anthropic. All rights reserved.
-          </p>
-        </div>
-      </div>
+          <ul className="flex list-disc flex-col gap-2 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-foreground/60">
+            {PLAIN_CODE_STEPS.map((t) => <li key={t}>{t}</li>)}
+          </ul>
+          <p className="text-sm leading-relaxed text-muted-foreground">Your agents handle the parts that need judgement. AXON handles the rest.</p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Where your data lives</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ul className="flex list-disc flex-col gap-2 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-foreground/60">
+            {DATA_LIVES.map((t) => <li key={t}>{t}</li>)}
+          </ul>
+        </CardContent>
+      </Card>
     </div>
   )
 }

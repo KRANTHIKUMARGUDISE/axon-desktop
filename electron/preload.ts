@@ -109,6 +109,9 @@ contextBridge.exposeInMainWorld('axon', {
     openInVSCode: (path: string) => ipcRenderer.invoke('shell:openInVSCode', path),
   },
   system: {
+    getFeatures: () => ipcRenderer.invoke('system:getFeatures'),
+    getLicenses: () => ipcRenderer.invoke('system:getLicenses'),
+    copyDiagnostics: () => ipcRenderer.invoke('system:copyDiagnostics'),
     getInfo: () => ipcRenderer.invoke('system:getInfo'),
     checkForUpdates: () => ipcRenderer.invoke('system:checkForUpdates'),
   },

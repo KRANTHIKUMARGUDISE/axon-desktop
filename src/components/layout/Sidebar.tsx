@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { LayoutGrid, Play, GitBranch, Box, Info, Workflow, Settings, KeyRound, BarChart2 } from 'lucide-react'
 import { useDeliveries } from '@/hooks/useDeliveries'
+import { useFeatures } from '@/hooks/useFeatures'
 import type { ClaudeKeyStatus } from '@/types'
 
-const workspaceItems = [
+const allWorkspaceItems = [
   { to: '/dashboard', icon: LayoutGrid, label: 'Dashboard', end: true },
   { to: '/deliveries', icon: Play, label: 'Deliveries' },
   { to: '/intelligence', icon: BarChart2, label: 'Intelligence' },
@@ -22,6 +23,9 @@ const systemItems = [
 ]
 
 export function Sidebar() {
+  // D6: Intelligence (static demo data) is hidden unless its feature flag is on.
+  const { features } = useFeatures()
+  const workspaceItems = allWorkspaceItems.filter((i) => i.to !== '/intelligence' || features.intelligence)
   const { data: paged } = useDeliveries({ pageSize: 100 })
   const runningCount = (paged?.items ?? []).filter(d => d.status === 'Running').length
 

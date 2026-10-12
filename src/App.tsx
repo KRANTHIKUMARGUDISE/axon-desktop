@@ -14,6 +14,7 @@ import BuildingBlocks from './pages/BuildingBlocks'
 import Intelligence from './pages/Intelligence'
 import About from './pages/About'
 import Setup from './pages/Setup'
+import { useFeatures } from './hooks/useFeatures'
 import Settings from './pages/Settings'
 
 const queryClient = new QueryClient({
@@ -29,6 +30,7 @@ const queryClient = new QueryClient({
 
 function AppRoutes() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null)
+  const { features, loaded: featuresLoaded } = useFeatures()
 
   useEffect(() => {
     // Onboarded = a Jira-verified identity exists (set in main by the onboarding flow).
@@ -72,7 +74,9 @@ function AppRoutes() {
         <Route path="/pipelines/new" element={<PipelineCreator />} />
         <Route path="/pipelines/:id/edit" element={<PipelineCreator />} />
         <Route path="/blocks" element={<BuildingBlocks />} />
-        <Route path="/intelligence" element={<Intelligence />} />
+        {/* D6: only routable when the flag is on; otherwise the URL falls through to the dashboard. */}
+        {features.intelligence && <Route path="/intelligence" element={<Intelligence />} />}
+        {!featuresLoaded && <Route path="/intelligence" element={null} />}
         <Route path="/about" element={<About />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

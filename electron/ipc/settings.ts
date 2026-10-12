@@ -9,6 +9,8 @@ import { handle } from './guard'
 
 interface StoredSettings extends Settings {
   gitTokenSuffix: string
+  // Feature flags (D6): main-only, default off. Env AXON_FEATURE_<NAME>=1 also enables them.
+  featureIntelligence: boolean
 }
 
 const store = new Store<StoredSettings>({
@@ -23,6 +25,7 @@ const store = new Store<StoredSettings>({
     // DS1's inline-vs-file cap, shared by context-snapshot (input) and output.result storage.
     maxContextSnapshotSizeKb: { type: 'number', default: 50 },
     gitTokenSuffix: { type: 'string', default: '' },
+    featureIntelligence: { type: 'boolean', default: false },
     registryUrl: { type: 'string', default: '' },
     registryBranch: { type: 'string', default: '' },
     syncIntervalMinutes: { type: 'number', default: 5 },

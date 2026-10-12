@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { ExternalLink, FolderOpen } from 'lucide-react'
+import { ClipboardCopy, ExternalLink, FolderOpen, Scale } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { LicensesDialog } from '../components/settings/LicensesDialog'
 import { JiraSettings } from '../components/settings/JiraSettings'
 import { GithubSettings } from '../components/settings/GithubSettings'
 import { ClaudeSettings } from '../components/settings/ClaudeSettings'
@@ -152,14 +153,37 @@ function PreferenceSettings() {
 
 function AboutSettings() {
   const { data } = useQuery({ queryKey: ['system-info'], queryFn: () => window.axon.system.getInfo(), staleTime: Infinity })
+  const [licensesOpen, setLicensesOpen] = useState(false)
+
+  async function copyDiagnostics() {
+    try {
+      await window.axon.system.copyDiagnostics()
+      toast.success('Diagnostics copied to the clipboard')
+    } catch (e) {
+      toast.error(cleanError(e, 'Could not copy diagnostics'))
+    }
+  }
+
   return (
-    <SettingsCard title="About" description="Build information for support and bug reports.">
-      <FieldRow>
-        <Info label="AXON version">{data?.appVersion}</Info>
-        <Info label="Platform">{data?.platform}</Info>
-        <Info label="Electron">{data?.electronVersion}</Info>
-        <Info label="Node">{data?.nodeVersion}</Info>
-      </FieldRow>
-    </SettingsCard>
+    <>
+      <SettingsCard
+        title="About"
+        description="Build information for support and bug reports. Diagnostics contain versions, the registry host, last sync status and the queued-change count — no emails, names, paths or secrets."
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setLicensesOpen(true)}><Scale /> Third-party licenses</Button>
+            <Button onClick={copyDiagnostics}><ClipboardCopy /> Copy diagnostics</Button>
+          </>
+        }
+      >
+        <FieldRow>
+          <Info label="AXON version">{data?.appVersion}</Info>
+          <Info label="Platform">{data?.platform}</Info>
+          <Info label="Electron">{data?.electronVersion}</Info>
+          <Info label="Node">{data?.nodeVersion}</Info>
+        </FieldRow>
+      </SettingsCard>
+      <LicensesDialog open={licensesOpen} onOpenChange={setLicensesOpen} />
+    </>
   )
 }

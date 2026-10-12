@@ -19,6 +19,14 @@ export interface IdentityInfo {
   machineName: string
 }
 
+export interface LicenseInfo {
+  name: string
+  version: string
+  license: string
+  repository?: string
+  text: string
+}
+
 export interface JiraStatusInfo {
   configured: boolean
   site: string
@@ -148,6 +156,10 @@ export interface AxonBridge {
     openInVSCode(path: string): Promise<{ success: boolean; error?: string }>
   }
   system: {
+    getFeatures(): Promise<{ intelligence: boolean }>
+    getLicenses(): Promise<{ generatedAt: string | null; packages: LicenseInfo[] }>
+    /** Copies an allow-listed diagnostics summary to the clipboard (main-side) and returns the text. */
+    copyDiagnostics(): Promise<string>
     getInfo(): Promise<{ electronVersion: string; nodeVersion: string; platform: string; appVersion: string }>
     checkForUpdates(): Promise<{ status: string; message: string }>
   }

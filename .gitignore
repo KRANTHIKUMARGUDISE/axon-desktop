@@ -1,7 +1,9 @@
 node_modules/ 
 dist/ 
 dist-electron/ 
-release/ 
+release/
+# generated at build time by scripts/generate-licenses.js
+resources/licenses.json 
 
 # Secrets and environment variables
 .env.local
