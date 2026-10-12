@@ -73,3 +73,52 @@ Branch `chore/v1-s2b-dependency-hardening`, one commit per step. Full record in 
 - Electron 32–44 breaking-change list not read line by line; verification is behavioural (smoke + tests). IPC-from-foreign-frame rejection is covered by unit tests only (iframes are blocked by CSP so it can't be exercised from the page).
 - The opt-in live agent tests (`live.agent.test.ts`, needs `AXON_LIVE_API_KEY`) were not run after the SDK/Electron bumps.
 - I mistakenly claimed in the step 4 commit message/doc that `allowScripts` gates Electron's binary download; Electron 44 has no postinstall. Corrected in step 7 (docs + package.json).
+
+## Session 3 — Registry, identity, sync (2026-10-13)
+
+### Done
+- **Registry layout + write guard (D9)**: `electron/registry/layout.ts`. Direct writes only under `users/{email}/` (lowercased, path-safe email); the guard runs at enqueue, again at replay, and the staged file list is re-checked before every commit. Org/team/catalog only via PR.
+- **`GitRepoStore`** (`electron/store/gitRepoStore.ts`) wraps `FileStore` (the offline cache/working copy) and mirrors the engineer's own blocks/pipelines into the registry layout (pipelines: one YAML per version + `draft.yaml`; blocks: folder with `block.yaml` + `files/…`). `FileStore` gained a read-only `definitions` fallback (`RegistryReader`: org + teams from the clone), so engine/`createDelivery` see shared docs transparently. Hydration imports your own docs on a fresh machine; a one-time backfill queues pre-S3 local docs.
+- **Durable queue + sync** (`registry/queue.ts`, `registry/sync.ts`): one atomic file per op, coalesced by path, removed only after a successful push. Sync = fetch → reset clone to `origin/{branch}` → replay ops → secret scan → commit → push; non-fast-forward → re-fetch + replay with backoff (5 tries) → `NeedsAttention`; unreachable → `Offline`; `registry.yaml.minAppVersion`/schema newer than the app → `ReadOnly`. Scheduler (default 5 min, setting) + "Sync now" + bounded flush on quit. States pushed on `registry:status`.
+- **Versioning (D13)**: `status Draft|Published|Deprecated`, immutable `versions/…/v{n}.json`, publish (pipelines pin `blockVersion`), deprecate, duplicate (`derivedFrom`), version history, "newer block version available". Deliveries record `pipelineId/pipelineVersion/blockVersions` and **the engine now runs the pinned block versions**.
+- **Promotion**: `registry/promote.ts` — dedicated branch + GitHub REST find-or-create PR with the engineer's token; PR URL shown in the dialog.
+- **Seed bundle**: `resources/seed` (human-gate + 4 stubs), versioned + sha256-checked (`scripts/build-seed-manifest.js`), loaded as `Axon`/`Org`/immutable; immutability enforced in the store. Shipped via `extraResources`.
+- **Schema versioning**: `SCHEMA_VERSION` 2, `shared/migrations.ts` (N-1 upgraded on read, newer refused).
+- **Onboarding** (`Setup.tsx` rewritten): registry URL/branch + Test connection (read + push dry-run), Jira site/email/token with `/myself` email match (blocks on mismatch), GitHub token check, Claude key (D3), workspace root (D7), activity-log consent.
+- **Identity**: `profile.yaml` (email, displayName, team, machines), stable machine UUID, `activity.log` (launch/login, appended and pushed with the next sync). The `local-user` placeholder is gone from approver/createdBy/agreement-accepted-by. **`userEmail/userName/jiraSite/setupComplete` are no longer renderer-writable** — only `onboarding:complete` (after the Jira check) sets them.
+- **Run summary** (`registry/runSummary.ts`): explicit whitelist + strict schema + 200-char caps; secret scan on every registry write (Anthropic/GitHub/AWS/Atlassian/Slack keys, private keys, bearer/basic, generic assignments).
+- **UI**: offline/attention banner in the app shell, Settings → Registry (URL/branch override, interval, last sync, queued count, rejected writes, Sync now), scope/status badges, `VersionDialog` (history, publish, deprecate, duplicate, promote) from pipeline cards and the block detail panel.
+- **Tests**: 111 → 183 (+72). Store/sync tests run against local bare repos (no network): two clients concurrently (and a deterministic non-ff race), offline → crash → reconnect, secret refusal, read-only registry, tamper → path guard, hydration, backfill, promotion (mocked GitHub), run-summary contract, Jira (mocked fetch), seed checksum/tamper, migrations, validators.
+- **Verified**: `npm run typecheck`, `npm test`, `npm run build` pass. Live (real Electron over CDP): onboarding screen renders for a fresh profile; 5 seeded blocks visible; identity settings/`file:`/`ext::`/credentialed URLs rejected; `onboarding:complete` refused without a verified Jira identity; seeded block update/duplicate/promote refused.
+
+### Deviations / decisions I had to assume
+- **"Publish increments version"**: a Draft's `version` is the number it *will become*; editing a Draft edits in place (no bump); editing a Published doc creates Draft `version+1`. Net effect is the same numbering as increment-on-publish, but the existing "version bumps on every update" behaviour and its tests changed.
+- **"Rebase own changes"** is implemented as reset-to-remote + replay of the queue (equivalent for single-writer folders and cannot conflict).
+- **Default registry URL** ships as `resources/registry-default.json` (`url` is empty in this repo — set it per org/release) plus `AXON_REGISTRY_URL`/`AXON_REGISTRY_BRANCH` env overrides, instead of a compiled constant.
+- Pipelines can only be published when every referenced block has a published version; a pipeline can only be promoted if its blocks are Team/Org/built-in.
+- `team` is a free-text onboarding/Settings value (Jira has no team field).
+- Seed stubs (provisioner, pr-creator, ticket-fetcher, test-runner) are registered but have no native handler — running one fails with "No native handler" until S4/S5.
+
+### Not done / caveats
+- **No live run against a real remote.** Production git hardening (`protocol.file.allow=never`, https/ssh URL validator) means a local bare repo can't be used through the real app, so the full onboarding → sync → promote path was verified only through the unit/integration tests (real git, bare-repo fixture) and the live IPC checks above — not with a real Jira site, GitHub registry or token. Worth one pass with the real registry.
+- Production `makeGit` with a real https/ssh remote (askpass token path, `-c core.autocrlf=false` on clone) is untested end-to-end; a test confirms simple-git accepts the flags and git refuses only the `file` transport.
+- Deletes don't propagate to the same engineer's other machines (hydration only imports missing docs); no Azure DevOps registry PRs; Jira write-permission checks (label/comment) are S5.
+- Registry docs from a *newer* schema are skipped and listed (`RegistryReader.skipped()`), not shown in the UI yet.
+- No manual click-through of the new React screens beyond the Welcome step; visual pass recommended (onboarding steps, Settings → Registry, VersionDialog, banner).
+- Nothing committed — the work is in the working tree for review.
+
+### Known issues for Session 4
+- The pipeline editor drops `blockVersion` pins when saving a Draft. Drafts must keep their pins, with an explicit "Update block versions" action instead of re-applying the pins at publish time.
+
+## Pending verification
+
+Real-world checks deferred so the sessions can move on. Each must be done before the stage in the right-hand column.
+
+| Check | Must be done before |
+|---|---|
+| Live agent containment tests (S2's 5 cases: repo settings widening tools, Write outside worktree, Read-only block editing, prompt injection in ticket text, repo hook execution) | Session 5 (watcher runs agents unattended) |
+| Jira identity in onboarding against a real Jira Cloud site (matching email passes, mismatched email blocked) | Session 5 |
+| Promote → PR → merge → item appears as org/team after sync | Demo |
+| Second user (different email) sees org items but not my personal items | Demo |
+| Offline queue + banner, Settings → Registry screen, version history dialog clicked through | Demo |
+| Production https git path exercised end to end (sync verified manually: pipeline creation + sync to the real registry works) | Done ✓ |

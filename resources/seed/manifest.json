@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 2,
+  "bundleVersion": 5,
+  "blocks": [
+    {
+      "id": "axon-human-gate",
+      "name": "Human Gate",
+      "version": 1,
+      "path": "blocks/human-gate",
+      "sha256": "71406d014226b3b94a541354cc699f57e0df99a9c4fafd048741cfcf7f481928"
+    },
+    {
+      "id": "axon-pr-creator",
+      "name": "PR Creator",
+      "version": 1,
+      "path": "blocks/pr-creator",
+      "sha256": "b40646984cbefd54b3a373be18a8e4f32bf0465d4ea9c2634dc7cdfe433eddec"
+    },
+    {
+      "id": "axon-test-runner",
+      "name": "Test Runner",
+      "version": 1,
+      "path": "blocks/test-runner",
+      "sha256": "8e789715d16a9d950327264903ff320e2539e43b6e75e2e577be8511cc873c29"
+    },
+    {
+      "id": "axon-ticket-fetcher",
+      "name": "Ticket Fetcher",
+      "version": 1,
+      "path": "blocks/ticket-fetcher",
+      "sha256": "7eb499eb6792b8e0945720b3549cb0998af92b7d2b47bad78fbf61082c5ee746"
+    },
+    {
+      "id": "axon-workspace-provisioner",
+      "name": "Workspace Provisioner",
+      "version": 1,
+      "path": "blocks/workspace-provisioner",
+      "sha256": "739fa9568b843beaab0a8e2285eff56c4648befc46e3c4b317151beabf2efbd8"
+    }
+  ]
+}

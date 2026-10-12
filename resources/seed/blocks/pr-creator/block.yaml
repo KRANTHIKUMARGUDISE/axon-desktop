@@ -1,0 +1,12 @@
+id: axon-pr-creator
+schemaVersion: 2
+name: PR Creator
+role: IO
+description: Opens linked pull requests for a delivery. Registered now; becomes runnable in a later release.
+version: 1
+tags: [axon, io, stub]
+sourceType: Axon
+agentRuntime: Axon
+artifactFormat: Native
+artifactName: pr-creator
+verified: true

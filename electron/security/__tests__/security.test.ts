@@ -153,7 +153,8 @@ describe('typed settings + URL helpers', () => {
     expect(SETTING_VALIDATORS.workspaceRoot.safeParse('C:\\a\\..\\Windows').success).toBe(false)
     expect(SETTING_VALIDATORS.workspaceRoot.safeParse('\\\\host\\share').success).toBe(false)
     expect(SETTING_VALIDATORS.theme.safeParse('neon').success).toBe(false)
-    expect(SETTING_VALIDATORS.setupComplete.safeParse('yes').success).toBe(false)
+    // identity is set by onboarding in main after the Jira check — never by the renderer
+    for (const k of ['setupComplete', 'userEmail', 'userName']) expect(Object.keys(SETTING_VALIDATORS)).not.toContain(k)
     expect(SETTING_VALIDATORS.maxContextSnapshotSizeKb.safeParse(0).success).toBe(false)
     expect(Object.keys(SETTING_VALIDATORS)).not.toContain('gitTokenSuffix')
   })

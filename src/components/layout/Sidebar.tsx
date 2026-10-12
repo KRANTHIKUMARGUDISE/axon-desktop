@@ -27,7 +27,7 @@ export function Sidebar() {
 
   const [userName, setUserName] = useState('')
   useEffect(() => {
-    window.axon.settings.get('userName').then((v) => setUserName(typeof v === 'string' ? v : '')).catch(() => {})
+    window.axon.identity.get().then((id) => setUserName(id.displayName || id.email)).catch(() => {})
   }, [])
 
   const [claudeKeyStatus, setClaudeKeyStatus] = useState<ClaudeKeyStatus | null>(null)
@@ -169,7 +169,7 @@ export function Sidebar() {
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-xs font-medium" style={{ color: 'var(--axon-t1)' }}>
-              {userName || 'Local user'}
+              {userName || 'AXON user'}
             </div>
             <div className="text-[10px]" style={{ color: 'var(--axon-t3)' }}>
               Local workspace

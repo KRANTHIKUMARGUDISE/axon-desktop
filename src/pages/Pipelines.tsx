@@ -2,13 +2,16 @@ import { useState, useMemo, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient, useMutation } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { deletePipeline, createPipeline } from '../services/pipelinesService'
-import type { CreatePipelineRequest } from '../services/pipelinesService'
+import { deletePipeline } from '../services/pipelinesService'
 import { usePipelines } from '../hooks/usePipelines'
 import { useBlocks } from '../hooks/useBlocks'
 import type { Pipeline } from '../types'
 import PipelineCard from '../components/pipeline/PipelineCard'
 import NewDeliveryModal from '../components/delivery/NewDeliveryModal'
+import { VersionDialog } from '../components/registry/VersionDialog'
+import type { VersionTarget } from '../components/registry/VersionDialog'
+import { newerBlockVersion } from '@shared'
+import { useIdentity } from '../hooks/useRegistry'
 
 type VisibilityFilter = 'all' | 'mine' | 'team' | 'organisation'
 
@@ -27,23 +30,13 @@ export default function Pipelines() {
   const [visibilityFilter, setVisibilityFilter] = useState<VisibilityFilter>('all')
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [runTarget, setRunTarget] = useState<Pipeline | null>(null)
-  const [currentUserId, setCurrentUserId] = useState<string>('')
-  const [currentTeam, setCurrentTeam] = useState<string>('')
+  const [versionTarget, setVersionTarget] = useState<VersionTarget | null>(null)
+  const { data: identity } = useIdentity()
+  const currentTeam = identity?.team ?? ''
 
   const { data: pipelines, isLoading, isError } = usePipelines(undefined)
   const { blocks } = useBlocks()
 
-  useEffect(() => {
-    async function loadUserInfo() {
-      const [userId, team] = await Promise.all([
-        window.axon.settings.get('userId') as Promise<string | null>,
-        window.axon.settings.get('team') as Promise<string | null>,
-      ])
-      setCurrentUserId(userId || '')
-      setCurrentTeam(team || '')
-    }
-    loadUserInfo()
-  }, [])
 
   // Create a map of blockId -> block type for MiniFlowPreview. `role` is the current
   // field; `type` is legacy and almost always undefined on real blocks now — falling
@@ -62,16 +55,9 @@ export default function Pipelines() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['pipelines'] }),
   })
 
+  // "Duplicate" records derivedFrom {pipelineId, version} (D13) — done in main.
   const duplicateM = useMutation({
-    mutationFn: async (pipeline: Pipeline) => {
-      const req: CreatePipelineRequest = {
-        name: `${pipeline.name} (copy)`,
-        description: pipeline.description,
-        nodes: pipeline.nodes ?? [],
-        edges: pipeline.edges ?? [],
-      }
-      return createPipeline(req)
-    },
+    mutationFn: async (pipeline: Pipeline) => window.axon.versions.duplicate('pipeline', pipeline.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['pipelines'] })
       toast.success('Pipeline duplicated')
@@ -89,12 +75,9 @@ export default function Pipelines() {
     const matchesTags = selectedTags.length === 0 || selectedTags.some((t) => (p.tags ?? []).includes(t))
 
     let matchesVisibility = true
-    if (visibilityFilter === 'mine') {
-      matchesVisibility = p.createdBy === currentUserId
-    } else if (visibilityFilter === 'team') {
-      matchesVisibility = p.ownerTeam === currentTeam && !!currentTeam
-    }
-    // organisation filter is for future use, always shows all
+    if (visibilityFilter === 'mine') matchesVisibility = (p.scope ?? 'Personal') === 'Personal'
+    else if (visibilityFilter === 'team') matchesVisibility = p.scope === 'Team'
+    else if (visibilityFilter === 'organisation') matchesVisibility = p.scope === 'Org'
 
     return matchesSearch && matchesTags && matchesVisibility
   })
@@ -125,8 +108,15 @@ export default function Pipelines() {
   }
 
   function handlePromote(pipeline: Pipeline) {
-    toast.info(`Organisational promotion request for "${pipeline.name}" submitted. Coming soon!`)
+    setVersionTarget({ kind: 'pipeline', id: pipeline.id, name: pipeline.name, scope: pipeline.scope })
   }
+
+  // D13: which pinned blocks have a newer published version?
+  const blockById = useMemo(() => new Map(blocks.map((b) => [b.id, b])), [blocks])
+  const newerBlocksFor = (p: Pipeline): string[] =>
+    (p.nodes ?? [])
+      .filter((n) => newerBlockVersion(n, blockById.get(n.blockId) as Parameters<typeof newerBlockVersion>[1]) !== null)
+      .map((n) => blockById.get(n.blockId)?.name ?? n.blockId)
 
   return (
     <div style={{ height: '100%', overflowY: 'auto', background: 'var(--axon-bg)', display: 'flex', flexDirection: 'column' }}>
@@ -188,19 +178,18 @@ export default function Pipelines() {
             <button
               key={visibility}
               onClick={() => setVisibilityFilter(visibility)}
-              disabled={visibility === 'team' && !currentTeam || visibility === 'organisation'}
+              disabled={visibility === 'team' && !currentTeam}
               style={{
-                fontSize: 11, padding: '4px 10px', borderRadius: 5, cursor: (visibility === 'team' && !currentTeam) || visibility === 'organisation' ? 'not-allowed' : 'pointer',
+                fontSize: 11, padding: '4px 10px', borderRadius: 5, cursor: visibility === 'team' && !currentTeam ? 'not-allowed' : 'pointer',
                 fontWeight: visibilityFilter === visibility ? 600 : 400,
                 background: visibilityFilter === visibility ? 'rgba(111,95,232,0.15)' : 'var(--axon-bg2)',
-                color: (visibility === 'team' && !currentTeam) || visibility === 'organisation' ? 'var(--axon-t4)' : visibilityFilter === visibility ? '#a78bfa' : 'var(--axon-t3)',
+                color: visibility === 'team' && !currentTeam ? 'var(--axon-t4)' : visibilityFilter === visibility ? '#a78bfa' : 'var(--axon-t3)',
                 border: visibilityFilter === visibility ? '1px solid rgba(111,95,232,0.35)' : '1px solid var(--axon-border)',
                 transition: 'all 0.12s',
-                opacity: (visibility === 'team' && !currentTeam) || visibility === 'organisation' ? 0.5 : 1,
+                opacity: visibility === 'team' && !currentTeam ? 0.5 : 1,
               }}
               title={
                 visibility === 'team' && !currentTeam ? 'Team filter available after setting team in Settings' :
-                visibility === 'organisation' ? 'Coming soon' :
                 ''
               }
             >
@@ -293,11 +282,14 @@ export default function Pipelines() {
                 onDuplicate={handleDuplicate}
                 onDelete={handleDelete}
                 onPromote={handlePromote}
+                newerBlocks={newerBlocksFor(pipeline)}
               />
             ))}
           </div>
         )}
       </div>
+
+      <VersionDialog target={versionTarget} onClose={() => setVersionTarget(null)} />
 
       <NewDeliveryModal
         isOpen={!!runTarget}

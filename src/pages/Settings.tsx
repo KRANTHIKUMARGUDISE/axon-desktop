@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { CheckCircle, Save, ExternalLink, Eye, EyeOff } from 'lucide-react'
 import type { ClaudeKeyStatus } from '../types'
+import { RegistrySettings } from '../components/registry/RegistrySettings'
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
@@ -269,6 +270,11 @@ export default function Settings() {
               )}
             </div>
           </div>
+        </Section>
+
+        {/* ===== REGISTRY ===== */}
+        <Section title="Registry">
+          <RegistrySettings />
         </Section>
 
         {/* ===== GIT ===== */}

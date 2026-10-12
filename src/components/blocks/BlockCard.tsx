@@ -133,6 +133,8 @@ export default function BlockCard({ block, selected, onClick }: Props) {
           />
           <span style={{ fontSize: 9, color: 'var(--axon-t4)' }}>
             {SOURCE_LABEL[sourceType]}
+            {sourceType !== 'Axon' && block.scope && block.scope !== 'Personal' ? ` · ${block.scope === 'Team' ? `Team ${block.team ?? ''}`.trim() : block.scope}` : ''}
+            {block.status === 'Draft' ? ' · Draft' : block.status === 'Deprecated' ? ' · Deprecated' : ''}
           </span>
         </div>
       </div>

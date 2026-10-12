@@ -2,6 +2,7 @@ import { useEffect, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { TitleBar } from './TitleBar'
+import { RegistryBanner } from '../registry/RegistryBanner'
 
 interface AppShellProps {
   children: ReactNode
@@ -25,6 +26,7 @@ export function AppShell({ children }: AppShellProps) {
   return (
     <div className="dark flex flex-col h-screen overflow-hidden" style={{ background: 'var(--axon-bg)' }}>
       <TitleBar />
+      <RegistryBanner />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <main className="flex-1 overflow-auto min-w-0">

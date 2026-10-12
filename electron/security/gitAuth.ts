@@ -1,5 +1,6 @@
 import fs from 'fs/promises'
 import path from 'path'
+import { parseRepoUrl } from '../../shared/repoUrl'
 
 // Git credentials never travel in URLs or argv: they reach git through an environment-driven
 // GIT_ASKPASS helper. The helper script itself contains no secret — it echoes env vars that
@@ -21,15 +22,9 @@ export const GIT_UNSAFE_ALLOW = {
 
 /** https://, ssh://, or scp-like user@host:path. Rejects ext::, file:, local paths, options. */
 export function validateRepoUrl(url: unknown): string {
-  if (typeof url !== 'string') throw new Error('Repository URL must be a string')
-  const u = url.trim()
-  if (!u || u.length > 2048 || /[\0\r\n\s]/.test(u)) throw new Error('Invalid repository URL')
-  if (u.startsWith('-')) throw new Error('Invalid repository URL')
-  if (/^https:\/\/[^\s/@]+(:[^\s/@]*)?@/.test(u)) throw new Error('Repository URL must not embed credentials')
-  if (/^https:\/\/[^\s/]+\/.+/.test(u)) return u
-  if (/^ssh:\/\/[^\s/]+\/.+/.test(u)) return u
-  if (/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s:][^\s]*$/.test(u)) return u
-  throw new Error('Repository URL must be https://, ssh:// or git@host:path')
+  const ok = parseRepoUrl(url)
+  if (!ok) throw new Error('Repository URL must be https://, ssh:// or git@host:path (no embedded credentials)')
+  return ok
 }
 
 // simple-git 4 refuses to spawn git while these are present in the environment (editor, pager,

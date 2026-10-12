@@ -60,6 +60,7 @@ export async function createHarness(opts: HarnessOptions = {}) {
     createEngine({
       store, runner, workspace, bus, runsDir,
       ds1ThresholdBytes: () => opts.ds1ThresholdBytes ?? 50_000,
+      identity: () => 'dev@example.com',
     })
   const engine = build()
 

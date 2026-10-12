@@ -1,10 +1,14 @@
 import { z } from 'zod'
+import { parseRepoUrl } from './repoUrl'
 
 // Canonical document schemas shared by the Electron main process and the renderer.
 // Every persisted document carries id + schemaVersion + createdAt + updatedAt; the
 // same schemas are the future registry file schemas (S3) and an ApiStore's wire format.
 
-export const SCHEMA_VERSION = 1
+// v2 (S3): scope/owner/status on blocks + pipelines (D9, D13). The reader tolerates N-1 and
+// upgrades in memory (shared/migrations.ts).
+export const SCHEMA_VERSION = 2
+export const MIN_READABLE_SCHEMA_VERSION = SCHEMA_VERSION - 1
 
 const meta = {
   id: z.string().min(1),
@@ -21,6 +25,9 @@ export const AgentRuntimeSchema = z.enum(['Axon', 'Claude', 'Codex'])
 export const ArtifactFormatSchema = z.enum(['Native', 'Skill'])
 export const ExecutionTypeSchema = z.enum(['Prompt', 'Agentic'])
 export const VisibilitySchema = z.enum(['Personal', 'Team', 'Organisation'])
+export const ScopeSchema = z.enum(['Personal', 'Team', 'Org'])
+export const DocStatusSchema = z.enum(['Draft', 'Published', 'Deprecated'])
+export const DerivedFromSchema = z.object({ id: z.string(), version: z.number().int() })
 export const WorkspaceTypeSchema = z.enum(['Default', 'Browse'])
 
 export const DeliveryStatusSchema = z.enum([
@@ -35,10 +42,27 @@ export type SourceType = z.infer<typeof SourceTypeSchema>
 export type AgentRuntime = z.infer<typeof AgentRuntimeSchema>
 export type ArtifactFormat = z.infer<typeof ArtifactFormatSchema>
 export type ExecutionType = z.infer<typeof ExecutionTypeSchema>
+export type Scope = z.infer<typeof ScopeSchema>
+export type DocStatus = z.infer<typeof DocStatusSchema>
+export type DerivedFrom = z.infer<typeof DerivedFromSchema>
 export type Visibility = z.infer<typeof VisibilitySchema>
 export type WorkspaceType = z.infer<typeof WorkspaceTypeSchema>
 export type DeliveryStatus = z.infer<typeof DeliveryStatusSchema>
 export type StepStatus = z.infer<typeof StepStatusSchema>
+
+// Registry fields carried by every shareable definition (block / pipeline). `scope` + `owner`
+// make a later folder -> DB collection import a straight load (D9). `version` is the number of
+// this document: a Draft holds the version it will become when published; Published versions are
+// immutable and stored one file per version (D13).
+const registryFields = {
+  scope: ScopeSchema.default('Personal'),
+  owner: z.string().default(''),
+  team: z.string().optional(),
+  status: DocStatusSchema.default('Draft'),
+  versionLabel: z.string().max(60).optional(),
+  changeNote: z.string().max(500).optional(),
+  derivedFrom: DerivedFromSchema.optional(),
+}
 
 // ---------------------------------------------------------------- block
 
@@ -47,6 +71,7 @@ export type CachedFile = z.infer<typeof CachedFileSchema>
 
 export const BlockSchema = z.object({
   ...meta,
+  ...registryFields,
   name: z.string().min(1),
   role: BlockRoleSchema,
   description: z.string().default(''),
@@ -78,6 +103,7 @@ export type Block = z.infer<typeof BlockSchema>
 // Input accepted when creating a block (store fills id/meta/version).
 export const BlockInputSchema = BlockSchema.omit({
   id: true, schemaVersion: true, createdAt: true, updatedAt: true, version: true, immutable: true,
+  scope: true, owner: true, team: true, status: true, versionLabel: true, changeNote: true, derivedFrom: true,
 })
 export type BlockInput = z.infer<typeof BlockInputSchema>
 
@@ -107,11 +133,14 @@ export const PipelineNodeSchema = z.object({
   config: z.record(z.string(), z.unknown()).optional(),
   timeoutSeconds: z.number().optional(),
   pinnedVersion: z.union([z.string(), z.number()]).nullish(),
+  // D13: the block version this node runs. Pinned when the pipeline is published.
+  blockVersion: z.number().int().optional(),
 })
 export type PipelineNode = z.infer<typeof PipelineNodeSchema>
 
 export const PipelineSchema = z.object({
   ...meta,
+  ...registryFields,
   name: z.string().min(1),
   description: z.string().default(''),
   version: z.number().int().default(1),
@@ -138,6 +167,10 @@ export type PipelineInput = z.infer<typeof PipelineInputSchema>
 export const AgentOutputSchema = z.object({
   status: z.enum(['success', 'partial', 'failed']),
   confidence: z.number().optional(),
+  // Optional model usage reported by runners that know it; only these numbers reach run summaries.
+  usage: z.object({
+    inputTokens: z.number().optional(), outputTokens: z.number().optional(), costUsd: z.number().optional(),
+  }).optional(),
   summary: z.string().default(''),
   result: z.record(z.string(), z.unknown()).default({}),
   errorMessage: z.string().optional(),
@@ -218,6 +251,7 @@ export const DeliverySchema = z.object({
   prUrl: z.string().nullable().optional(),
   inputs: z.record(z.string(), z.unknown()).optional(),
   retriedFromDeliveryId: z.string().nullable().optional(),
+  rerunReason: z.string().max(500).optional(),
   attemptNumber: z.number().optional(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
@@ -235,6 +269,7 @@ export const CreateDeliveryInputSchema = z.object({
   storeFullContext: z.boolean().optional(),
   inputs: z.record(z.string(), z.unknown()).optional(),
   retriedFromDeliveryId: z.string().optional(),
+  rerunReason: z.string().max(500).optional(),
 })
 export type CreateDeliveryInput = z.infer<typeof CreateDeliveryInputSchema>
 
@@ -275,12 +310,23 @@ export const SettingsSchema = z.object({
   userEmail: z.string().default(''),
   userName: z.string().default(''),
   maxContextSnapshotSizeKb: z.number().default(50),
+  // S3 registry + identity
+  registryUrl: z.string().default(''),
+  registryBranch: z.string().default(''),
+  syncIntervalMinutes: z.number().default(5),
+  jiraSite: z.string().default(''),
+  team: z.string().default(''),
+  activityConsent: z.boolean().default(false),
 })
 export type Settings = z.infer<typeof SettingsSchema>
 export type SettingsKey = keyof Settings
 
 // Renderer-writable settings: one validator per key (no generic "set anything" path).
 // gitTokenSuffix is deliberately absent — main derives it from the token itself.
+// setupComplete / userEmail / userName / jiraSite are deliberately NOT here: onboarding verifies the
+// engineer's Jira identity in main and writes them itself, so the renderer cannot forge an identity.
+/** Jira Cloud site host. Used by onboarding (main) — not a renderer-writable setting. */
+export const JiraSiteSchema = z.string().regex(/^[a-z0-9][a-z0-9-]*\.atlassian\.net$/i, 'must look like yourcompany.atlassian.net')
 const AbsolutePath = z
   .string()
   .min(3)
@@ -293,10 +339,13 @@ export const SETTING_VALIDATORS = {
   workspaceRoot: z.union([z.literal(''), AbsolutePath]),
   gitProvider: z.enum(['github', 'azure', 'azuredevops']),
   theme: z.enum(['dark', 'light', 'system']),
-  setupComplete: z.boolean(),
-  userEmail: z.union([z.literal(''), z.string().max(254).email()]),
-  userName: z.string().max(100),
   maxContextSnapshotSizeKb: z.number().int().min(1).max(10240),
+  // '' = use the build-time default / branch 'main'.
+  registryUrl: z.union([z.literal(''), z.string().refine((u) => parseRepoUrl(u) !== null, 'must be an https://, ssh:// or git@host:path URL')]),
+  registryBranch: z.union([z.literal(''), z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$/).refine((b) => !b.includes('..'), 'invalid branch')]),
+  syncIntervalMinutes: z.number().int().min(1).max(1440),
+  team: z.string().max(60).regex(/^[A-Za-z0-9][A-Za-z0-9 ._-]*$|^$/),
+  activityConsent: z.boolean(),
 } as const
 export type WritableSettingKey = keyof typeof SETTING_VALIDATORS
 

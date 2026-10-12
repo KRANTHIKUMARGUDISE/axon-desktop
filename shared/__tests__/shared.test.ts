@@ -86,7 +86,7 @@ describe('schemas', () => {
     const b = BlockSchema.parse({
       id: 'x', createdAt: 't', updatedAt: 't', name: 'n', role: 'Execution', sourceType: 'Local', agentRuntime: 'Claude', artifactFormat: 'Skill',
     })
-    expect(b).toMatchObject({ schemaVersion: 1, version: 1, tags: [] })
+    expect(b).toMatchObject({ schemaVersion: 2, version: 1, tags: [] })
     expect(() => BlockSchema.parse({ id: 'x' })).toThrow()
   })
 

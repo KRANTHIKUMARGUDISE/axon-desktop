@@ -32,7 +32,8 @@ export interface EngineDeps {
   runsDir: string
   now?: () => Date
   ds1ThresholdBytes?: () => number
-  identity?: string
+  /** Who approves/rejects gates: the verified email (a getter so it follows onboarding changes). */
+  identity?: string | (() => string)
 }
 
 interface ActiveRun {
@@ -61,7 +62,7 @@ export function createEngine(deps: EngineDeps): Engine {
   const { store, runner, workspace, bus, runsDir } = deps
   const now = deps.now ?? (() => new Date())
   const threshold = deps.ds1ThresholdBytes ?? (() => DS1_DEFAULT_THRESHOLD_BYTES)
-  const identity = deps.identity ?? LOCAL_USER
+  const actor = (): string => (typeof deps.identity === 'function' ? deps.identity() : deps.identity) || LOCAL_USER
 
   const active = new Map<string, ActiveRun>()
   // Claimed synchronously before any await — blocks double start/resume/approve.
@@ -102,11 +103,14 @@ export function createEngine(deps: EngineDeps): Engine {
     emit(id, { type: 'failed', message, nodeId })
   }
 
-  async function loadBlocks(nodes: PipelineNode[]): Promise<{ blocks: Map<string, Block>; missing: string[] }> {
+  // Runs the block version the delivery was created against (D13) so reruns/resumes never drift; falls
+  // back to the current block only when that version predates version files (legacy local data).
+  async function loadBlocks(nodes: PipelineNode[], pins: Record<string, number> = {}): Promise<{ blocks: Map<string, Block>; missing: string[] }> {
     const blocks = new Map<string, Block>()
     const missing: string[] = []
     for (const blockId of new Set(nodes.map((n) => n.blockId))) {
-      const block = await store.getBlock(blockId)
+      const pinned = pins[blockId]
+      const block = (pinned !== undefined ? await store.getBlockVersion(blockId, pinned) : null) ?? (await store.getBlock(blockId))
       if (block) blocks.set(blockId, block)
       else missing.push(blockId)
     }
@@ -136,7 +140,7 @@ export function createEngine(deps: EngineDeps): Engine {
     const d0 = await store.getDelivery(id)
     if (!d0) throw new Error(`Delivery ${id} not found`)
     const { nodes, edges } = d0.pipelineSnapshot
-    const { blocks, missing } = await loadBlocks(nodes)
+    const { blocks, missing } = await loadBlocks(nodes, d0.pipelineSnapshot.blockVersions)
     if (missing.length) {
       await failDelivery(id, run, `Missing blocks: ${missing.join(', ')}`)
       return
@@ -344,7 +348,7 @@ export function createEngine(deps: EngineDeps): Engine {
       if (d.status !== 'Pending') return { success: false, error: `Delivery is ${d.status}, cannot start` }
 
       const { nodes, edges } = d.pipelineSnapshot
-      const { blocks, missing } = await loadBlocks(nodes)
+      const { blocks, missing } = await loadBlocks(nodes, d.pipelineSnapshot.blockVersions)
       const validation = validatePipelineGraph(nodes, edges, blocks)
       if (!validation.valid || missing.length) {
         return { success: false, error: `Invalid pipeline: ${[...validation.errors].join('; ')}` }
@@ -427,9 +431,9 @@ export function createEngine(deps: EngineDeps): Engine {
         if (!step || !step.output) return
         step.status = 'Completed'
         step.completedAt = iso()
-        step.output = { ...step.output, approvedBy: identity, approvedAt: iso(), reviewComment: trimmed }
+        step.output = { ...step.output, approvedBy: actor(), approvedAt: iso(), reviewComment: trimmed }
       })
-      emit(id, { type: 'gate_approved', nodeId: gate.nodeId, approvedBy: identity, comment: trimmed })
+      emit(id, { type: 'gate_approved', nodeId: gate.nodeId, approvedBy: actor(), comment: trimmed })
       return resumeClaimed(id)
     })
   }
@@ -449,13 +453,13 @@ export function createEngine(deps: EngineDeps): Engine {
         if (step?.output) {
           step.status = 'Failed'
           step.completedAt = iso()
-          step.output = { ...step.output, rejectedBy: identity, rejectedAt: iso(), reviewComment: trimmed }
+          step.output = { ...step.output, rejectedBy: actor(), rejectedAt: iso(), reviewComment: trimmed }
         }
         x.status = 'Failed'
         x.errorMessage = message
         x.completedAt = iso()
       })
-      emit(id, { type: 'gate_rejected', nodeId: gate.nodeId, rejectedBy: identity, comment: trimmed })
+      emit(id, { type: 'gate_rejected', nodeId: gate.nodeId, rejectedBy: actor(), comment: trimmed })
       emit(id, { type: 'status_changed', status: 'Failed' })
       emit(id, { type: 'failed', message, nodeId: gate.nodeId })
       return { success: true }

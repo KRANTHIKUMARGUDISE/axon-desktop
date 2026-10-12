@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { VersionDialog } from '../registry/VersionDialog'
+import { ScopeBadge, StatusBadge } from '../registry/ScopeBadge'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -58,6 +60,7 @@ interface Props {
 export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
   const navigate = useNavigate()
   const [tab, setTab] = useState<'details' | 'usedin'>('details')
+  const [versionsOpen, setVersionsOpen] = useState(false)
 
   const { data: block, isLoading, error } = useQuery({
     queryKey: ['block', blockId],
@@ -98,6 +101,8 @@ export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
   const outputs = block.outputs ?? []
   const cachedFiles = block.cachedFiles ?? []
   const isAxonBlock = sourceType === 'Axon'
+  // Team/Org documents come from the registry and are read-only here (duplicate to edit).
+  const isSharedReadOnly = block.scope === 'Team' || block.scope === 'Org'
 
   const handleDeactivate = () => {
     if (!window.confirm(`Deactivate "${block.name}"? This will remove it from active use.`)) return
@@ -488,7 +493,19 @@ export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
         >
           Add to pipeline
         </button>
-        {!isAxonBlock && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--axon-t3)' }}>
+          <ScopeBadge scope={block.scope} team={block.team} />
+          <StatusBadge status={block.status} />
+          <span>v{block.version}{block.versionLabel ? ` · ${block.versionLabel}` : ''}</span>
+          {block.derivedFrom && <span title={`Derived from ${block.derivedFrom.id}`}>· derived from v{block.derivedFrom.version}</span>}
+          <button
+            onClick={() => setVersionsOpen(true)}
+            style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--axon-nexus2)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+          >
+            Versions…
+          </button>
+        </div>
+        {!isAxonBlock && !isSharedReadOnly && (
           <div style={{ display: 'flex', gap: 8 }}>
             <button
               onClick={handleSync}
@@ -538,6 +555,10 @@ export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
           </div>
         )}
       </div>
+      <VersionDialog
+        target={versionsOpen ? { kind: 'block', id: block.id, name: block.name, scope: block.scope, immutable: isAxonBlock || block.immutable } : null}
+        onClose={() => setVersionsOpen(false)}
+      />
     </div>
   )
 }

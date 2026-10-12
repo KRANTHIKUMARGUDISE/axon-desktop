@@ -13,6 +13,11 @@ module.exports = {
     'package.json'
   ],
   extraMetadata: { main: 'dist-electron/electron/main.js' },
+  // Seed bundle (built-in Axon blocks, checksummed) + the build-time registry default.
+  extraResources: [
+    { from: 'resources/seed', to: 'seed' },
+    { from: 'resources/registry-default.json', to: 'registry-default.json' },
+  ],
   // The Claude Agent SDK's platform packages (claude-agent-sdk-win32-x64, -darwin-arm64,
   // etc.) ship a native claude.exe/claude binary. Native executables can't be spawned from
   // inside an asar archive — only unpacked, on-disk files can be exec'd by the OS — so

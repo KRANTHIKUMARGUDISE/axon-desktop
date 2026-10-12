@@ -3,7 +3,7 @@
 ## What this is
 
 Electron desktop app that lets developers run AI-powered delivery pipelines locally.
-- **Local-first (v1 / Session 1):** there is no backend. Blocks, pipelines and deliveries are persisted on this machine; the app runs fully offline (except agent calls to Anthropic and git operations).
+- **Local-first with a shared registry (v1 / Sessions 1–3):** there is no backend. Blocks, pipelines and deliveries are persisted on this machine and the app runs fully offline (except agent calls to Anthropic and git operations). Since S3 the engineer's own blocks/pipelines also sync to a shared `axon-registry` git repo (`users/{email}/…`), and Team/Org definitions are read from it. Deliveries never leave the machine — only a whitelisted run summary does.
 - Pipeline execution runs in the **Electron main process** (Node.js) as a testable engine; Claude is called directly from main.
 - Git operations run locally via `simple-git`.
 - The React UI lives in `src/`; shared schemas/types live in `shared/` (imported as `@shared` in the renderer, relatively from `electron/`).
@@ -30,8 +30,14 @@ Renderer (React/Vite)
         └── window.axon.events.onDeliveryEvent(cb)   ← the ONE live-update channel ('delivery:event')
 
 Main process
-  ├── store/     Store interface + FileStore ({userData}/store/{blocks,pipelines,deliveries}/{id}.json,
-  │              atomic tmp+fsync+rename writes, per-key mutex = single writer, seed.ts built-in blocks)
+  ├── store/     Store interface + FileStore ({userData}/store/{blocks,pipelines,deliveries}/{id}.json, published versions in
+  │              versions/{blocks|pipelines}/{id}/v{n}.json, atomic tmp+fsync+rename writes, per-key mutex = single writer,
+  │              optional read-only `definitions` source = registry org/team docs) · GitRepoStore (wraps FileStore, mirrors the
+  │              engineer's own docs into the registry write queue) · seed.ts (verified seed bundle → built-in Axon blocks)
+  ├── registry/  layout (paths + the write guard), queue (durable ops), sync (clone/fetch/replay/commit/push), reader (org/team
+  │              docs from the clone), docs (YAML mapping), promote (PR flow), runSummary, secretScan, onboarding (Jira/GitHub checks),
+  │              service (profile/activity/run records, hydration), config (build-time default URL)
+  ├── identity.ts  machine id + verified identity provider (replaces the old `local-user` placeholder)
   ├── engine/    createEngine({store, runner, workspace, bus, runsDir, ...}) — pure state machine
   │              (start/resume/cancel/approveGate/rejectGate/previewResume/reconcileOnBoot/shutdown),
   │              context.ts, runs.ts (DS1 files), bus.ts (typed event bus)
@@ -43,6 +49,21 @@ Main process
 ```
 
 `Store` is the port that a future `GitRepoStore` (S3) / `ApiStore` implement. `WorkspacePort` and `Runner` are injected so the engine is unit-tested with fakes (`electron/engine/__tests__/harness.ts`).
+
+## Registry, identity and versioning (S3)
+
+- **Layout (D9, single branch `main`, folder = future DB collection):** `registry.yaml` (schemaVersion, minAppVersion) · `catalog/` (PR only) · `org/{pipelines,blocks}` and `teams/{team}/…` (PR only) · `users/{email}/{profile.yaml, pipelines, blocks, runs/{yyyy-mm}/{id}.json, activity.log}` (direct commit by that user). `{email}` is lowercased and validated (`registry/layout.ts`). Every doc carries `id, schemaVersion, scope (Personal|Team|Org), owner`.
+- **The write guard:** every direct registry write goes through `assertWritable(path, email)` — only `users/{email}/…`. It runs at enqueue time, again when ops are replayed at commit, and the staged file list is re-checked before `git commit`. Org/team changes only happen through `promote` (a PR branch + GitHub API).
+- **Sync (`registry/sync.ts`):** fetch → reset the clone to `origin/{branch}` → replay queued ops → secret scan → commit → push. Because each engineer only writes their own folder this is equivalent to rebasing and cannot conflict; a non-fast-forward push re-fetches and replays with backoff (5 tries) before the state becomes `NeedsAttention`. Offline → `Offline`; `registry.yaml.minAppVersion` > app (or a newer schema) → `ReadOnly` (queue kept). **The queue** (`{userData}/registry-queue/pending/*.json`, atomic) is the source of truth until a push succeeds — ops are removed only afterwards, so a crash/offline/rejected push never loses a write. Ops that trip the secret scan move to `rejected/` (kept, shown in Settings) and are forgotten when a newer version of the file syncs. States are pushed to the renderer on `registry:status`.
+- **Offline cache:** the clone in `{userData}/registry/` *is* the read-through cache. `RegistryReader` (org + teams) feeds `FileStore`'s `definitions` fallback, so `getBlock/getPipeline/listBlocks/createDelivery` see shared docs transparently; scope/team come from where a file lives, never from its contents, and seeded ids can't be shadowed. Documents this engineer authored on another machine are *hydrated* (imported if missing locally); a one-time **backfill** queues pre-S3 local docs.
+- **Versioning (D13):** blocks and pipelines have `version`, `status: Draft|Published|Deprecated`, `versionLabel?`, `changeNote?`, `derivedFrom?{id,version}`. A Draft's `version` is the number it will get when published; **editing a Draft edits in place, editing a Published doc starts the next Draft (version+1)**. `publish` freezes `versions/…/v{n}.json` (immutable; only `status` may flip to Deprecated). Publishing a pipeline pins every node's `blockVersion` (blocks must be published first). Registry files: pipelines `{root}/pipelines/{id}/{draft|v{n}}.yaml`; blocks `{root}/blocks/{id}/{draft|v{n}}/block.yaml` + `files/…` (skill files). `createDelivery` records `pipelineId/pipelineVersion/blockVersions`; **the engine runs the pinned block versions** (falls back to the current block only for legacy deliveries that predate version files). UI: scope/status badges, version history + Publish/Deprecate/Duplicate/Promote dialog (`VersionDialog`), "newer block version available" on pipeline cards (`newerBlockVersion` in `shared/versioning.ts`).
+- **Schema versioning:** `SCHEMA_VERSION = 2`; `shared/migrations.ts` upgrades N-1 in memory on every read (v1 local docs become Published Personal docs) and refuses newer/older documents (`SchemaVersionError`; unreadable registry docs are skipped and listed, never fatal).
+- **Seed bundle:** `resources/seed/{manifest.json, blocks/*/block.yaml}` (human-gate + stubs for workspace-provisioner, pr-creator, ticket-fetcher, test-runner — stubs have no native handler yet). Loaded as `sourceType: Axon, scope: Org, immutable`; sha256 per block is verified on load (mismatch → skipped). Regenerate the manifest with `node scripts/build-seed-manifest.js` after editing a seed block. Immutability is enforced in `FileStore` (update/delete/duplicate/promote refuse), not just the UI. Packaged via `extraResources`.
+- **Identity:** `profile.yaml` = email, displayName (from Jira), team, machines[{id,name,lastSeen}]. Machine id = random UUID in `{userData}/machine.json`. **`userEmail/userName/jiraSite/setupComplete` are written only by `onboarding:complete` in main** (after `/myself` returned the same email) — they are not renderer-writable settings. `identity.actor()` (email) is the gate approver; `identity.displayName()` is `createdByName`. `LOCAL_USER` remains only as the engine's last-resort fallback.
+- **Onboarding** (`src/pages/Setup.tsx`, `electron/ipc/registry.ts`): registry URL + branch (default from `resources/registry-default.json` / `AXON_REGISTRY_URL`, overridable in Settings) with "Test connection" (`ls-remote` read + `push --dry-run` of a throwaway ref) → Jira site + email + API token (blocked unless `/myself` email matches) → optional GitHub token check → Claude key (D3) → workspace root (D7) → `activity.log` consent (email + machine name). `activity.log` entries (launch/login) are appended to the queue and ride the next sync — no commit per login.
+- **Run summaries** (`registry/runSummary.ts`): explicit field copy only (status, timings, gate outcomes who/when, rerunOf/rerunReason, pipelineId+version, blockVersions, prUrls, repoUrls, tokens/cost); strict zod schema; free text capped at 200 chars; never output/context/step summaries/errors. Queued on terminal delivery events (`completed|failed|cancelled`) from `main.ts`.
+- **Promotion:** `registry/promote.ts` pushes `axon/promote/{user}-{kind}-{shortId}-v{n}` (force-pushed own namespaced branch) with the files under `org/` or `teams/{team}/`, then find-or-creates the PR via the GitHub REST API with the engineer's token. Refuses seeded ids, non-Published docs, pipelines using Personal blocks, an already-existing version path, and content that trips the secret scan. GitHub registries only.
+- **Not yet:** deletes don't propagate to the same engineer's other machines; Azure DevOps PRs for the registry; Jira write-permission checks (S5); org/team *edit-in-place* (PR only by design).
 
 ## Key conventions
 
@@ -68,7 +89,9 @@ Main process
 | `electron/store/fileStore.ts` | Local persistence implementation of `Store` |
 | `electron/runners/*` | Prompt / Agentic / native runners behind one `Runner` function |
 | `electron/workspace/gitWorkspace.ts` | Real workspace + git side effects |
-| `electron/ipc/settings.ts` | `electron-store` settings: `workspaceRoot`, `gitProvider`, `theme`, `setupComplete`, `userEmail`, `userName`, `maxContextSnapshotSizeKb`, `gitTokenSuffix` (writes validated against an allow-list) |
+| `electron/ipc/settings.ts` | `electron-store` settings: `workspaceRoot`, `gitProvider`, `theme`, `maxContextSnapshotSizeKb`, `registryUrl`, `registryBranch`, `syncIntervalMinutes`, `team`, `activityConsent` (renderer-writable via per-key validators) + main-only `setupComplete`, `userEmail`, `userName`, `jiraSite`, `gitTokenSuffix` |
+| `electron/registry/*`, `electron/store/gitRepoStore.ts` | Registry sync, queue, layout guard, promotion, run summaries (see "Registry, identity and versioning") |
+| `electron/ipc/registry.ts` | `identity:*`, `onboarding:*`, `registry:*`, `versions:*` channels |
 | `src/services/*Service.ts` | Renderer data layer — IPC wrappers that map stored docs to UI types |
 | `src/App.tsx` | App shell, setup gate, global `delivery:event` → react-query invalidation |
 | `tsconfig.electron.json` / `tsconfig.json` / `tsconfig.test.json` | Main (CJS) / renderer (ESNext) / test typecheck |
@@ -119,6 +142,10 @@ window.axon.delivery.{start,resume,cancel,previewResume,approveGate(id,comment?)
 window.axon.events.onDeliveryEvent(cb) // returns unsubscribe; payload is the typed DeliveryEvent union
 window.axon.secrets.{setGitToken,hasGitToken,setJiraToken,hasJiraToken,clearJiraToken}
 window.axon.settings.{get,set,getAll}
+window.axon.identity.get()                         // {onboarded,email,displayName,team,machineName}
+window.axon.onboarding.{defaults,testRegistry,verifyJira,verifyGithub,complete}   // identity proven in main; tokens never returned
+window.axon.registry.{status,syncNow,onStatus(cb)} // RegistryStatus: Unconfigured|Idle|Syncing|Offline|NeedsAttention|ReadOnly + queued + rejected
+window.axon.versions.{list,publish,deprecate,duplicate,promote}(kind:'block'|'pipeline', id, …)
 window.axon.workspace.{readFile,listFilesRecursive}   // path-guarded; clearing = delivery.clearWorkspace(id)
 window.axon.claudeKey.{getStatus,set,confirmDetected,rejectDetected}   // in-memory Claude key (D3: Console API key only)
 window.axon.dialog.{openDirectory,openFile}
@@ -155,7 +182,7 @@ Examples: `auth:storeToken`, `workspace:readFile`, `git:clone`
 
 ## What is NOT built yet
 
-- D9: Marketplace/CDF browse UI, version management, edit/delete for blocks
+- Marketplace/CDF sources and browse UI (out of scope for v1); `ApiStore` (the `Store` port is ready for it)
 
 ## Delivery Live View — Pipeline Graph
 
@@ -243,7 +270,7 @@ component. `nodesDraggable`/`nodesConnectable` are `false`.
 
 ```bash
 npm run typecheck && npm test && npm run build
-grep -rn "/api/\|signalr\|apiClient" src electron   # must print nothing
+grep -rn "/api/\|signalr\|apiClient" src electron | grep -v "rest/api/3"   # must print nothing (Jira's /rest/api/3/myself is the only /api/ left)
 ```
 
 In DevTools: `window.axon` → `blocks, pipelines, deliveries, delivery, events, secrets, settings, ...`. Subscribe with `window.axon.events.onDeliveryEvent(console.log)`, create a pipeline with the built-in Human Gate block, create a delivery and `window.axon.delivery.start(id)`.

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 // Keep the channel name in sync with electron/ipc/delivery.ts (DELIVERY_EVENT_CHANNEL).
 const DELIVERY_EVENT = 'delivery:event'
+const REGISTRY_STATUS = 'registry:status'
 
 contextBridge.exposeInMainWorld('axon', {
   secrets: {
@@ -10,6 +11,32 @@ contextBridge.exposeInMainWorld('axon', {
     setJiraToken: (token: string) => ipcRenderer.invoke('secrets:setJiraToken', token),
     hasJiraToken: () => ipcRenderer.invoke('secrets:hasJiraToken'),
     clearJiraToken: () => ipcRenderer.invoke('secrets:clearJiraToken'),
+  },
+  identity: {
+    get: () => ipcRenderer.invoke('identity:get'),
+  },
+  onboarding: {
+    defaults: () => ipcRenderer.invoke('onboarding:defaults'),
+    testRegistry: (url: string, branch: string) => ipcRenderer.invoke('onboarding:testRegistry', url, branch),
+    verifyJira: (site: string, email: string, token: string) => ipcRenderer.invoke('onboarding:verifyJira', site, email, token),
+    verifyGithub: (token: string) => ipcRenderer.invoke('onboarding:verifyGithub', token),
+    complete: (input: unknown) => ipcRenderer.invoke('onboarding:complete', input),
+  },
+  registry: {
+    status: () => ipcRenderer.invoke('registry:status'),
+    syncNow: () => ipcRenderer.invoke('registry:syncNow'),
+    onStatus: (callback: (status: unknown) => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, data: unknown) => callback(data)
+      ipcRenderer.on(REGISTRY_STATUS, listener)
+      return () => ipcRenderer.removeListener(REGISTRY_STATUS, listener)
+    },
+  },
+  versions: {
+    list: (kind: string, id: string) => ipcRenderer.invoke('versions:list', kind, id),
+    publish: (kind: string, id: string, meta?: unknown) => ipcRenderer.invoke('versions:publish', kind, id, meta),
+    deprecate: (kind: string, id: string) => ipcRenderer.invoke('versions:deprecate', kind, id),
+    duplicate: (kind: string, id: string) => ipcRenderer.invoke('versions:duplicate', kind, id),
+    promote: (kind: string, id: string, target: unknown, note?: string) => ipcRenderer.invoke('versions:promote', kind, id, target, note),
   },
   settings: {
     get: (key: string) => ipcRenderer.invoke('settings:get', key),

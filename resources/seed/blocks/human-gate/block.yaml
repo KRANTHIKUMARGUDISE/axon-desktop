@@ -1,0 +1,12 @@
+id: axon-human-gate
+schemaVersion: 2
+name: Human Gate
+role: Control
+description: Pauses the delivery until a person approves or rejects it.
+version: 1
+tags: [axon, control, gate]
+sourceType: Axon
+agentRuntime: Axon
+artifactFormat: Native
+artifactName: human-gate
+verified: true

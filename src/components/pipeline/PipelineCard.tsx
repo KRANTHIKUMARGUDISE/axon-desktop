@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { toast } from 'sonner'
 import { getBlockTypeIcon } from '../../utils/blockTypeIcons'
 import type { Pipeline, PipelineNode, BlockType } from '../../types'
+import { ScopeBadge, StatusBadge } from '../registry/ScopeBadge'
 
 interface PipelineCardProps {
   pipeline: Pipeline
@@ -11,6 +12,8 @@ interface PipelineCardProps {
   onDuplicate: (pipeline: Pipeline) => void
   onDelete: (pipeline: Pipeline) => void
   onPromote?: (pipeline: Pipeline) => void
+  /** Blocks pinned at an older version than the latest published one (D13 "newer version available"). */
+  newerBlocks?: string[]
 }
 
 // `pipeline.nodes` is array-insertion order, not execution order (nodes can be added to
@@ -146,7 +149,7 @@ function initials(name: string | undefined | null) {
   return (name ?? '?').slice(0, 2).toUpperCase()
 }
 
-export default function PipelineCard({ pipeline, blockTypeMap, onRun, onEdit, onDuplicate, onDelete, onPromote }: PipelineCardProps) {
+export default function PipelineCard({ pipeline, blockTypeMap, onRun, onEdit, onDuplicate, onDelete, onPromote, newerBlocks }: PipelineCardProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [hovered, setHovered] = useState(false)
@@ -252,6 +255,13 @@ export default function PipelineCard({ pipeline, blockTypeMap, onRun, onEdit, on
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
         <span style={{ fontSize: 11, color: 'var(--axon-t3)' }}>{pipeline.nodeCount ?? (pipeline.nodes ?? []).length} blocks</span>
         <span style={{ fontSize: 11, color: 'var(--axon-t3)' }}>v{pipeline.version ?? '1'}</span>
+        <ScopeBadge scope={pipeline.scope} team={pipeline.team} />
+        <StatusBadge status={pipeline.status} />
+        {newerBlocks && newerBlocks.length > 0 && (
+          <span title={`Newer published version of: ${newerBlocks.join(', ')}`} style={{ fontSize: 10, fontWeight: 600, color: '#fbbf24' }}>
+            ↑ newer block version available
+          </span>
+        )}
         <span style={{ fontSize: 11, color: 'var(--axon-t3)' }}>{relativeDate(pipeline.updatedAt ?? pipeline.createdAt)}</span>
         {pipeline.createdByName && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 'auto', fontSize: 11 }}>
@@ -334,9 +344,9 @@ export default function PipelineCard({ pipeline, blockTypeMap, onRun, onEdit, on
               <button
                 onClick={() => { onPromote?.(pipeline); setMenuOpen(false) }}
                 style={{ ...menuItemStyle, color: '#fbbf24' }}
-                title="Coming soon"
+                title="Version history, publish and promote to Team / Org"
               >
-                Request Org Promotion
+                Versions &amp; promotion…
               </button>
               <div style={{ borderTop: '1px solid var(--axon-border)', margin: '4px 0' }} />
               <button

@@ -39,17 +39,21 @@ describe('atomicWrite', () => {
 describe('blocks and pipelines', () => {
   it('stamps id, schemaVersion, timestamps and version on create', async () => {
     const b = await store.createBlock(blockInput())
-    expect(b).toMatchObject({ schemaVersion: 1, version: 1 })
+    expect(b).toMatchObject({ schemaVersion: 2, version: 1, status: 'Draft', scope: 'Personal' })
     expect(b.id).toBeTruthy()
     expect(b.createdAt).toBe(b.updatedAt)
     expect(await store.getBlock(b.id)).toEqual(b)
   })
 
-  it('bumps the version on update', async () => {
+  it('edits a Draft in place; editing a Published block starts the next Draft (D13)', async () => {
     const b = await store.createBlock(blockInput())
     const u = await store.updateBlock(b.id, { description: 'new' })
-    expect(u.version).toBe(2)
-    expect(u.description).toBe('new')
+    expect(u).toMatchObject({ version: 1, status: 'Draft', description: 'new' })
+    await store.publish('block', b.id)
+    const next = await store.updateBlock(b.id, { description: 'newer' })
+    expect(next).toMatchObject({ version: 2, status: 'Draft' })
+    // v1 stays readable and unchanged
+    expect(await store.getBlockVersion(b.id, 1)).toMatchObject({ version: 1, status: 'Published', description: 'new' })
   })
 
   it('seeded Axon blocks are immutable: update and delete are refused', async () => {
@@ -69,10 +73,10 @@ describe('blocks and pipelines', () => {
     await expect(store.getBlock('../../etc/passwd')).rejects.toThrow(/Invalid id/)
   })
 
-  it('creates, updates (version bump) and deletes pipelines', async () => {
+  it('creates, updates and deletes pipelines', async () => {
     const p = await store.createPipeline({ name: 'P', description: '', nodes: [], edges: [] })
     const u = await store.updatePipeline(p.id, { name: 'P2' })
-    expect(u).toMatchObject({ name: 'P2', version: 2 })
+    expect(u).toMatchObject({ name: 'P2', version: 1, status: 'Draft' })
     await store.deletePipeline(p.id)
     expect(await store.getPipeline(p.id)).toBeNull()
   })
@@ -81,7 +85,8 @@ describe('blocks and pipelines', () => {
 describe('deliveries', () => {
   async function seedPipeline() {
     const block = await store.createBlock(blockInput())
-    await store.updateBlock(block.id, { description: 'v2' }) // version 2
+    await store.publish('block', block.id)
+    await store.updateBlock(block.id, { description: 'v2' }) // starts draft v2
     const pipeline = await store.createPipeline({
       name: 'P', description: '',
       nodes: [{ id: 'n1', label: 'A', blockId: block.id, position: { x: 0, y: 0 } }], edges: [],

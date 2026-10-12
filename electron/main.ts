@@ -1,8 +1,10 @@
 import { app, BrowserWindow, session, dialog, shell } from 'electron'
 import path from 'path'
+import fs from 'fs/promises'
+import { atomicWrite } from './store/atomic'
 import { pathToFileURL } from 'url'
 import { registerSecretHandlers, getGitToken, purgeLegacyAuthFiles } from './ipc/secrets'
-import { registerSettingsHandlers, getWorkspaceRoot, getDS1ThresholdBytes } from './ipc/settings'
+import { registerSettingsHandlers, getWorkspaceRoot, getDS1ThresholdBytes, store as settingsStore, readIdentitySettings } from './ipc/settings'
 import { registerWorkspaceHandlers, createGrants } from './ipc/workspace'
 import { registerShellHandlers } from './ipc/shell'
 import { configureTrustedSender, makeTrustedUrlCheck } from './ipc/guard'
@@ -13,7 +15,17 @@ import { registerDataHandlers } from './ipc/data'
 import { registerDeliveryHandlers } from './ipc/delivery'
 import { initClaudeKey, registerClaudeKeyHandlers, getClaudeKey } from './ipc/claudeKeyStore'
 import { FileStore } from './store/fileStore'
-import { seedBuiltIns } from './store/seed'
+import { GitRepoStore } from './store/gitRepoStore'
+import { seedBuiltIns, builtInBlocks } from './store/seed'
+import { loadMachineId, createIdentityProvider } from './identity'
+import { WriteQueue } from './registry/queue'
+import { RegistrySync } from './registry/sync'
+import { RegistryReader } from './registry/reader'
+import { RegistryService } from './registry/service'
+import { loadRegistryDefaults, resolveSyncConfig } from './registry/config'
+import { registerRegistryHandlers } from './ipc/registry'
+import { makeGit } from './ipc/git'
+import { validateRepoUrl } from './security/gitAuth'
 import { createEngine } from './engine/engine'
 import type { Engine } from './engine/engine'
 import { createBus } from './engine/bus'
@@ -106,6 +118,9 @@ app.on('second-instance', () => {
 })
 
 let engine: Engine | null = null
+let registrySync: RegistrySync | null = null
+
+const REGISTRY_STATUS_CHANNEL = 'registry:status'
 
 app.whenReady().then(async () => {
   const userData = app.getPath('userData')
@@ -113,7 +128,63 @@ app.whenReady().then(async () => {
   log.info(`AXON ${app.getVersion()} starting (electron ${process.versions.electron})`)
   // Deny every renderer permission request (camera, geolocation, notifications, …).
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, callback) => callback(false))
-  const store = new FileStore({ dir: path.join(userData, 'store') })
+  // ---- identity + registry stack (S3). FileStore is the offline cache/working copy; GitRepoStore mirrors the
+  // engineer's own documents into the registry layout and queues them for sync.
+  const machineId = await loadMachineId(userData)
+  const identity = createIdentityProvider({ readSettings: readIdentitySettings, machineId })
+  const registryDir = path.join(userData, 'registry')
+  const seedIds = new Set(builtInBlocks().map((b) => b.id))
+  const resourceDirs = [
+    ...((process as NodeJS.Process & { resourcesPath?: string }).resourcesPath ? [(process as NodeJS.Process & { resourcesPath: string }).resourcesPath] : []),
+    path.join(__dirname, '..', '..', 'resources'),
+    path.join(__dirname, '..', '..', '..', 'resources'),
+  ]
+  const registryDefaults = loadRegistryDefaults(resourceDirs)
+  const queue = new WriteQueue(path.join(userData, 'registry-queue'), () => identity.get()?.email ?? '')
+  await queue.init()
+  const reader = new RegistryReader(registryDir, (id) => seedIds.has(id))
+  const local = new FileStore({
+    dir: path.join(userData, 'store'),
+    getOwner: () => identity.get()?.email ?? '',
+    definitions: reader,
+  })
+  const gitFactory = async (dir?: string) => makeGit(dir, (await getGitToken()) ?? '')
+  let service: RegistryService
+  const sync = new RegistrySync({
+    registryDir,
+    getConfig: () => resolveSyncConfig({
+      registryUrl: settingsStore.get('registryUrl') || '', registryBranch: settingsStore.get('registryBranch') || '',
+      syncIntervalMinutes: settingsStore.get('syncIntervalMinutes') || 5,
+    }, registryDefaults),
+    getUser: () => {
+      const id = identity.get()
+      return id && settingsStore.get('setupComplete') === true ? { email: id.email, name: id.displayName } : null
+    },
+    makeGit: gitFactory,
+    validateUrl: validateRepoUrl,
+    queue,
+    appVersion: app.getVersion(),
+    machineName: identity.get()?.machineName,
+    onStatus: (status) => {
+      for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send(REGISTRY_STATUS_CHANNEL, status)
+    },
+    onSynced: () => service.onSynced(),
+  })
+  registrySync = sync
+  const store = new GitRepoStore({
+    local,
+    getEmail: () => identity.get()?.email ?? '',
+    enqueue: async (op) => {
+      await queue.enqueue(op)
+      sync.notify()
+    },
+  })
+  service = new RegistryService({
+    sync, queue, reader, local, registryDir, identity, appVersion: app.getVersion(),
+    consent: () => settingsStore.get('activityConsent') === true,
+    getGitToken,
+    isReserved: (id) => seedIds.has(id),
+  })
   const runsDir = path.join(userData, 'runs')
   const bus = createBus()
   const grants = createGrants()
@@ -124,12 +195,13 @@ app.whenReady().then(async () => {
   registerClaudeKeyHandlers()
   await initClaudeKey()
   await purgeLegacyAuthFiles()
-  await seedBuiltIns(store)
+  await seedBuiltIns(local)
 
   engine = createEngine({
     store,
     bus,
     runsDir,
+    identity: () => identity.actor(),
     runner: createRunner(getClaudeKey),
     workspace: createGitWorkspace({
       getWorkspaceRoot,
@@ -153,8 +225,32 @@ app.whenReady().then(async () => {
     },
   })
   registerShellHandlers({ getWindow: () => mainWindow, store, getWorkspaceRoot, grants })
-  registerDataHandlers(store, runsDir)
+  registerDataHandlers(store, runsDir, identity)
   registerDeliveryHandlers(engine, bus)
+  const startRegistry = (firstLogin = false) => {
+    void service.onLaunch()
+    if (firstLogin) void service.logActivity('login')
+    // Catch up once per engineer so pre-registry work is pushed without having to edit it first.
+    const marker = path.join(userData, 'registry-backfill.json')
+    void (async () => {
+      const email = identity.get()?.email
+      if (!email) return
+      const done = await fs.readFile(marker, 'utf-8').then((t) => (JSON.parse(t) as { email?: string }).email === email, () => false)
+      if (done) return
+      const n = await store.backfill()
+      await atomicWrite(marker, JSON.stringify({ email, at: new Date().toISOString(), documents: n }))
+    })().catch((err) => log.warn('[registry] backfill failed', err))
+    sync.start()
+  }
+  registerRegistryHandlers({ service, store, identity, defaults: registryDefaults, makeGit: gitFactory, onOnboarded: () => startRegistry(true) })
+  // A whitelisted run summary (never output/context) is queued for the registry when a delivery ends.
+  bus.subscribe((event) => {
+    if (event.type !== 'completed' && event.type !== 'failed' && event.type !== 'cancelled') return
+    void store.getDelivery(event.deliveryId)
+      .then((d) => (d ? service.recordRun(d) : undefined))
+      .catch((err) => log.warn('[registry] run summary failed', err))
+  })
+  if (identity.get() && settingsStore.get('setupComplete') === true) startRegistry()
   // A delivery left Running by a crash/kill has no active run — make it resumable.
   await engine.reconcileOnBoot()
 
@@ -167,7 +263,13 @@ app.on('before-quit', (event) => {
   if (shuttingDown || !engine) return
   event.preventDefault()
   shuttingDown = true
-  engine.shutdown().catch((err) => log.warn('shutdown failed', err)).finally(() => app.quit())
+  registrySync?.stop()
+  engine.shutdown()
+    .catch((err) => log.warn('shutdown failed', err))
+    // Best-effort final push (bounded); anything unsent stays in the durable queue for next launch.
+    .then(() => registrySync?.flush(4000))
+    .catch((err) => log.warn('registry flush failed', err))
+    .finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

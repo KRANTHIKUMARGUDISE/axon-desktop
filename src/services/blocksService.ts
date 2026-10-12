@@ -44,7 +44,8 @@ function toInput(req: Partial<CreateBlockRequest>, acceptedBy?: string): Partial
   return {
     ...(rest as Partial<BlockInput>),
     ...(executionAgreementAccepted
-      ? { executionAgreementAcceptedAt: new Date().toISOString(), executionAgreementAcceptedBy: acceptedBy ?? 'local-user' }
+      // acceptedBy is stamped by the main process from the verified identity.
+      ? { executionAgreementAcceptedAt: new Date().toISOString(), ...(acceptedBy ? { executionAgreementAcceptedBy: acceptedBy } : {}) }
       : {}),
   }
 }

@@ -1,5 +1,6 @@
 import type { ActionResult, ResumePreview } from './preview'
 import type { DeliveryEvent } from './schemas'
+import type { RegistryStatus } from './registry'
 
 export interface ClaudeKeyStatus {
   hasKey: boolean
@@ -10,6 +11,34 @@ export interface ClaudeKeyStatus {
   candidate: { masked: string; source: string } | null
 }
 
+export interface IdentityInfo {
+  onboarded: boolean
+  email: string
+  displayName: string
+  team: string
+  machineName: string
+}
+
+export interface ConnectionTest {
+  ok: boolean
+  canRead: boolean
+  canPush: boolean
+  branchExists: boolean
+  error?: string
+}
+
+export interface VersionEntry {
+  version: number
+  status: 'Draft' | 'Published' | 'Deprecated'
+  versionLabel?: string
+  changeNote?: string
+  updatedAt: string
+  scope: 'Personal' | 'Team' | 'Org'
+  source: 'local' | 'registry'
+}
+
+export type PromoteTargetArg = { scope: 'Org' } | { scope: 'Team'; team: string }
+
 // Documents cross the IPC boundary as plain JSON; the renderer services narrow them to
 // the shared types (Block, Pipeline, Delivery), so the bridge keeps them as `unknown`.
 export interface AxonBridge {
@@ -19,6 +48,29 @@ export interface AxonBridge {
     setJiraToken(token: string): Promise<void>
     hasJiraToken(): Promise<boolean>
     clearJiraToken(): Promise<void>
+  }
+  identity: {
+    get(): Promise<IdentityInfo>
+  }
+  onboarding: {
+    defaults(): Promise<{ registryUrl: string; branch: string; jiraSite: string }>
+    testRegistry(url: string, branch: string): Promise<ConnectionTest>
+    verifyJira(site: string, email: string, token: string): Promise<{ ok: boolean; email?: string; displayName?: string; error?: string }>
+    verifyGithub(token: string): Promise<{ ok: boolean; login?: string; error?: string }>
+    complete(input: { registryUrl: string; registryBranch: string; team: string; activityConsent: boolean }): Promise<{ success: boolean }>
+  }
+  registry: {
+    status(): Promise<RegistryStatus>
+    syncNow(): Promise<RegistryStatus>
+    /** Live status (sync state, queued writes, offline) pushed from main. Returns an unsubscribe function. */
+    onStatus(callback: (status: RegistryStatus) => void): () => void
+  }
+  versions: {
+    list(kind: 'block' | 'pipeline', id: string): Promise<VersionEntry[]>
+    publish(kind: 'block' | 'pipeline', id: string, meta?: { versionLabel?: string; changeNote?: string }): Promise<unknown>
+    deprecate(kind: 'block' | 'pipeline', id: string): Promise<unknown>
+    duplicate(kind: 'block' | 'pipeline', id: string): Promise<unknown>
+    promote(kind: 'block' | 'pipeline', id: string, target: PromoteTargetArg, note?: string): Promise<{ prUrl: string; branch: string; version: number }>
   }
   settings: {
     get(key: string): Promise<unknown>

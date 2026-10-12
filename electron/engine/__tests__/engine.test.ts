@@ -181,7 +181,7 @@ describe('gates', () => {
     expect(d.status).toBe('Completed')
     const gate = d.steps.find((s) => s.nodeId === 'n2')!
     expect(gate.status).toBe('Completed')
-    expect(gate.output).toMatchObject({ approvedBy: 'local-user', reviewComment: 'looks good' })
+    expect(gate.output).toMatchObject({ approvedBy: 'dev@example.com', reviewComment: 'looks good' })
     expect(gate.output!.approvedAt).toBeTruthy()
     expect(h.runner.mock.calls.some((c) => c[0].nodeLabel === 'b')).toBe(true)
     expect(h.eventTypes()).toContain('gate_approved')
@@ -213,7 +213,7 @@ describe('gates', () => {
     expect(d.errorMessage).toMatch(/wrong approach/)
     const gate = d.steps.find((s) => s.nodeId === 'n2')!
     expect(gate.status).toBe('Failed')
-    expect(gate.output).toMatchObject({ rejectedBy: 'local-user', reviewComment: 'wrong approach' })
+    expect(gate.output).toMatchObject({ rejectedBy: 'dev@example.com', reviewComment: 'wrong approach' })
     expect(gate.output!.rejectedAt).toBeTruthy()
     expect(h.eventTypes()).toEqual(expect.arrayContaining(['gate_rejected', 'failed']))
   })
@@ -484,5 +484,23 @@ describe('step records', () => {
     expect(d.steps.filter((s) => s.nodeId === 'n2')).toHaveLength(1)
     expect(d.steps.find((s) => s.nodeId === 'n2')!.output!.errorMessage).toBeUndefined()
     expect(d.status).toBe('Completed')
+  })
+})
+
+describe('pinned block versions (D13)', () => {
+  it('runs the block version the delivery was created against, not the latest', async () => {
+    h = await createHarness({ script: { A: (input) => ({ status: 'success', summary: input.block.description, result: { desc: input.block.description } }) } })
+    const block = await h.mkBlock({ description: 'v1 behaviour' })
+    await h.store.publish('block', block.id)
+    const pipeline = await h.store.createPipeline({ name: 'P', description: '', nodes: [{ id: 'n1', label: 'A', blockId: block.id, position: { x: 0, y: 0 } }], edges: [] })
+    const delivery = await h.store.createDelivery({ ticketId: 'T-1', title: '', pipelineId: pipeline.id, repoUrl: '', workspaceType: 'Default' })
+    // the block moves on after the delivery was created
+    await h.store.updateBlock(block.id, { description: 'v2 behaviour' })
+    await h.store.publish('block', block.id)
+    await h.engine.start(delivery.id)
+    await h.engine.whenIdle(delivery.id)
+    const done = await h.store.getDelivery(delivery.id)
+    expect(done?.status).toBe('Completed')
+    expect(done?.steps[0].output?.result).toMatchObject({ desc: 'v1 behaviour' })
   })
 })

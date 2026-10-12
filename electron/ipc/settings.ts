@@ -23,6 +23,12 @@ const store = new Store<StoredSettings>({
     // DS1's inline-vs-file cap, shared by context-snapshot (input) and output.result storage.
     maxContextSnapshotSizeKb: { type: 'number', default: 50 },
     gitTokenSuffix: { type: 'string', default: '' },
+    registryUrl: { type: 'string', default: '' },
+    registryBranch: { type: 'string', default: '' },
+    syncIntervalMinutes: { type: 'number', default: 5 },
+    jiraSite: { type: 'string', default: '' },
+    team: { type: 'string', default: '' },
+    activityConsent: { type: 'boolean', default: false },
   },
 })
 
@@ -52,12 +58,24 @@ export function getDS1ThresholdBytes(): number {
   return kb && kb > 0 ? kb * 1024 : 50_000
 }
 
+/** Main-side only: written by onboarding after the Jira identity check — never from the renderer. */
+export function setVerifiedIdentity(v: { userEmail: string; userName: string; jiraSite: string; setupComplete: boolean }): void {
+  store.set('userEmail', v.userEmail.trim().toLowerCase())
+  store.set('userName', v.userName.slice(0, 200))
+  store.set('jiraSite', v.jiraSite)
+  store.set('setupComplete', v.setupComplete)
+}
+
+export function readIdentitySettings(): { userEmail: string; userName: string; team: string } {
+  return { userEmail: store.get('userEmail') || '', userName: store.get('userName') || '', team: store.get('team') || '' }
+}
+
 /** Main-side only (derived from the stored git token) — never writable from the renderer. */
 export function setGitTokenSuffix(suffix: string): void {
   store.set('gitTokenSuffix', suffix)
 }
 
-const READABLE = new Set<string>([...Object.keys(SETTING_VALIDATORS), 'gitTokenSuffix'])
+const READABLE = new Set<string>([...Object.keys(SETTING_VALIDATORS), 'gitTokenSuffix', 'setupComplete', 'userEmail', 'userName', 'jiraSite'])
 
 // Typed per-key setter: dispatches to the key's own validator, so a value of the wrong
 // type/shape (e.g. a non-path workspaceRoot) is rejected here rather than persisted.

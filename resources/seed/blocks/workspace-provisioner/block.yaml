@@ -1,0 +1,12 @@
+id: axon-workspace-provisioner
+schemaVersion: 2
+name: Workspace Provisioner
+role: Utility
+description: Provisions the delivery workspace (repositories, worktrees). Registered now; becomes runnable in a later release.
+version: 1
+tags: [axon, utility, stub]
+sourceType: Axon
+agentRuntime: Axon
+artifactFormat: Native
+artifactName: workspace-provisioner
+verified: true

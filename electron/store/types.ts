@@ -1,23 +1,66 @@
 import type {
-  Block, BlockInput, Pipeline, PipelineInput, Delivery, CreateDeliveryInput, DeliveryStep,
+  Block, BlockInput, Pipeline, PipelineInput, Delivery, CreateDeliveryInput, DeliveryStep, DocStatus, Scope,
 } from '../../shared'
 
-// Persistence port for AXON documents. FileStore (this session) is the local
-// implementation; GitRepoStore (S3) and a future ApiStore implement the same interface.
+export type DocKind = 'block' | 'pipeline'
+export type DocOf<K extends DocKind> = K extends 'block' ? Block : Pipeline
+
+export interface VersionInfo {
+  version: number
+  status: DocStatus
+  versionLabel?: string
+  changeNote?: string
+  updatedAt: string
+  scope: Scope
+  /** 'local' = this machine's store; 'registry' = read from the shared registry clone. */
+  source: 'local' | 'registry'
+}
+
+export interface PublishMeta {
+  versionLabel?: string
+  changeNote?: string
+}
+
+/** Read-only definitions that live outside the local store (org/team docs from the registry). */
+export interface DefinitionSource {
+  listBlocks(): Promise<Block[]>
+  getBlock(id: string): Promise<Block | null>
+  getBlockVersion(id: string, version: number): Promise<Block | null>
+  listPipelines(): Promise<Pipeline[]>
+  getPipeline(id: string): Promise<Pipeline | null>
+  getPipelineVersion(id: string, version: number): Promise<Pipeline | null>
+  listVersions(kind: DocKind, id: string): Promise<VersionInfo[]>
+}
+
+// Persistence port for AXON documents. FileStore is the local implementation; GitRepoStore wraps
+// it with registry sync (S3); a future ApiStore implements the same interface.
 export interface Store {
   listBlocks(): Promise<Block[]>
   getBlock(id: string): Promise<Block | null>
+  /** A specific immutable version (or the current document when it is that version). */
+  getBlockVersion(id: string, version: number): Promise<Block | null>
   createBlock(input: BlockInput): Promise<Block>
+  /** Edits the Draft in place; editing a Published block starts the next Draft (D13). */
   updateBlock(id: string, patch: Partial<BlockInput>): Promise<Block>
   deleteBlock(id: string): Promise<void>
-  /** Insert a built-in (immutable) block if it is not already present. */
+  /** Insert a built-in (immutable) block, or upgrade it when the bundled version is newer. */
   seedBlock(block: Block): Promise<void>
 
   listPipelines(): Promise<Pipeline[]>
   getPipeline(id: string): Promise<Pipeline | null>
+  getPipelineVersion(id: string, version: number): Promise<Pipeline | null>
   createPipeline(input: PipelineInput, createdByName?: string): Promise<Pipeline>
   updatePipeline(id: string, patch: Partial<PipelineInput>): Promise<Pipeline>
   deletePipeline(id: string): Promise<void>
+
+  // ---- D13 versioning (blocks and pipelines)
+  listVersions(kind: DocKind, id: string): Promise<VersionInfo[]>
+  /** Draft -> Published (immutable). Pipelines pin each node's blockVersion. */
+  publish<K extends DocKind>(kind: K, id: string, meta?: PublishMeta): Promise<DocOf<K>>
+  /** Published -> Deprecated (the version stays readable and pinned runs keep working). */
+  deprecate<K extends DocKind>(kind: K, id: string): Promise<DocOf<K>>
+  /** New Personal Draft that records `derivedFrom: {id, version}`. */
+  duplicate<K extends DocKind>(kind: K, id: string): Promise<DocOf<K>>
 
   listDeliveries(): Promise<Delivery[]>
   getDelivery(id: string): Promise<Delivery | null>

@@ -1,0 +1,12 @@
+id: axon-test-runner
+schemaVersion: 2
+name: Test Runner
+role: Execution
+description: Runs the repository's tests and returns a structured result. Registered now; becomes runnable in a later release.
+version: 1
+tags: [axon, execution, stub]
+sourceType: Axon
+agentRuntime: Axon
+artifactFormat: Native
+artifactName: test-runner
+verified: true

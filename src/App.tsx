@@ -31,9 +31,8 @@ function AppRoutes() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null)
 
   useEffect(() => {
-    window.axon.settings.get('setupComplete').then(val => {
-      setSetupComplete(val === true)
-    })
+    // Onboarded = a Jira-verified identity exists (set in main by the onboarding flow).
+    window.axon.identity.get().then((id) => setSetupComplete(id.onboarded)).catch(() => setSetupComplete(false))
   }, [])
 
   // One typed event channel from the main process (D2): keep every list/detail query fresh.

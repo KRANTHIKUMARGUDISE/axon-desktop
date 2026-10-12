@@ -36,6 +36,8 @@ export interface PipelineNode {
   config?: Record<string, unknown>
   timeoutSeconds?: number
   pinnedVersion?: string | null
+  /** D13: block version this node runs (pinned when the pipeline is published). */
+  blockVersion?: number
 }
 
 export interface Pipeline {
@@ -56,6 +58,13 @@ export interface Pipeline {
   ownerTeam?: string
   teamId?: string
   visibility?: string
+  // Registry (S3): where it lives and its D13 lifecycle
+  scope?: 'Personal' | 'Team' | 'Org'
+  owner?: string
+  team?: string
+  status?: 'Draft' | 'Published' | 'Deprecated'
+  derivedFrom?: { id: string; version: number }
+  changeNote?: string
 }
 
 export interface StepAgentOutput {
@@ -198,6 +207,14 @@ export interface BuildingBlock {
   defaultTimeoutSeconds?: number
   executionAgreementAcceptedAt?: string
   executionAgreementAcceptedBy?: string
+  scope?: 'Personal' | 'Team' | 'Org'
+  owner?: string
+  team?: string
+  status?: 'Draft' | 'Published' | 'Deprecated'
+  versionLabel?: string
+  changeNote?: string
+  derivedFrom?: { id: string; version: number }
+  immutable?: boolean
 }
 
 export interface AgentInput {
