@@ -11,6 +11,7 @@ vi.mock('electron', () => ({
     handle: (channel: string, fn: (event: unknown, ...args: unknown[]) => unknown) => handlers.set(channel, fn),
     on: (channel: string, fn: (event: unknown, ...args: unknown[]) => unknown) => handlers.set(channel, fn),
   },
+  app: { getPath: () => tmp },
 }))
 
 import { resolveInside } from '../paths'
@@ -20,6 +21,7 @@ import { isAllowedExternalUrl, isSafeCliPathArg, buildVSCodeUri } from '../shell
 import { createLogger, redact, registerSecret, clearRegisteredSecrets } from '../../log'
 import { createWorkspaceFs, createGrants, registerWorkspaceHandlers, resolveClearableWorkspace } from '../../ipc/workspace'
 import { handle, configureTrustedSender, makeTrustedUrlCheck } from '../../ipc/guard'
+import { makeGit } from '../../ipc/git'
 import { createToolPolicyHook } from '../../runners/claudeAgentic'
 import { normalizeAgentOutput, validateAgentResult, buildUntrustedContext } from '../../runners/output'
 import { SETTING_VALIDATORS, parseHttpsUrl } from '../../../shared'
@@ -289,7 +291,8 @@ describe('git credentials', () => {
     expect(GIT_NET_CONFIG).toEqual(['protocol.ext.allow=never', 'protocol.file.allow=never'])
     const script = await ensureAskpassScript(tmp)
     expect(fs.readFileSync(script, 'utf8')).not.toContain(FAKE_PAT)
-    const env = buildGitEnv({ PATH: '/bin', GITHUB_TOKEN: 'leak', ANTHROPIC_API_KEY: 'leak', SSH_AUTH_SOCK: '/s' }, { token: FAKE_PAT, askpassPath: script })
+    const env = buildGitEnv({ PATH: '/bin', GITHUB_TOKEN: 'leak', ANTHROPIC_API_KEY: 'leak', SSH_AUTH_SOCK: '/s', EDITOR: 'vim', Visual: 'code', GIT_SSH_COMMAND: 'x', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a', GIT_ASKPASS: 'old' }, { token: FAKE_PAT, askpassPath: script })
+    for (const k of ['EDITOR', 'Visual', 'GIT_SSH_COMMAND', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0']) expect(env[k]).toBeUndefined()
     expect(env.AXON_GIT_PASSWORD).toBe(FAKE_PAT)
     expect(env.GIT_ASKPASS).toBe(script.replace(/\\/g, '/'))
     expect(env.GIT_TERMINAL_PROMPT).toBe('0')
@@ -319,6 +322,56 @@ describe('git credentials', () => {
     }
     expect(out).toContain(`password=${FAKE_PAT}`)
     expect(out).toContain('username=git')
+  })
+})
+
+describe('makeGit (simple-git 4) protocol hardening', () => {
+  const hasGit = (() => {
+    try {
+      execFileSync('git', ['--version'], { stdio: 'ignore' })
+      return true
+    } catch {
+      return false
+    }
+  })()
+
+  it.skipIf(!hasGit)('runs ordinary local git commands even when EDITOR/VISUAL/PAGER are set (simple-git 4 blocks them)', async () => {
+    const saved = { ...process.env }
+    process.env.EDITOR = 'vim'
+    process.env.VISUAL = 'code --wait'
+    process.env.GIT_PAGER = 'less'
+    try {
+    const repo = path.join(tmp, 'repo')
+    fs.mkdirSync(repo)
+    execFileSync('git', ['init', '-q'], { cwd: repo })
+    const git = await makeGit(repo, '')
+    expect((await git.raw(['status', '--short'])).trim()).toBe('')
+    } finally {
+      process.env = saved
+    }
+  })
+
+  it.skipIf(!hasGit)('refuses to clone over the file transport (protocol.file.allow=never)', async () => {
+    const bare = path.join(tmp, 'bare.git')
+    execFileSync('git', ['init', '-q', '--bare', bare])
+    const git = await makeGit(undefined, '')
+    await expect(git.clone(bare, path.join(tmp, 'dest'))).rejects.toThrow(/transport 'file' not allowed|not allowed/i)
+    expect(fs.existsSync(path.join(tmp, 'dest', '.git'))).toBe(false)
+  })
+
+  it.skipIf(!hasGit)('never executes an ext:: transport command', async () => {
+    const marker = path.join(tmp, 'pwned.txt')
+    const git = await makeGit(undefined, '')
+    const nodeCmd = `node -e "require('fs').writeFileSync(process.argv[1],'x')" ${marker.replace(/\\/g, '/')}`
+    await expect(git.clone(`ext::${nodeCmd}`, path.join(tmp, 'dest2'))).rejects.toThrow()
+    expect(fs.existsSync(marker)).toBe(false)
+  })
+
+  it.skipIf(!hasGit)('with a token, wires askpass env without putting it in argv', async () => {
+    const git = await makeGit(undefined, FAKE_PAT)
+    // The unsafe-flag allow-list accepts our own askpass/credential.helper/protocol settings.
+    await expect(git.raw(['--version'])).resolves.toMatch(/git version/)
+    expect(fs.existsSync(path.join(tmp, 'bin', 'askpass.sh'))).toBe(true)
   })
 })
 

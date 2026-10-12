@@ -32,6 +32,18 @@ export function validateRepoUrl(url: unknown): string {
   throw new Error('Repository URL must be https://, ssh:// or git@host:path')
 }
 
+// simple-git 4 refuses to spawn git while these are present in the environment (editor, pager,
+// alternate exec/template/config paths, custom ssh/proxy commands, askpass): each can run an
+// arbitrary program. AXON never needs the user's interactive setup for these, so the inherited
+// values are dropped (case-insensitively) and only our own askpass is set back below.
+const BLOCKED_INHERITED_ENV = new Set([
+  'editor', 'visual', 'git_editor', 'git_sequence_editor', 'pager', 'git_pager',
+  'git_exec_path', 'git_external_diff', 'git_proxy_command', 'git_template_dir',
+  'git_ssh', 'git_ssh_command', 'git_askpass', 'ssh_askpass', 'prefix',
+  'git_config', 'git_config_global', 'git_config_system', 'git_config_count', 'git_config_parameters',
+])
+const isIndexedGitConfig = (k: string) => /^git_config_(key|value)_\d+$/i.test(k)
+
 const SECRET_ENV = /(TOKEN|SECRET|PASSWORD|API_?KEY|PASSWD|CREDENTIAL)/i
 
 /** Environment for a git child: the parent env minus anything secret-looking, plus askpass. */
@@ -43,6 +55,7 @@ export function buildGitEnv(
   for (const [k, v] of Object.entries(base)) {
     if (v === undefined) continue
     if (SECRET_ENV.test(k) && !/^SSH_AUTH_SOCK$/.test(k)) continue
+    if (BLOCKED_INHERITED_ENV.has(k.toLowerCase()) || isIndexedGitConfig(k)) continue
     env[k] = v
   }
   env.GIT_TERMINAL_PROMPT = '0'

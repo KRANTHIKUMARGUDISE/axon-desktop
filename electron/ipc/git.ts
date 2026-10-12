@@ -1,4 +1,4 @@
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 import type { SimpleGit } from 'simple-git'
 import path from 'path'
 import fs from 'fs/promises'
@@ -33,6 +33,8 @@ export async function makeGit(baseDir: string | undefined, token: string): Promi
     ...(baseDir ? { baseDir } : {}),
     config: [...GIT_NET_CONFIG, ...(token ? ['credential.helper='] : [])],
     unsafe: { ...GIT_UNSAFE_ALLOW },
+    // simple-git 4 guards GIT_* env keys: permit exactly the two AXON sets itself.
+    allowEnvironment: ['GIT_ASKPASS', 'GIT_TERMINAL_PROMPT'],
   })
   return git.env(buildGitEnv(process.env, { token, askpassPath }))
 }
