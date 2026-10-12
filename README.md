@@ -99,6 +99,10 @@ See [CLAUDE.md](CLAUDE.md) for:
   npm run build:win
   ```
 
+**Git over SSH uses a custom key, proxy or jump host:**
+- AXON runs git with a scrubbed environment: `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `EDITOR`, `VISUAL` and `PAGER` from your shell are ignored (the git library blocks them as command-execution vectors).
+- Put the setup in `~/.ssh/config` instead, e.g. `Host github.com` with `IdentityFile ~/.ssh/id_work` or `ProxyCommand …`. A running ssh-agent (`SSH_AUTH_SOCK`) is still honoured.
+
 **Installer creation fails on macOS:**
 - Verify `build/icon.png` exists (512×512)
 - Ensure Xcode command line tools are installed: `xcode-select --install`
