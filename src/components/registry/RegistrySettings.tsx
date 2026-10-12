@@ -5,7 +5,7 @@ import { useRegistryStatus } from '../../hooks/useRegistry'
 import { Input } from '../ui/input'
 import { Button } from '../ui/button'
 import { Separator } from '../ui/separator'
-import { Field, FieldRow, Notice, SettingsCard, StatusBadge, cleanError } from '../settings/parts'
+import { Field, FieldRow, Info, Notice, SettingsCard, StatusBadge, cleanError } from '../settings/parts'
 
 const STATE: Record<string, { label: string; tone: 'ok' | 'warn' | 'error' | 'muted' }> = {
   Idle: { label: 'Up to date', tone: 'ok' },
@@ -111,8 +111,8 @@ export function RegistrySettings() {
         footer={<Button onClick={syncNow} disabled={busy || !status || status.state === 'Unconfigured'}>{busy ? 'Syncing…' : 'Sync now'}</Button>}
       >
         <FieldRow>
-          <Field label="Last sync" htmlFor="reg-last"><Input id="reg-last" readOnly value={status?.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : 'Never'} /></Field>
-          <Field label="Queued changes" htmlFor="reg-queued"><Input id="reg-queued" readOnly value={String(status?.queued ?? 0)} /></Field>
+          <Info label="Last sync">{status?.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : 'Never'}</Info>
+          <Info label="Queued changes">{String(status?.queued ?? 0)}</Info>
         </FieldRow>
         {status?.lastError && status.state !== 'Idle' && <Notice ok={false}>{status.lastError.split('\n')[0].slice(0, 400)}</Notice>}
         {status && status.rejected.length > 0 && (

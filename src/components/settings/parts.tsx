@@ -48,6 +48,17 @@ export function Field({
   )
 }
 
+/** A read-only value: plain text (not an input), so it never looks editable. */
+export function Info({ label, hint, mono, children }: { label: string; hint?: ReactNode; mono?: boolean; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <span className="text-sm font-medium text-muted-foreground">{label}</span>
+      <span className={`truncate text-sm text-foreground ${mono ? 'font-mono' : ''}`}>{children || <span className="text-muted-foreground">Not set</span>}</span>
+      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+    </div>
+  )
+}
+
 /** Two or more fields side by side on wide screens, stacked on narrow ones. */
 export function FieldRow({ children }: { children: ReactNode }) {
   return <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">{children}</div>
@@ -65,7 +76,10 @@ export function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'error' 
 
 export function Notice({ ok, children }: { ok: boolean; children: ReactNode }) {
   return (
-    <Alert variant={ok ? 'default' : 'destructive'}>
+    <Alert
+      variant={ok ? 'default' : 'destructive'}
+      className={ok ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500 *:data-[slot=alert-description]:text-emerald-500' : undefined}
+    >
       {ok ? <CheckCircle2 /> : <AlertCircle />}
       <AlertDescription>{children}</AlertDescription>
     </Alert>

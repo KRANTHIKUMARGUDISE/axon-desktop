@@ -10,7 +10,7 @@ import { JiraSettings } from '../components/settings/JiraSettings'
 import { GithubSettings } from '../components/settings/GithubSettings'
 import { ClaudeSettings } from '../components/settings/ClaudeSettings'
 import { RegistrySettings } from '../components/registry/RegistrySettings'
-import { Field, FieldRow, SettingsCard, cleanError } from '../components/settings/parts'
+import { Field, FieldRow, Info, SettingsCard, cleanError } from '../components/settings/parts'
 
 type Theme = 'dark' | 'light' | 'system'
 
@@ -155,10 +155,10 @@ function AboutSettings() {
   return (
     <SettingsCard title="About" description="Build information for support and bug reports.">
       <FieldRow>
-        <Field label="AXON version" htmlFor="about-version"><Input id="about-version" readOnly value={data?.appVersion ?? ''} /></Field>
-        <Field label="Platform" htmlFor="about-platform"><Input id="about-platform" readOnly value={data?.platform ?? ''} /></Field>
-        <Field label="Electron" htmlFor="about-electron"><Input id="about-electron" readOnly value={data?.electronVersion ?? ''} /></Field>
-        <Field label="Node" htmlFor="about-node"><Input id="about-node" readOnly value={data?.nodeVersion ?? ''} /></Field>
+        <Info label="AXON version">{data?.appVersion}</Info>
+        <Info label="Platform">{data?.platform}</Info>
+        <Info label="Electron">{data?.electronVersion}</Info>
+        <Info label="Node">{data?.nodeVersion}</Info>
       </FieldRow>
     </SettingsCard>
   )

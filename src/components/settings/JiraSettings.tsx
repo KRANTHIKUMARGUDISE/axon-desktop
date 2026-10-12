@@ -10,7 +10,7 @@ import { Alert, AlertDescription, AlertTitle } from '../ui/alert'
 import { Separator } from '../ui/separator'
 import { Checkbox } from '../ui/checkbox'
 import { Label } from '../ui/label'
-import { Field, FieldRow, Notice, SettingsCard, StatusBadge, cleanError } from './parts'
+import { Field, FieldRow, Info, Notice, SettingsCard, StatusBadge, cleanError } from './parts'
 
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : 'never')
 
@@ -64,16 +64,10 @@ export function JiraSettings() {
         }
       >
         <FieldRow>
-          <Field label="Jira site" htmlFor="jira-site"><Input id="jira-site" value={jira?.site ?? ''} readOnly placeholder="Not set" className="font-mono" /></Field>
-          <Field label="Verified email" htmlFor="jira-email" hint={jira?.displayName ? `Signed in as ${jira.displayName}` : undefined}>
-            <Input id="jira-email" value={jira?.email ?? ''} readOnly placeholder="Not set" />
-          </Field>
-        </FieldRow>
-        <FieldRow>
-          <Field label="Last verified" htmlFor="jira-verified"><Input id="jira-verified" value={when(jira?.verifiedAt ?? null)} readOnly /></Field>
-          <Field label="API token" htmlFor="jira-token" hint="Stored encrypted on this machine; never shown.">
-            <Input id="jira-token" value={jira?.hasToken ? '••••••••••••' : ''} readOnly placeholder="Not set" />
-          </Field>
+          <Info label="Jira site" mono>{jira?.site}</Info>
+          <Info label="Verified email" hint={jira?.displayName ? `Signed in as ${jira.displayName}` : undefined}>{jira?.email}</Info>
+          <Info label="Last verified">{jira?.verifiedAt ? when(jira.verifiedAt) : ""}</Info>
+          <Info label="API token" hint="Stored encrypted on this machine; never shown.">{jira?.hasToken ? "••••••••••••" : ""}</Info>
         </FieldRow>
         {testResult && <Notice ok={testResult.ok}>{testResult.text}</Notice>}
       </SettingsCard>

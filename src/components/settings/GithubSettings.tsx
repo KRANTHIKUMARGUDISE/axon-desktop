@@ -3,7 +3,7 @@ import { toast } from 'sonner'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog'
-import { Field, Notice, SettingsCard, StatusBadge, cleanError } from './parts'
+import { Field, Info, Notice, SettingsCard, StatusBadge, cleanError } from './parts'
 
 // GitHub is the only supported git host in v1 (Azure DevOps was removed). The token is validated with GitHub
 // before it is stored (main-side, encrypted) and is never read back.
@@ -51,9 +51,9 @@ export function GithubSettings() {
         status={hasToken ? <StatusBadge tone="ok">Token set</StatusBadge> : <StatusBadge tone="warn">No token</StatusBadge>}
         footer={<Button variant="outline" onClick={() => setOpen(true)}>{hasToken ? 'Replace token' : 'Add token'}</Button>}
       >
-        <Field label="Personal access token" htmlFor="gh-token" hint="Needs the repo scope (or fine-grained: contents + pull requests on the registry and your repositories).">
-          <Input id="gh-token" readOnly value={hasToken ? `••••••••${suffix}` : ''} placeholder="Not set" className="font-mono" />
-        </Field>
+        <Info label="Personal access token" mono hint="Needs the repo scope (or fine-grained: contents + pull requests on the registry and your repositories).">
+          {hasToken ? `••••••••${suffix}` : ""}
+        </Info>
       </SettingsCard>
 
       <Dialog open={open} onOpenChange={close}>

@@ -5,7 +5,7 @@ import { Button } from '../ui/button'
 import { Input } from '../ui/input'
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog'
-import { Field, Notice, SettingsCard, StatusBadge, cleanError } from './parts'
+import { Field, Info, Notice, SettingsCard, StatusBadge, cleanError } from './parts'
 
 const changed = () => window.dispatchEvent(new CustomEvent('axon:claudeKeyChanged'))
 
@@ -47,15 +47,15 @@ export function ClaudeSettings() {
         status={status?.hasKey ? <StatusBadge tone="ok">Key set</StatusBadge> : <StatusBadge tone="warn">No key</StatusBadge>}
         footer={<Button variant="outline" onClick={() => setOpen(true)}>{status?.hasKey ? 'Update key' : 'Enter key'}</Button>}
       >
-        <Field
+        <Info
           label="API key"
-          htmlFor="claude-key"
+          mono
           hint={status?.hasKey && status.source
             ? <>Resolved from <span className="text-foreground">{status.source}</span>; re-detected on every launch.</>
             : <>Get a key at console.anthropic.com.</>}
         >
-          <Input id="claude-key" readOnly value={status?.hasKey ? status.masked ?? '' : ''} placeholder="Not set" className="font-mono" />
-        </Field>
+          {status?.hasKey ? status.masked ?? "" : ""}
+        </Info>
 
         {status?.candidate && (
           <Alert>
