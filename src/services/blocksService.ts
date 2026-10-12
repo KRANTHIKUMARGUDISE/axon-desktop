@@ -1,4 +1,4 @@
-import client from './apiClient'
+import type { Block, BlockInput } from '@shared'
 import type { BuildingBlock, SourceType, AgentRuntime, ArtifactFormat, ExecutionType, BuildingBlockVisibility } from '../types'
 import type { CachedFile } from '../utils/fileHandler'
 
@@ -29,32 +29,48 @@ export interface CreateBlockRequest {
   executionAgreementAccepted?: boolean
 }
 
-export interface MarketplaceImportRequest {
-  source: string
-  path: string
-  version?: string
+// Stored blocks carry full file contents; the UI model only lists relative paths.
+function toBuildingBlock(b: Block): BuildingBlock {
+  return {
+    ...b,
+    inputs: [],
+    outputs: [],
+    cachedFiles: b.cachedFiles?.map((f) => f.relativePath),
+  }
 }
 
-export const getBlocks = (filter?: BlockFilter): Promise<BuildingBlock[]> =>
-  client.get<BuildingBlock[]>('/api/blocks', { params: filter }).then((r) => r.data)
+function toInput(req: Partial<CreateBlockRequest>, acceptedBy?: string): Partial<BlockInput> {
+  const { executionAgreementAccepted, ...rest } = req
+  return {
+    ...(rest as Partial<BlockInput>),
+    ...(executionAgreementAccepted
+      ? { executionAgreementAcceptedAt: new Date().toISOString(), executionAgreementAcceptedBy: acceptedBy ?? 'local-user' }
+      : {}),
+  }
+}
 
-export const getBlock = (id: string): Promise<BuildingBlock> =>
-  client.get<BuildingBlock>(`/api/blocks/${id}`).then((r) => r.data)
+export const getBlocks = async (filter?: BlockFilter): Promise<BuildingBlock[]> => {
+  let blocks = (await window.axon.blocks.list()) as Block[]
+  if (filter?.role) blocks = blocks.filter((b) => b.role === filter.role)
+  if (filter?.sourceType) blocks = blocks.filter((b) => b.sourceType === filter.sourceType)
+  if (filter?.verified !== undefined) blocks = blocks.filter((b) => !!b.verified === filter.verified)
+  if (filter?.search) {
+    const q = filter.search.toLowerCase()
+    blocks = blocks.filter((b) => b.name.toLowerCase().includes(q) || b.description.toLowerCase().includes(q))
+  }
+  return blocks.map(toBuildingBlock)
+}
 
-export const createBlock = (req: CreateBlockRequest): Promise<BuildingBlock> =>
-  client.post<BuildingBlock>('/api/blocks', req).then((r) => r.data)
+export const getBlock = async (id: string): Promise<BuildingBlock> => {
+  const b = (await window.axon.blocks.get(id)) as Block | null
+  if (!b) throw new Error('Block not found')
+  return toBuildingBlock(b)
+}
 
-export const updateBlock = (id: string, req: Partial<CreateBlockRequest>): Promise<BuildingBlock> =>
-  client.put<BuildingBlock>(`/api/blocks/${id}`, req).then((r) => r.data)
+export const createBlock = async (req: CreateBlockRequest): Promise<BuildingBlock> =>
+  toBuildingBlock((await window.axon.blocks.create(toInput(req))) as Block)
 
-export const syncBlock = (id: string): Promise<void> =>
-  client.post(`/api/blocks/${id}/sync`).then(() => undefined)
+export const updateBlock = async (id: string, req: Partial<CreateBlockRequest>): Promise<BuildingBlock> =>
+  toBuildingBlock((await window.axon.blocks.update(id, toInput(req))) as Block)
 
-export const deactivateBlock = (id: string): Promise<void> =>
-  client.post(`/api/blocks/${id}/deactivate`).then(() => undefined)
-
-export const browseMarketplace = (): Promise<BuildingBlock[]> =>
-  client.get<BuildingBlock[]>('/api/marketplace/browse').then((r) => r.data)
-
-export const importFromMarketplace = (req: MarketplaceImportRequest): Promise<BuildingBlock> =>
-  client.post<BuildingBlock>('/api/marketplace/import', req).then((r) => r.data)
+export const deleteBlock = (id: string): Promise<void> => window.axon.blocks.delete(id)

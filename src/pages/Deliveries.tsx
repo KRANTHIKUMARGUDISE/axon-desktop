@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react'
 import { Plus } from 'lucide-react'
 import { useDeliveries } from '@/hooks/useDeliveries'
 import { usePipelines } from '@/hooks/usePipelines'
-import { useAuthReady } from '@/hooks/useAuthReady'
 import NewDeliveryModal, { useNewDeliveryModal } from '@/components/delivery/NewDeliveryModal'
 import DeliveryPanel from '@/components/delivery/DeliveryPanel'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -152,9 +151,8 @@ export default function Deliveries() {
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
   }, [search])
 
-  const authReady = useAuthReady()
-  const { data: paged, isLoading, isError, error } = useDeliveries({ page, pageSize: 5 }, authReady)
-  const { data: pipelines = [] } = usePipelines(undefined, authReady)
+  const { data: paged, isLoading, isError, error } = useDeliveries({ page, pageSize: 5 })
+  const { data: pipelines = [] } = usePipelines(undefined)
 
   const allItems = paged?.items ?? []
   const total = paged?.total ?? 0
@@ -366,7 +364,7 @@ export default function Deliveries() {
                     >
                       {/* Job */}
                       <TableCell style={{ padding: '11px 14px', color: 'var(--axon-t2)', fontFamily: 'var(--font-mono)', fontSize: 11, whiteSpace: 'nowrap' }}>
-                        {d.jobNumber ? `#${d.jobNumber}` : '—'}
+                        {d.localSeq ? `#${d.localSeq}` : '—'}
                       </TableCell>
                       {/* Delivery */}
                       <TableCell style={{ padding: '11px 14px' }}>

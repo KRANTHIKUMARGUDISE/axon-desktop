@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { LayoutGrid, Play, GitBranch, Box, Info, Workflow, Settings, KeyRound, BarChart2 } from 'lucide-react'
 import { useDeliveries } from '@/hooks/useDeliveries'
-import { useAuthReady } from '@/hooks/useAuthReady'
 import type { ClaudeKeyStatus } from '@/types'
 
 const workspaceItems = [
@@ -23,9 +22,13 @@ const systemItems = [
 ]
 
 export function Sidebar() {
-  const authReady = useAuthReady()
-  const { data: paged } = useDeliveries({ pageSize: 100 }, authReady)
+  const { data: paged } = useDeliveries({ pageSize: 100 })
   const runningCount = (paged?.items ?? []).filter(d => d.status === 'Running').length
+
+  const [userName, setUserName] = useState('')
+  useEffect(() => {
+    window.axon.settings.get('userName').then((v) => setUserName(typeof v === 'string' ? v : '')).catch(() => {})
+  }, [])
 
   const [claudeKeyStatus, setClaudeKeyStatus] = useState<ClaudeKeyStatus | null>(null)
   useEffect(() => {
@@ -166,24 +169,15 @@ export function Sidebar() {
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-xs font-medium" style={{ color: 'var(--axon-t1)' }}>
-              Kranthi G
+              {userName || 'Local user'}
             </div>
             <div className="text-[10px]" style={{ color: 'var(--axon-t3)' }}>
-              Platform Engineer
+              Local workspace
             </div>
           </div>
           <KeyRound
             size={13}
             className="shrink-0"
-            title={
-              claudeKeyStatus === null
-                ? 'Checking Claude key…'
-                : claudeKeyStatus.hasKey
-                  ? `Claude key resolved (${claudeKeyStatus.source ?? 'unknown source'})`
-                  : claudeKeyStatus.conflict
-                    ? 'Conflicting Claude keys detected — resolve in Settings'
-                    : 'No Claude key resolved — set one in Settings'
-            }
             style={{
               color: claudeKeyStatus === null
                 ? 'var(--axon-t4)'
@@ -193,7 +187,15 @@ export function Sidebar() {
                   ? 'var(--axon-amber)'
                   : 'var(--axon-red)',
             }}
-          />
+          >
+            <title>{claudeKeyStatus === null
+                ? 'Checking Claude key…'
+                : claudeKeyStatus.hasKey
+                  ? `Claude key resolved (${claudeKeyStatus.source ?? 'unknown source'})`
+                  : claudeKeyStatus.conflict
+                    ? 'Conflicting Claude keys detected — resolve in Settings'
+                    : 'No Claude key resolved — set one in Settings'}</title>
+          </KeyRound>
         </div>
       </div>
     </aside>

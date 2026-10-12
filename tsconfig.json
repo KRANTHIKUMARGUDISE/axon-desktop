@@ -15,11 +15,12 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@shared": ["./shared/index.ts"],
+      "@shared/*": ["./shared/*"]
     }
   },
-  "include": ["src"],
-  "references": [{ "path": "./tsconfig.electron.json" }]
+  "include": ["src", "shared"],
+  "exclude": ["shared/**/__tests__"]
 }

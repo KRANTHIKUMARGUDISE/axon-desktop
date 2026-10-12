@@ -18,14 +18,14 @@ const TYPE_COLORS: Record<string, string> = {
   IO:        '#10b981',
 }
 
-export type ExecutionStatus = 'Pending' | 'Running' | 'Success' | 'Failed' | 'NeedsHuman'
+export type ExecutionStatus = 'Pending' | 'Running' | 'Success' | 'Failed' | 'AwaitingApproval'
 
 const STATUS_COLORS: Record<ExecutionStatus, string> = {
   Pending: '#64748b',
   Running: '#3b82f6',
   Success: '#22c55e',
   Failed: '#ef4444',
-  NeedsHuman: '#f59e0b',
+  AwaitingApproval: '#f59e0b',
 }
 
 interface BaseNodeData {
@@ -52,7 +52,7 @@ interface Props {
   selected?: boolean
 }
 
-export default function BaseNode({ id, data, selected }: Props) {
+export default function BaseNode({ data, selected }: Props) {
   const color = TYPE_COLORS[data.nodeType] ?? '#6f5fe8'
   const statusColor = data.executionStatus ? STATUS_COLORS[data.executionStatus] : undefined
   const borderColor = statusColor ?? (selected ? color : `${color}66`)
@@ -84,7 +84,7 @@ export default function BaseNode({ id, data, selected }: Props) {
         >
           {data.executionStatus === 'Success' && '✓'}
           {data.executionStatus === 'Failed' && '✕'}
-          {data.executionStatus === 'NeedsHuman' && '⏸'}
+          {data.executionStatus === 'AwaitingApproval' && '⏸'}
           {data.executionStatus === 'Running' && (
             <div style={{
               width: 8, height: 8, borderRadius: '50%',

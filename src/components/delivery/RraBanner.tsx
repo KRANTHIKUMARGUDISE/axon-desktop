@@ -11,7 +11,7 @@ export default function RraBanner({ steps }: RraBannerProps) {
 
   const noRraStep = !rraStep
   const score =
-    rraStep?.status === 'Completed' ? (rraStep.agentOutput?.result?.score ?? null) : null
+    rraStep?.status === 'Completed' ? ((rraStep.agentOutput?.result?.score as number | undefined) ?? null) : null
   const missingFields = rraStep?.agentOutput?.missingFields ?? []
 
   const circumference = 2 * Math.PI * 30

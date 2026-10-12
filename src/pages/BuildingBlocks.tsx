@@ -39,7 +39,7 @@ export default function BuildingBlocks() {
 
   const filtered = useMemo(() => {
     let b = blocks
-    if (selectedType !== 'All') b = b.filter(x => (x.role || x.type) === selectedType)
+    if (selectedType !== 'All') b = b.filter(x => x.role === selectedType)
     if (search.trim()) {
       const q = search.toLowerCase()
       b = b.filter(x => x.name.toLowerCase().includes(q) || x.description.toLowerCase().includes(q))
@@ -49,7 +49,7 @@ export default function BuildingBlocks() {
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { All: blocks.length }
-    ALL_TYPES.forEach(t => { c[t] = blocks.filter(b => (b.role || b.type) === t).length })
+    ALL_TYPES.forEach(t => { c[t] = blocks.filter(b => b.role === t).length })
     return c
   }, [blocks])
 

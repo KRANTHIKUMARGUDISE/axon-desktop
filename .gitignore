@@ -7,3 +7,5 @@ release/
 .env.local
 .env
 .env.*.local
+*.log
+.axon/

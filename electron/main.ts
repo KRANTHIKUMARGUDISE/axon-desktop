@@ -1,14 +1,20 @@
 import { app, BrowserWindow, session, dialog, ipcMain, shell } from 'electron'
 import path from 'path'
 import { execFile } from 'child_process'
-import { registerAuthHandlers } from './ipc/auth'
-import { registerSettingsHandlers } from './ipc/settings'
+import { registerSecretHandlers, getGitToken, purgeLegacyAuthFiles } from './ipc/secrets'
+import { registerSettingsHandlers, getWorkspaceRoot, getDS1ThresholdBytes } from './ipc/settings'
 import { registerWorkspaceHandlers } from './ipc/workspace'
-import { registerGitHandlers } from './ipc/git'
-import { registerExecutorHandlers } from './ipc/executor'
-import { registerClaudeHandlers } from './ipc/claude'
 import { registerSystemHandlers } from './ipc/system'
-import { initClaudeKey, registerClaudeKeyHandlers } from './ipc/claudeKeyStore'
+import { registerDataHandlers } from './ipc/data'
+import { registerDeliveryHandlers } from './ipc/delivery'
+import { initClaudeKey, registerClaudeKeyHandlers, getClaudeKey } from './ipc/claudeKeyStore'
+import { FileStore } from './store/fileStore'
+import { seedBuiltIns } from './store/seed'
+import { createEngine } from './engine/engine'
+import type { Engine } from './engine/engine'
+import { createBus } from './engine/bus'
+import { createRunner } from './runners'
+import { createGitWorkspace } from './workspace/gitWorkspace'
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -28,7 +34,7 @@ function createWindow() {
     minWidth: 1280,
     minHeight: 800,
     autoHideMenuBar: true,
-    icon: path.join(__dirname, '..', 'build', 'icon.png'),
+    icon: path.join(__dirname, '..', '..', 'build', 'icon.png'),
     ...(isWin
       ? {
           titleBarStyle: 'hidden' as const,
@@ -62,7 +68,7 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173')
   } else {
     mainWindow.webContents.session.clearCache().then(() => {
-      mainWindow!.loadFile(path.join(__dirname, '../dist/index.html'))
+      mainWindow!.loadFile(path.join(__dirname, '../../dist/index.html'))
     })
   }
 
@@ -81,16 +87,43 @@ app.on('second-instance', () => {
   }
 })
 
+let engine: Engine | null = null
+
 app.whenReady().then(async () => {
-  registerAuthHandlers()
+  const userData = app.getPath('userData')
+  const store = new FileStore({ dir: path.join(userData, 'store') })
+  const runsDir = path.join(userData, 'runs')
+  const bus = createBus()
+
+  registerSecretHandlers()
   registerSettingsHandlers()
   registerWorkspaceHandlers()
-  registerGitHandlers()
-  registerExecutorHandlers()
-  registerClaudeHandlers()
   registerSystemHandlers()
   registerClaudeKeyHandlers()
   await initClaudeKey()
+  await purgeLegacyAuthFiles()
+  await seedBuiltIns(store)
+
+  engine = createEngine({
+    store,
+    bus,
+    runsDir,
+    runner: createRunner(getClaudeKey),
+    workspace: createGitWorkspace({
+      getWorkspaceRoot,
+      getGitToken,
+      pickDirectory: async () => {
+        if (!mainWindow) return null
+        const res = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'], title: 'Select workspace folder' })
+        return res.canceled ? null : res.filePaths[0] ?? null
+      },
+    }),
+    ds1ThresholdBytes: getDS1ThresholdBytes,
+  })
+  registerDataHandlers(store, runsDir)
+  registerDeliveryHandlers(engine, bus)
+  // A delivery left Running by a crash/kill has no active run — make it resumable.
+  await engine.reconcileOnBoot()
 
   ipcMain.handle('dialog:openDirectory', async () => {
     if (!mainWindow) return null
@@ -162,6 +195,15 @@ app.whenReady().then(async () => {
   })
 
   createWindow()
+})
+
+// Abort in-flight agent runs and persist state before the process exits.
+let shuttingDown = false
+app.on('before-quit', (event) => {
+  if (shuttingDown || !engine) return
+  event.preventDefault()
+  shuttingDown = true
+  engine.shutdown().catch((err) => console.warn(`shutdown failed: ${err}`)).finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

@@ -1,6 +1,6 @@
 import '@xyflow/react/dist/style.css'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { useParams, useNavigate, useLocation } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ReactFlow, ReactFlowProvider, Background, Controls,
@@ -8,16 +8,11 @@ import {
 } from '@xyflow/react'
 import { useDelivery, useApproveGate, useRejectGate, useCreateDelivery } from '../hooks/useDeliveries'
 import { getStepContext, getStepOutput } from '../services/deliveriesService'
-import { useSignalR } from '../hooks/useSignalR'
 import { getBlocks } from '../services/blocksService'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import RawDataViewerModal from '../components/shared/RawDataViewerModal'
-import type { DeliveryStep, ExecutionProgress, BuildingBlock } from '../types'
-import type {
-  StepStartedEvent, StepCompletedEvent, StepFailedEvent,
-  GateReachedEvent, DeliveryCompletedEvent, DeliveryFailedEvent,
-} from '../hooks/useSignalR'
+import type { DeliveryStep, DeliveryEvent, BuildingBlock } from '../types'
 import RraBanner from '../components/delivery/RraBanner'
 import DecisionNode from '../components/pipeline/nodes/DecisionNode'
 import ExecutionNode from '../components/pipeline/nodes/ExecutionNode'
@@ -117,7 +112,7 @@ function stepStatusToExecutionStatus(status?: DeliveryStep['status']): Execution
     case 'Running': return 'Running'
     case 'Completed': return 'Success'
     case 'Failed': return 'Failed'
-    case 'AwaitingApproval': return 'NeedsHuman'
+    case 'AwaitingApproval': return 'AwaitingApproval'
     default: return 'Pending'
   }
 }
@@ -127,7 +122,8 @@ interface TimelineEvent {
     | 'WorkspaceProvisioning' | 'WorkspaceProvisioned'
     | 'GitPreparing' | 'GitPrepared'
     | 'StepStarted' | 'StepCompleted' | 'StepFailed' | 'GateReached'
-    | 'DeliveryCompleted' | 'DeliveryFailed'
+    | 'DeliveryCompleted' | 'DeliveryFailed' | 'DeliveryInterrupted'
+    | 'GateApproved' | 'GateRejected'
   body: string
   timestamp: string
 }
@@ -143,6 +139,9 @@ const eventTypeColor: Record<TimelineEvent['type'], string> = {
   GateReached: 'var(--axon-amber)',
   DeliveryCompleted: 'var(--axon-green)',
   DeliveryFailed: 'var(--axon-red)',
+  DeliveryInterrupted: 'var(--axon-amber)',
+  GateApproved: 'var(--axon-green)',
+  GateRejected: 'var(--axon-red)',
 }
 
 function timeAgo(iso: string) {
@@ -155,6 +154,7 @@ function timeAgo(iso: string) {
 function statusBadgeStyle(status: string): React.CSSProperties {
   switch (status) {
     case 'Running': return { background: 'var(--axon-nx-glow)', color: 'var(--axon-nexus2)', border: '1px solid rgba(111,95,232,0.2)' }
+    case 'Interrupted':
     case 'Paused': return { background: 'var(--axon-amber-d)', color: 'var(--axon-amber)', border: '1px solid rgba(245,158,11,0.2)' }
     case 'Completed': return { background: 'var(--axon-green-d)', color: 'var(--axon-green)', border: '1px solid rgba(16,185,129,0.2)' }
     case 'Failed': return { background: 'var(--axon-red-d)', color: 'var(--axon-red)', border: '1px solid rgba(239,68,68,0.2)' }
@@ -180,7 +180,6 @@ function formatTotalDuration(startedAt: string, completedAt?: string): string {
 export default function DeliveryLiveView() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { pathname } = useLocation()
   const queryClient = useQueryClient()
 
   const { data: delivery, isLoading, refetch } = useDelivery(id ?? '')
@@ -265,7 +264,7 @@ export default function DeliveryLiveView() {
             // Not yet persisted — keep whatever live progress we already have locally
             // (e.g. Running from a step_started event), else seed a fresh Pending entry.
             ?? prevById.get(n.id)
-            ?? { id: n.id, name: n.label, nodeName: n.label, status: 'Pending' as DeliveryStep['status'] }
+            ?? { id: n.id, name: n.label ?? n.id, nodeName: n.label ?? n.id, status: 'Pending' as DeliveryStep['status'] }
         )
       })
     } else if (delivery.steps.length > 0) {
@@ -401,61 +400,30 @@ export default function DeliveryLiveView() {
 
   const onPaneClick = useCallback(() => setSelectedNodeId(null), [])
 
-  const viewFullFile = useCallback(async (relativeRef: string, title: string) => {
-    const wsPath = localWorkspacePath ?? delivery?.workspacePath
-    if (!wsPath) return
-    try {
-      const fullPath = await window.axon.workspace.exists(wsPath)
-        ? `${wsPath}/${relativeRef}`.replace(/\\/g, '/')
-        : relativeRef
-      const content = await window.axon.workspace.readFile(fullPath)
-      setViewerData({ title, data: content })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      toast.error(`Could not read file — is the developer's machine/workspace available? (${message})`)
-    }
-  }, [delivery, localWorkspacePath])
-
-  // Lazy-loads the field this step's main payload no longer carries inline
-  // (contextSnapshot / output.result are excluded from GET /deliveries/{id} —
-  // fetched on demand here instead). Falls back to the local workspace file read
-  // when the field was truncated-to-file rather than stored in Mongo.
+  // Loads the full context / output for one step. The main process reads the DS1 file
+  // (under {userData}/runs/) when the delivery document only holds a truncated marker.
   const viewFullField = useCallback(async (
     kind: 'context' | 'output',
     step: DeliveryStep,
     title: string,
   ) => {
     if (!id) return
-    // Unlike output.result (always computed), the context snapshot is only ever
-    // persisted when storeFullContext was on for this delivery — fetching it
-    // otherwise would just return an empty object, which reads as a bug
-    // ("no input?!") rather than "this delivery didn't capture full context".
+    // The context snapshot is only persisted when storeFullContext was on for this delivery.
     if (kind === 'context' && !delivery?.storeFullContext) {
       toast.info("Full context wasn't stored for this delivery — enable \"Store full context\" on a new delivery to capture it.")
-      return
-    }
-    const isTruncated = kind === 'context' ? step.isContextTruncated : step.agentOutput?.isTruncated
-    const fileRef = kind === 'context' ? step.contextFileRef : step.agentOutput?.outputFileRef
-    if (isTruncated) {
-      if (fileRef) await viewFullFile(fileRef, title)
       return
     }
     setViewerLoading(true)
     try {
       const data = kind === 'context' ? await getStepContext(id, step.id) : await getStepOutput(id, step.id)
-      if (data && typeof data === 'object' && 'truncated' in data && (data as { truncated?: boolean }).truncated) {
-        const lazyFileRef = (data as { fileRef?: string }).fileRef
-        if (lazyFileRef) await viewFullFile(lazyFileRef, title)
-        return
-      }
-      setViewerData({ title, data: data as Record<string, unknown> })
+      setViewerData({ title, data })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       toast.error(`Could not load full ${kind} (${message})`)
     } finally {
       setViewerLoading(false)
     }
-  }, [id, viewFullFile])
+  }, [id, delivery?.storeFullContext])
 
   // Auto-start delivery when first loaded if in Pending status.
   // The cached `delivery` from useDelivery() can be stale (staleTime: 0 still serves
@@ -470,7 +438,7 @@ export default function DeliveryLiveView() {
       autoStartedRef.current = true
       setLocalStatus('Running')
       warnIfClaudeKeyMissing()
-      window.axon.executor.start(id).then((startRes) => {
+      window.axon.delivery.start(id).then((startRes) => {
         if (!startRes.success) {
           console.error('Auto-start failed:', startRes.error)
           setLocalStatus(null)
@@ -502,151 +470,150 @@ export default function DeliveryLiveView() {
     return () => clearInterval(interval)
   }, [id, delivery, delivery?.status, refetch])
 
-  // Subscribe to local executor progress events
+  // Subscribe to the single typed delivery event channel (D2).
   useEffect(() => {
-    const handler = (_event: unknown, data: ExecutionProgress) => {
+    return window.axon.events.onDeliveryEvent((data: DeliveryEvent) => {
       if (data.deliveryId !== id) return
-      // Guard against the same event being delivered twice in quick succession
-      // (observed in practice; exact cause not isolated). Deliberately time-windowed,
-      // not "ever seen this signature in this session" — a node genuinely re-running
-      // (gate resume, a retried step after tuning timeoutSeconds, etc.) produces a
-      // second, legitimate step_started with an IDENTICAL signature (same type/nodeId,
-      // no message) to its first run. An unbounded dedup would silently swallow that
-      // second occurrence forever for the life of this component instance.
-      const signature = `${data.type}|${data.nodeId}|${data.message ?? ''}`
-      const now = Date.now()
-      if (lastProgressEventRef.current?.signature === signature && now - lastProgressEventRef.current.at < 1000) return
-      lastProgressEventRef.current = { signature, at: now }
-      if (data.type === 'workspace_provisioning') {
-        addTimelineEvent('WorkspaceProvisioning', 'Workspace provisioning…')
-      } else if (data.type === 'workspace_provisioned') {
-        addTimelineEvent('WorkspaceProvisioned', `Workspace provisioned${data.message ? ` — ${data.message}` : ''}`)
-        if (data.message) setLocalWorkspacePath(data.message)
-      } else if (data.type === 'git_preparing') {
-        addTimelineEvent('GitPreparing', `Preparing codebase…${data.message ? ` ${data.message}` : ''}`)
-      } else if (data.type === 'git_prepared') {
-        addTimelineEvent('GitPrepared', `Codebase prepared${data.message ? ` — branch ${data.message}` : ''}`)
-        if (data.message) setLocalBranch(data.message)
-      } else if (data.type === 'step_started') {
-        setLocalSteps((prev) =>
-          prev.map((s) =>
-            s.id === data.nodeId
-              ? { ...s, status: 'Running' as DeliveryStep['status'], startedAt: new Date().toISOString() }
-              : s
+      switch (data.type) {
+        case 'workspace_provisioning':
+          addTimelineEvent('WorkspaceProvisioning', 'Workspace provisioning…')
+          break
+        case 'workspace_provisioned':
+          addTimelineEvent('WorkspaceProvisioned', `Workspace provisioned — ${data.workspacePath}`)
+          setLocalWorkspacePath(data.workspacePath)
+          break
+        case 'git_preparing':
+          addTimelineEvent('GitPreparing', `Preparing codebase…${data.repoUrl ? ` ${data.repoUrl}` : ''}`)
+          break
+        case 'git_prepared':
+          addTimelineEvent('GitPrepared', `Codebase prepared${data.branch ? ` — branch ${data.branch}` : ''}`)
+          if (data.branch) setLocalBranch(data.branch)
+          break
+        case 'status_changed':
+          setLocalStatus(data.status)
+          break
+        case 'step_started':
+          setLocalSteps((prev) =>
+            prev.map((s) =>
+              s.id === data.nodeId
+                ? { ...s, status: 'Running' as DeliveryStep['status'], startedAt: data.at }
+                : s,
+            ),
           )
-        )
-        addTimelineEvent('StepStarted', `${data.blockName ?? 'Step'} started`)
-      } else if (data.type === 'step_completed') {
-        setLocalSteps((prev) =>
-          prev.map((s) =>
-            s.id === data.nodeId
-              ? {
-                  ...s,
-                  status: 'Completed' as DeliveryStep['status'],
-                  completedAt: new Date().toISOString(),
-                  agentOutput: {
-                    ...s.agentOutput,
-                    summary: data.output?.summary,
-                    confidence: data.output?.confidence,
-                    toolsUsed: data.output?.toolsUsed,
-                    toolsDenied: data.output?.toolsDenied,
-                  },
-                }
-              : s
+          addTimelineEvent('StepStarted', `${data.blockName} started`)
+          break
+        case 'step_completed':
+          setLocalSteps((prev) =>
+            prev.map((s) =>
+              s.id === data.nodeId
+                ? {
+                    ...s,
+                    status: 'Completed' as DeliveryStep['status'],
+                    completedAt: data.at,
+                    agentOutput: {
+                      ...s.agentOutput,
+                      summary: data.output.summary,
+                      confidence: data.output.confidence,
+                      toolsUsed: data.output.toolsUsed,
+                      toolsDenied: data.output.toolsDenied,
+                    },
+                  }
+                : s,
+            ),
           )
-        )
-        addTimelineEvent('StepCompleted', `${data.blockName ?? 'Step'} completed`)
-      } else if (data.type === 'step_failed') {
-        setLocalSteps((prev) =>
-          prev.map((s) =>
-            s.id === data.nodeId
-              ? {
-                  ...s,
-                  status: 'Failed' as DeliveryStep['status'],
-                  completedAt: new Date().toISOString(),
-                  errorMessage: data.message,
-                  agentOutput: {
-                    ...s.agentOutput,
-                    summary: data.output?.summary,
-                    toolsUsed: data.output?.toolsUsed,
-                    toolsDenied: data.output?.toolsDenied,
-                    timedOut: data.output?.timedOut,
-                  },
-                }
-              : s
+          addTimelineEvent('StepCompleted', `${data.blockName} completed`)
+          break
+        case 'step_failed':
+          setLocalSteps((prev) =>
+            prev.map((s) =>
+              s.id === data.nodeId
+                ? {
+                    ...s,
+                    status: 'Failed' as DeliveryStep['status'],
+                    completedAt: data.at,
+                    errorMessage: data.message,
+                    agentOutput: {
+                      ...s.agentOutput,
+                      summary: data.output?.summary,
+                      toolsUsed: data.output?.toolsUsed,
+                      toolsDenied: data.output?.toolsDenied,
+                      timedOut: data.output?.timedOut,
+                    },
+                  }
+                : s,
+            ),
           )
-        )
-        addTimelineEvent('StepFailed', `${data.blockName ?? 'Step'} failed — ${data.message ?? ''}`)
-        setLocalStatus('Failed')
-        queryClient.invalidateQueries({ queryKey: ['delivery', id] })
-        queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-      } else if (data.type === 'gate_reached') {
-        setLocalSteps((prev) =>
-          prev.map((s) =>
-            s.id === data.nodeId
-              ? {
-                  ...s,
-                  status: 'AwaitingApproval' as DeliveryStep['status'],
-                  agentOutput: { ...s.agentOutput, humanGateReason: data.output?.summary ?? data.message },
-                }
-              : s
+          addTimelineEvent('StepFailed', `${data.blockName} failed — ${data.message}`)
+          break
+        case 'gate_reached':
+          setLocalSteps((prev) =>
+            prev.map((s) =>
+              s.id === data.nodeId
+                ? {
+                    ...s,
+                    status: 'AwaitingApproval' as DeliveryStep['status'],
+                    agentOutput: { ...s.agentOutput, humanGateReason: data.output.summary },
+                  }
+                : s,
+            ),
           )
-        )
-        addTimelineEvent('GateReached', `Gate reached — ${data.blockName ?? 'Step'}`)
-        setLocalStatus('Paused')
-        // delivery.currentNodeId (used by isSelectedNodeActiveGate) only exists in the
-        // backend record — refetch so the Approve/Reject buttons can appear without
-        // waiting for the periodic poll or a manual reopen.
-        queryClient.invalidateQueries({ queryKey: ['delivery', id] })
-        queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-      } else if (data.type === 'completed') {
-        addTimelineEvent('DeliveryCompleted', 'Delivery completed')
-        if (data.prUrl) {
-          setPrUrl(data.prUrl)
-          addTimelineEvent('DeliveryCompleted', `PR Created: ${data.prUrl}`)
-        }
-        setLocalStatus('Completed')
-        queryClient.invalidateQueries({ queryKey: ['delivery', id] })
-        queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-      } else if (data.type === 'failed') {
-        addTimelineEvent('DeliveryFailed', `Delivery failed — ${data.message ?? ''}`)
-        setLocalStatus('Failed')
-        queryClient.invalidateQueries({ queryKey: ['delivery', id] })
-        queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-      } else if (data.type === 'cancelled') {
-        setLocalStatus('Cancelled')
-        queryClient.invalidateQueries({ queryKey: ['delivery', id] })
-        queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+          addTimelineEvent('GateReached', `Awaiting approval — ${data.blockName}`)
+          break
+        case 'gate_approved':
+          setLocalSteps((prev) =>
+            prev.map((s) => (s.id === data.nodeId ? { ...s, status: 'Completed' as DeliveryStep['status'] } : s)),
+          )
+          addTimelineEvent('GateApproved', `Gate approved by ${data.approvedBy}${data.comment ? ` — ${data.comment}` : ''}`)
+          break
+        case 'gate_rejected':
+          setLocalSteps((prev) =>
+            prev.map((s) => (s.id === data.nodeId ? { ...s, status: 'Failed' as DeliveryStep['status'] } : s)),
+          )
+          addTimelineEvent('GateRejected', `Gate rejected by ${data.rejectedBy} — ${data.comment}`)
+          break
+        case 'completed':
+          addTimelineEvent('DeliveryCompleted', 'Delivery completed')
+          if (data.prUrl) {
+            setPrUrl(data.prUrl)
+            addTimelineEvent('DeliveryCompleted', `PR Created: ${data.prUrl}`)
+          }
+          break
+        case 'failed':
+          addTimelineEvent('DeliveryFailed', `Delivery failed — ${data.message}`)
+          break
+        case 'cancelled':
+          addTimelineEvent('DeliveryInterrupted', 'Delivery cancelled')
+          break
+        case 'interrupted':
+          addTimelineEvent('DeliveryInterrupted', 'Delivery interrupted — resume to continue')
+          break
       }
-    }
-
-    window.axon.executor.onProgress(handler)
-    return () => window.axon.executor.offProgress(handler)
-  }, [id, queryClient])
+    })
+  }, [id])
 
 
+
+  // The main process records approver/timestamp/comment and resumes (approve) or fails the
+  // delivery (reject) — status updates arrive through the delivery event channel.
   const handleApprove = async (comment: string) => {
     if (!id) return
-    await approveGate.mutateAsync(comment || undefined)
-    setGateComment('')
-    // Same reasoning as handleStart — without this, displayStatus stays stuck on the
-    // last-fetched 'Paused' (so the Running badge/Stop button never appear) because the
-    // periodic poll only runs once delivery.status itself reads Running, which it won't
-    // until a refetch happens to land after the backend's own status flip.
-    setLocalStatus('Running')
-    await window.axon.executor.resume(id)
-    queryClient.invalidateQueries({ queryKey: ['delivery', id] })
+    try {
+      await approveGate.mutateAsync(comment || undefined)
+      setGateComment('')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to approve gate')
+    }
   }
 
   const handleReject = async (comment: string) => {
     if (!id) return
     if (!comment.trim()) return
-    await rejectGate.mutateAsync(comment)
-    setGateComment('')
-    await window.axon.executor.cancel(id)
-    setLocalStatus('Failed')
-    queryClient.invalidateQueries({ queryKey: ['delivery', id] })
-    queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+    try {
+      await rejectGate.mutateAsync(comment)
+      setGateComment('')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to reject gate')
+    }
   }
 
   const warnIfClaudeKeyMissing = useCallback(async () => {
@@ -667,7 +634,7 @@ export default function DeliveryLiveView() {
     setLocalStatus('Running')
     await warnIfClaudeKeyMissing()
     try {
-      const res = await window.axon.executor.start(id)
+      const res = await window.axon.delivery.start(id)
       if (!res.success) {
         setLocalStatus(null)
         toast.error(res.error ? `Failed to start delivery: ${res.error}` : 'Failed to start delivery')
@@ -686,7 +653,7 @@ export default function DeliveryLiveView() {
     if (!window.confirm('Stop this delivery? The currently running step will be interrupted.')) return
     setIsStopping(true)
     try {
-      const res = await window.axon.executor.cancel(id)
+      const res = await window.axon.delivery.cancel(id)
       if (!res.success) {
         toast.error(res.error ? `Failed to stop delivery: ${res.error}` : 'Failed to stop delivery')
         return
@@ -712,7 +679,7 @@ export default function DeliveryLiveView() {
     if (!id) return
     let previewMessage: string
     try {
-      const previewRes = await window.axon.executor.previewResume(id)
+      const previewRes = await window.axon.delivery.previewResume(id)
       if (!previewRes.success || !previewRes.preview) {
         toast.error(previewRes.error ? `Could not preview resume: ${previewRes.error}` : 'Could not preview resume')
         return
@@ -754,7 +721,7 @@ export default function DeliveryLiveView() {
     setIsStarting(true)
     setLocalStatus('Running')
     try {
-      const res = await window.axon.executor.resume(id)
+      const res = await window.axon.delivery.resume(id)
       if (!res.success) {
         setLocalStatus(null)
         toast.error(res.error ? `Failed to resume delivery: ${res.error}` : 'Failed to resume delivery')
@@ -843,53 +810,6 @@ export default function DeliveryLiveView() {
     setTimeline((prev) => [{ type, body, timestamp: new Date().toISOString() }, ...prev].slice(0, 10))
   }
 
-  useSignalR(id ?? null, {
-    onStepStarted: (evt: StepStartedEvent) => {
-      setLocalSteps((prev) =>
-        prev.map((s) => s.id === evt.stepId
-          ? { ...s, status: 'Running', startedAt: evt.startedAt }
-          : s)
-      )
-      addTimelineEvent('StepStarted', `${evt.stepName} started`)
-    },
-    onStepCompleted: (evt: StepCompletedEvent) => {
-      setLocalSteps((prev) =>
-        prev.map((s) => s.id === evt.stepId
-          ? { ...s, status: 'Completed', completedAt: evt.completedAt,
-              agentOutput: { ...s.agentOutput, summary: evt.output } }
-          : s)
-      )
-      addTimelineEvent('StepCompleted', `${evt.stepName} completed`)
-    },
-    onStepFailed: (evt: StepFailedEvent) => {
-      setLocalSteps((prev) =>
-        prev.map((s) => s.id === evt.stepId
-          ? { ...s, status: 'Failed', errorMessage: evt.error }
-          : s)
-      )
-      addTimelineEvent('StepFailed', `${evt.stepName} failed — ${evt.error}`)
-    },
-    onGateReached: (evt: GateReachedEvent) => {
-      setLocalSteps((prev) =>
-        prev.map((s) => s.id === evt.stepId
-          ? { ...s, status: 'AwaitingApproval',
-              agentOutput: { ...s.agentOutput, humanGateReason: evt.message } }
-          : s)
-      )
-      addTimelineEvent('GateReached', `Gate reached — ${evt.stepName}`)
-    },
-    onDeliveryCompleted: (evt: DeliveryCompletedEvent) => {
-      addTimelineEvent('DeliveryCompleted', `Delivery completed in ${evt.duration}`)
-      queryClient.invalidateQueries({ queryKey: ['delivery', id] })
-      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-    },
-    onDeliveryFailed: (evt: DeliveryFailedEvent) => {
-      addTimelineEvent('DeliveryFailed', `Delivery failed — ${evt.error}`)
-      queryClient.invalidateQueries({ queryKey: ['delivery', id] })
-      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-    },
-  })
-
   if (isLoading || !delivery) {
     return (
       <div style={{ padding: 22 }}>
@@ -926,7 +846,7 @@ export default function DeliveryLiveView() {
   // configured) is what actually matters here, not a plausible-looking placeholder.
   const branch = localBranch ?? delivery.branch ?? '—'
   const workspace = effectiveWorkspacePath
-    ? effectiveWorkspacePath.split('/').pop()
+    ? effectiveWorkspacePath.split(/[\\/]/).filter(Boolean).pop()
     : undefined
 
   return (
@@ -992,7 +912,7 @@ export default function DeliveryLiveView() {
           </button>
         )}
 
-        {displayStatus === 'Cancelled' && (
+        {(displayStatus === 'Cancelled' || displayStatus === 'Interrupted') && (
           <button
             onClick={handleResume}
             disabled={isStarting}
@@ -1044,7 +964,7 @@ export default function DeliveryLiveView() {
             <div style={{ display: 'flex', gap: 8, fontSize: 10, color: 'var(--axon-t3)' }}>
               {([
                 ['Pending', '#64748b'], ['Running', '#3b82f6'], ['Success', '#22c55e'],
-                ['Needs Human', '#f59e0b'], ['Failed', '#ef4444'],
+                ['Awaiting approval', '#f59e0b'], ['Failed', '#ef4444'],
               ] as const).map(([label, color]) => (
                 <span key={label} style={{
                   display: 'inline-flex', alignItems: 'center', gap: 5,
@@ -1373,7 +1293,7 @@ export default function DeliveryLiveView() {
             borderRadius: 12, padding: '12px 14px', fontSize: 11, marginBottom: 16,
           }}>
             {[
-              ...(delivery.jobNumber ? [{ k: 'Job', v: `#${delivery.jobNumber}` }] : []),
+              ...(delivery.localSeq ? [{ k: 'Run', v: `#${delivery.localSeq}` }] : []),
               { k: 'Pipeline', v: pipelineName },
               { k: 'Triggered by', v: createdBy },
               { k: 'Repo', v: delivery.repoUrl, mono: true },

@@ -3,10 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import { useQueryClient, useMutation } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { deletePipeline, createPipeline } from '../services/pipelinesService'
+import type { CreatePipelineRequest } from '../services/pipelinesService'
 import { usePipelines } from '../hooks/usePipelines'
 import { useBlocks } from '../hooks/useBlocks'
-import { useAuthReady } from '../hooks/useAuthReady'
-import type { Pipeline, CreatePipelineRequest } from '../types'
+import type { Pipeline } from '../types'
 import PipelineCard from '../components/pipeline/PipelineCard'
 import NewDeliveryModal from '../components/delivery/NewDeliveryModal'
 
@@ -28,22 +28,18 @@ export default function Pipelines() {
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [runTarget, setRunTarget] = useState<Pipeline | null>(null)
   const [currentUserId, setCurrentUserId] = useState<string>('')
-  const [currentUserName, setCurrentUserName] = useState<string>('')
   const [currentTeam, setCurrentTeam] = useState<string>('')
 
-  const authReady = useAuthReady()
-  const { data: pipelines, isLoading, isError } = usePipelines(undefined, authReady)
+  const { data: pipelines, isLoading, isError } = usePipelines(undefined)
   const { blocks } = useBlocks()
 
   useEffect(() => {
     async function loadUserInfo() {
-      const [userId, userName, team] = await Promise.all([
+      const [userId, team] = await Promise.all([
         window.axon.settings.get('userId') as Promise<string | null>,
-        window.axon.settings.get('userName') as Promise<string | null>,
         window.axon.settings.get('team') as Promise<string | null>,
       ])
       setCurrentUserId(userId || '')
-      setCurrentUserName(userName || '')
       setCurrentTeam(team || '')
     }
     loadUserInfo()
@@ -56,7 +52,7 @@ export default function Pipelines() {
   const blockTypeMap = useMemo(() => {
     const map = new Map<string, string>()
     blocks.forEach(block => {
-      map.set(block.id, block.role ?? block.type)
+      map.set(block.id, block.role)
     })
     return map
   }, [blocks])

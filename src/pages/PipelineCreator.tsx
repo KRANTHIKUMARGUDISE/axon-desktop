@@ -1,6 +1,6 @@
 import '@xyflow/react/dist/style.css'
 import { useState, useCallback, useMemo, useEffect } from 'react'
-import { useNavigate, useParams, useLocation } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
@@ -11,7 +11,7 @@ import {
 import { toast } from 'sonner'
 import { getBlocks } from '../services/blocksService'
 import { getPipeline, createPipeline, updatePipeline } from '../services/pipelinesService'
-import type { BlockType, Pipeline, PipelineNode, PipelineEdge, ValidationResult } from '../types'
+import type { BlockType, PipelineNode, PipelineEdge, ValidationResult } from '../types'
 import Palette from '../components/pipeline/Palette'
 import DecisionNode from '../components/pipeline/nodes/DecisionNode'
 import ExecutionNode from '../components/pipeline/nodes/ExecutionNode'
@@ -70,7 +70,7 @@ interface FlowCanvasProps {
   onEdgesChange: ReturnType<typeof useEdgesState>[2]
   onConnect: (c: Connection) => void
   onReconnect: (oldEdge: Edge, newConnection: Connection) => void
-  isValidConnection: (c: Connection) => boolean
+  isValidConnection: (c: Connection | Edge) => boolean
   onNodeClick: (e: React.MouseEvent, n: Node) => void
   onPaneClick: () => void
   onNewNode: (d: { blockId: string; blockType: BlockType; blockName: string; blockRuntime?: string; position: { x: number; y: number } }) => void
@@ -137,7 +137,6 @@ function FlowCanvas({
 
 export default function PipelineCreator() {
   const navigate = useNavigate()
-  const location = useLocation()
   const queryClient = useQueryClient()
   const { id } = useParams<{ id: string }>()
   const isEditMode = Boolean(id)
@@ -273,7 +272,7 @@ export default function PipelineCreator() {
     setEdges(eds => reconnectEdge(oldEdge, newConnection, eds))
   }, [setEdges])
 
-  const isValidConnection = useCallback((connection: Connection) => {
+  const isValidConnection = useCallback((connection: Connection | Edge) => {
     const src = connection.sourceHandle
     const tgt = connection.targetHandle
     if (src === 'right') return tgt === 'left' || tgt === 'top'

@@ -34,7 +34,7 @@ npm run build:all   # build + both installers
 ### `electron-builder.config.js`
 - `directories.output: 'release'` — where installers land
 - `files` — only `dist/`, `dist-electron/`, and `package.json` get packaged (source `src/`/`electron/` are excluded)
-- `extraMetadata.main: 'dist-electron/main.js'` — overrides `package.json`'s `main` field for the packaged app
+- `extraMetadata.main: 'dist-electron/electron/main.js'` — overrides `package.json`'s `main` field for the packaged app
 - `electronDownload.cache` — points to the OS temp directory (`os.tmpdir()/axon-electron-cache`), not inside the project folder (see [Known issues](#known-issues))
 - `win.icon` / `mac.icon` / `nsis.installerIcon` / `nsis.uninstallerIcon` — all sourced from `build/icon.png` (auto-converted to `.ico`/`.icns` by electron-builder)
 - `mac` target is conditional on `process.platform === 'darwin'` — building `--mac` from Windows isn't supported without a Mac
@@ -48,7 +48,7 @@ electron-builder auto-generates `.ico`/`.icns` from that single PNG — no need 
 
 ## Path handling for packaged app
 
-- `electron/main.ts` loads `dist/index.html` relative to `dist-electron/main.js` in production (`isDev` checks `!app.isPackaged`)
+- `electron/main.ts` loads `dist/index.html` relative to `dist-electron/electron/main.js` in production (`isDev` checks `!app.isPackaged`)
 - `electron/ipc/settings.ts` — `electron-store` is rooted at `app.getPath('userData')`, not the project directory, so settings persist correctly once installed
 - `electron/ipc/workspace.ts` — paths starting with `~` are expanded to `os.homedir()` for cross-platform workspace roots
 - `electron/ipc/git.ts` — uses `path.join()` throughout for cross-platform compatibility
@@ -57,7 +57,7 @@ electron-builder auto-generates `.ico`/`.icns` from that single PNG — no need 
 
 ### Window/taskbar icon disappears after changing `dist-electron`'s folder depth
 
-`electron/main.ts` resolves the window icon and `index.html` path relative to `__dirname` (i.e., relative to wherever `dist-electron/main.js` ends up). These paths assume `dist-electron/` sits as a **sibling** of `dist/` and `build/` directly under the project root:
+`electron/main.ts` resolves the window icon and `index.html` path relative to `__dirname` (i.e., relative to wherever `dist-electron/electron/main.js` ends up). These paths assume `dist-electron/` sits as a **sibling** of `dist/` and `build/` directly under the project root:
 
 ```
 project-root/

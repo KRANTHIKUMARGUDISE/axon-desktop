@@ -19,23 +19,6 @@ const TYPE_TEXT: Record<string, string> = {
   IO: '#34d399',
 }
 
-const SYNC_DOT: Record<string, string> = {
-  Synced: '#10b981',
-  Stale: '#f59e0b',
-  Unavailable: '#f59e0b',
-  Missing: '#ef4444',
-  Local: '#64748b',
-  NeverSynced: '#38bdf8',
-}
-const SYNC_LABEL: Record<string, string> = {
-  Synced: 'Synced',
-  Stale: 'Update available',
-  Unavailable: 'Cached',
-  Missing: 'Deleted',
-  Local: 'Local',
-  NeverSynced: 'Never synced',
-}
-
 const SOURCE_LABEL: Record<string, string> = {
   Axon: 'Axon',
   Local: 'Local',
@@ -80,7 +63,7 @@ interface Props {
 }
 
 export default function BlockCard({ block, selected, onClick }: Props) {
-  const blockType = block.role || block.type || 'Execution'
+  const blockType = block.role || 'Execution'
   const sourceType = block.sourceType || 'Local'
   const runtime = block.agentRuntime || 'Claude'
   const contextRequirements = block.contextRequirements ?? []

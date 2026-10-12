@@ -3,8 +3,9 @@
 // fails with ERR_REQUIRE_ESM — must dynamic-import the runtime value instead. Types are
 // erased at compile time, so importing them statically is fine.
 import type { query as QueryFn, HookJSONOutput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
-import { normalizeAgentOutput } from './claude'
-import type { AgentOutput, DeliveryContext } from './claude'
+import type { AgentOutput } from '../../shared'
+import { normalizeAgentOutput, buildInputFieldsText } from './output'
+import type { RunnerInput } from './types'
 import path from 'path'
 import fs from 'fs'
 
@@ -53,57 +54,14 @@ function resolveClaudeBinaryPath(): string | undefined {
   })
 }
 
-export interface AgenticStepInput {
-  blockId: string
-  blockName: string
-  cachedDefinition: string
-  deliveryContext: DeliveryContext
-  contextRequirements?: string[]
-  outputMapping?: Record<string, string>
-  claudeApiKey: string
-  workspacePath: string
-  // Resolved by executor.ts BEFORE this function is called — the six-tool ceiling when
-  // the block is exploring (Personal scope, empty allowedTools), else the block's real
-  // allowedTools. This function does not do that resolution itself (see Part 4 task 3).
-  effectiveTools: string[]
-  timeoutSeconds: number
-  // Delivery-lifetime signal from executor.ts's ExecutionContext.abortController — fires
-  // when the user clicks Stop. Merged with this function's own per-step timeout abort
-  // below so either one interrupts the in-flight SDK call immediately.
-  externalSignal?: AbortSignal
-}
-
-function buildUserMessage(input: AgenticStepInput): string {
-  const { deliveryContext, contextRequirements } = input
-  const contextFields: Record<string, unknown> = {
-    ...deliveryContext.previousStepsResults,
-    ...deliveryContext.currentInputs,
-  }
-
-  let inputFieldsText = ''
-  if (contextRequirements && contextRequirements.length > 0) {
-    const selectedFields: Record<string, unknown> = {}
-    for (const key of contextRequirements) {
-      if (key in contextFields) selectedFields[key] = contextFields[key]
-    }
-    inputFieldsText = Object.entries(selectedFields)
-      .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-      .join('\n')
-  } else {
-    inputFieldsText = Object.entries(contextFields)
-      .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-      .join('\n')
-  }
-
-  const inputFieldsFallback = contextRequirements && contextRequirements.length > 0
-    ? `(none of the required fields [${contextRequirements.join(', ')}] were available in the delivery context)`
-    : '(no context fields required)'
-
+function buildUserMessage(input: RunnerInput): string {
+  const { deliveryContext, block } = input
+  const pool = { ...deliveryContext.previousStepsResults, ...deliveryContext.currentInputs }
   return `## Delivery Context
 Ticket: ${deliveryContext.ticketId}${deliveryContext.ticketTitle ? ` — ${deliveryContext.ticketTitle}` : ''}
 
 ## Input Fields
-${inputFieldsText || inputFieldsFallback}
+${buildInputFieldsText(pool, block.contextRequirements)}
 
 ## Required Output Format
 When you are done, respond with ONLY a valid JSON object (no preamble, no markdown fences):
@@ -116,8 +74,9 @@ When you are done, respond with ONLY a valid JSON object (no preamble, no markdo
 }`
 }
 
-export async function runAgenticBlock(input: AgenticStepInput): Promise<AgentOutput> {
-  const { cachedDefinition, claudeApiKey, workspacePath, effectiveTools, timeoutSeconds, outputMapping, externalSignal } = input
+export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string): Promise<AgentOutput> {
+  const { instructions, workspacePath, effectiveTools, timeoutSeconds, signal: externalSignal } = input
+  const outputMapping = input.block.outputMapping
 
   const toolsUsed = new Set<string>()
   const toolsDenied = new Set<string>()
@@ -138,7 +97,7 @@ export async function runAgenticBlock(input: AgenticStepInput): Promise<AgentOut
       options: {
         cwd: workspacePath,
         settingSources: ['project'],
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: cachedDefinition },
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: instructions },
         permissionMode: 'bypassPermissions',
         tools: effectiveTools,
         // Hard deny regardless of bypassPermissions and regardless of what's in `tools` —

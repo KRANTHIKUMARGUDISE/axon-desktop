@@ -11,7 +11,7 @@ import type { CachedFile } from '../../utils/fileHandler'
 const BLOCK_TYPES: BlockType[] = ['Decision', 'Execution', 'Knowledge', 'Control', 'Utility', 'IO']
 const SOURCE_TYPES: SourceType[] = ['Axon', 'Local', 'Marketplace', 'CDF']
 // Only Claude and Codex are user-selectable; Axon is set by backend only
-const RUNTIME_OPTIONS: AgentRuntime[] = ['Claude', 'Codex']
+const RUNTIME_OPTIONS: AgentRuntime[] = ['Claude'] // Codex hidden in v1 (D4)
 const EXECUTION_TYPES: ExecutionType[] = ['Prompt', 'Agentic']
 const VISIBILITY_OPTIONS: BuildingBlockVisibility[] = ['Personal', 'Team', 'Organisation']
 
@@ -168,46 +168,6 @@ function ChipPicker({
           Add
         </button>
       </div>
-    </div>
-  )
-}
-
-function CollapsibleSection({ label, children }: { label: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          background: 'none',
-          border: 'none',
-          cursor: 'pointer',
-          padding: '2px 0',
-          marginBottom: open ? 10 : 0,
-        }}
-      >
-        <span style={{ ...secHdr, marginBottom: 0 }}>{label}</span>
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 14 14"
-          fill="none"
-          style={{
-            transform: open ? 'rotate(180deg)' : 'none',
-            transition: 'transform 0.18s',
-            color: 'var(--axon-t3)',
-            flexShrink: 0,
-          }}
-        >
-          <path d="M2.5 4.5L7 9.5L11.5 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      {open && children}
     </div>
   )
 }

@@ -3,209 +3,128 @@
 ## What this is
 
 Electron desktop app that lets developers run AI-powered delivery pipelines locally.
-- Pipeline execution runs in the **Electron main process** (Node.js), not a server
-- Claude API is called directly from the main process
-- Git operations run locally via `simple-git`
-- Results are logged to the AXON Backend API (separate repo: `axon-api`)
-- The React UI lives in `src/` — there is no dependency on the separate `axon-ui` folder
+- **Local-first (v1 / Session 1):** there is no backend. Blocks, pipelines and deliveries are persisted on this machine; the app runs fully offline (except agent calls to Anthropic and git operations).
+- Pipeline execution runs in the **Electron main process** (Node.js) as a testable engine; Claude is called directly from main.
+- Git operations run locally via `simple-git`.
+- The React UI lives in `src/`; shared schemas/types live in `shared/` (imported as `@shared` in the renderer, relatively from `electron/`).
+- Session docs: `docs/v1-review.md`, `docs/v1-decisions.md` (locked decisions D1–D16), `docs/session-v1-s*.md`, progress log `docs/v1-progress.md`.
 
 ## How to run
 
-Two terminals required:
-
 ```bash
-# Terminal 1 — React renderer
-npx vite
-
-# Terminal 2 — after Vite says "ready"
-npx tsc -p tsconfig.electron.json && npx electron .
+npx vite                                            # Terminal 1 — React renderer (5173)
+npx tsc -p tsconfig.electron.json && npx electron . # Terminal 2 — after Vite says "ready"
+npm run typecheck && npm test && npm run build      # must all pass before finishing a session
 ```
 
-Always recompile (`tsc -p tsconfig.electron.json`) after editing any file in `electron/`.
+Always recompile (`tsc -p tsconfig.electron.json`) after editing `electron/` or `shared/`. Main compiles to `dist-electron/electron/main.js` (`rootDir` is the repo root so `shared/` compiles alongside; `package.json` `main` points there).
 
 ## Architecture
 
 ```
-Renderer (React/Vite, port 5173)
-  └── window.axon.*          ← contextBridge API (preload.ts)
-        └── ipcRenderer.invoke(channel, ...args)
-  └── useAuthReady()          ← Auth guard hook (D6 fix)
-        └── Delays queries until token + backendUrl ready
+shared/                      zod schemas + inferred types (Block, Pipeline, Delivery, DeliveryStep,
+                             AgentOutput, DeliveryEvent, Settings), graph helpers, ids, AxonBridge types
+Renderer (React/Vite)
+  └── window.axon.*          ← contextBridge API (preload.ts), typed by shared/bridge.ts
+        └── services/*Service.ts → window.axon.{blocks,pipelines,deliveries,delivery} (IPC)
+        └── window.axon.events.onDeliveryEvent(cb)   ← the ONE live-update channel ('delivery:event')
 
-Main process (Node.js/Electron)
-  └── ipcMain.handle(channel, handler)
-        ├── auth.ts          ← safeStorage (OS keychain)
-        ├── settings.ts      ← electron-store (disk, non-sensitive)
-        ├── workspace.ts     ← fs/promises wrappers
-        ├── git.ts           ← Real simple-git operations (clone, branch, commit, push, PR)
-        ├── executor.ts      ← Real agent execution + block fetching (D6)
-        └── claude.ts        ← Real Claude API calls (D6)
+Main process
+  ├── store/     Store interface + FileStore ({userData}/store/{blocks,pipelines,deliveries}/{id}.json,
+  │              atomic tmp+fsync+rename writes, per-key mutex = single writer, seed.ts built-in blocks)
+  ├── engine/    createEngine({store, runner, workspace, bus, runsDir, ...}) — pure state machine
+  │              (start/resume/cancel/approveGate/rejectGate/previewResume/reconcileOnBoot/shutdown),
+  │              context.ts, runs.ts (DS1 files), bus.ts (typed event bus)
+  ├── runners/   claudePrompt (timeout/abort/bounded 429 retry), claudeAgentic (Agent SDK), axonNative
+  │              (human-gate), codex (stub, hidden in UI), output.ts (normalizeAgentOutput)
+  ├── workspace/ gitWorkspace.ts — real WorkspacePort (clone, delivery branch, commit/push/PR tail)
+  └── ipc/       thin handlers: data.ts (store CRUD), delivery.ts (engine + event channel),
+                 secrets.ts (named secrets only), settings.ts, workspace.ts, claudeKeyStore.ts, system.ts, git.ts (library)
 ```
+
+`Store` is the port that a future `GitRepoStore` (S3) / `ApiStore` implement. `WorkspacePort` and `Runner` are injected so the engine is unit-tested with fakes (`electron/engine/__tests__/harness.ts`).
+
+## Key conventions
+
+- **Documents** all carry `id`, `schemaVersion`, `createdAt`, `updatedAt`. Delivery has `localSeq` (per-machine display counter only — never in refs/paths, D1). `pipelineSnapshot` is built locally at delivery creation (nodes, edges, `blockVersions`).
+- **Delivery status:** `Pending | Running | Paused | Completed | Failed | Cancelled | Interrupted`. `Interrupted` = was Running with no live run (crash/kill/quit); resumable. Resume allowed from `Paused | Cancelled | Interrupted`. Step status `AwaitingApproval` is shown as "Awaiting approval" (never "Needs Human").
+- **Steps** are keyed by `(nodeId, itemKey)`, `itemKey = null` until ForEach (S4); upsert *replaces* the record.
+- **Gates:** only Control-role blocks pause. `approveGate`/`rejectGate` are IPC handled in main: record `approvedBy` (`local-user` placeholder until S3 identity), timestamp, comment. Approve resumes; reject requires a comment and sets the delivery `Failed`.
+- **Cancel/shutdown:** a run has a `stopped` flag + AbortController; every loop write goes through `guarded()`, so an aborted runner returning `failed` can never overwrite Cancelled/Interrupted. `before-quit` calls `engine.shutdown()` (abort, persist Interrupted). Boot calls `engine.reconcileOnBoot()`.
+- **Git token** has one accessor: `getGitToken()` in `ipc/secrets.ts` (key `axon-git-token`). It is optional for clone/branch/push (falls back to local git credentials); PR creation (REST) needs it. The renderer can only `setGitToken/hasGitToken/clearGitToken` — never read it.
+- **Branch name:** `axon/{userSlug}/{ticket}-{shortId}` (D1; shortId = 6-char base32 of the delivery id). Default workspace dir: `{workspaceRoot}/{ticket}-{shortId}`; default `workspaceRoot` per D7 (`%LOCALAPPDATA%\AXON\work` on Windows).
+- **End-of-pipeline git tail** (commit → push → PR) still lives at the end of the engine's run loop via `WorkspacePort.finalize` (removed in S4). If it throws the delivery is `Failed` with the message — never reported Completed.
+- **Seeded Axon blocks** (currently only `human-gate`, id `axon-human-gate`) are `immutable`; `FileStore` refuses update/delete. The full seed bundle arrives in S3.
 
 ## Key files
 
 | File | Purpose |
 |------|---------|
-| `electron/main.ts` | BrowserWindow creation, CSP, single-instance lock, IPC registration |
-| `electron/preload.ts` | `contextBridge.exposeInMainWorld('axon', {...})` — defines the full `window.axon` API |
-| `electron/types.d.ts` | `AxonBridge` interface + `Window` augmentation for renderer type safety |
-| `electron/ipc/auth.ts` | Token store/get/clear via `safeStorage` + encrypted file in `userData` |
-| `electron/ipc/settings.ts` | `electron-store` schema: `backendUrl`, `workspaceRoot`, `defaultAutonomyLevel`, `confidenceThreshold`, `gitProvider`, `theme` |
-| `electron/ipc/workspace.ts` | `listDirs`, `exists`, `readFile`, `writeFile`, `createDir`, `listFilesRecursive` |
-| `electron/ipc/git.ts` | Real `simple-git` operations: clone/open, branch creation, commit, push, PR creation (GitHub + Azure DevOps) |
-
-`createDeliveryBranch()` names branches `axon/{osUsername}/{jobNumber}/{ticketId}`
-(e.g. `axon/kranthi/247/PROJ-2341`) — `{osUsername}` is `os.userInfo().username`,
-slugified (lowercased, non-alphanumeric → `-`) since git refs can't contain spaces/specials.
-`{jobNumber}` is the delivery's globally unique counter value (see `axon-api/CLAUDE.md`).
-No type prefix (`feat`/`fix`) — that needs a ticket-type lookup (e.g. via a TicketFetcher
-block) that runs *after* branch creation today, so it isn't known yet; deliberately not
-guessing one. The actual created branch name is persisted to `Delivery.Branch` via a
-`PATCH /status` call right after creation — don't rely on a client-side guess for display.
-
-**Git token is optional, not required**, for clone/branch-create/push (`cloneOrOpen`,
-`createDeliveryBranch`, `pushBranch`) — when one isn't configured in Settings, these fall
-back to plain git operations and trust whatever the local machine already has set up (SSH
-key, Windows/Git Credential Manager). `injectTokenIntoUrl()` is only used when a token *is*
-present. PR creation (`createGitHubPR`/`createAzureDevOpsPR`) is the one exception that
-still hard-requires the token — it's a direct REST API call, not a git operation, so local
-git credentials don't apply there. PR creation is also currently hardcoded into
-`runStepLoop`'s end-of-pipeline tail rather than being a real pipeline block — known gap,
-deferred (the seeded `pr-creator`/`ticket-fetcher` blocks have `AgentRuntime: Axon`, which
-`runAgentForBlock`'s dispatcher doesn't actually handle yet — same unbuilt-native-runtime gap
-as the Codex skeleton).
-
-| `electron/ipc/executor.ts` | Real execution: fetches blocks, builds context, calls runAgent, stores step results |
-| `electron/ipc/claude.ts` | Real Claude API: callClaude (POST to Anthropic), runAgent (orchestration + JSON parsing) |
-| `src/hooks/useAuthReady.ts` | Auth guard: checks if backendUrl + token exist before enabling queries |
-| `src/App.tsx` | App shell with setup flow and protected routes |
-| `tsconfig.electron.json` | CommonJS + Node types for main process |
-| `tsconfig.json` | ESNext + DOM for renderer |
-| `vite.config.ts` | Renderer on port 5173, output to `dist/renderer/` |
+| `electron/main.ts` | Window, CSP, single-instance lock, wiring of store/engine/handlers, `before-quit` shutdown, boot reconcile |
+| `electron/preload.ts` | `contextBridge.exposeInMainWorld('axon', {...})` |
+| `shared/bridge.ts` | `AxonBridge` type for `window.axon` (declared globally in `src/axon.d.ts`) |
+| `shared/schemas.ts` | All zod schemas + types; `DeliveryEvent` discriminated union (D2) |
+| `electron/engine/engine.ts` | The state machine (run loop, gates, cancel, resume, crash recovery) |
+| `electron/store/fileStore.ts` | Local persistence implementation of `Store` |
+| `electron/runners/*` | Prompt / Agentic / native runners behind one `Runner` function |
+| `electron/workspace/gitWorkspace.ts` | Real workspace + git side effects |
+| `electron/ipc/settings.ts` | `electron-store` settings: `workspaceRoot`, `gitProvider`, `theme`, `setupComplete`, `userEmail`, `userName`, `maxContextSnapshotSizeKb`, `gitTokenSuffix` (writes validated against an allow-list) |
+| `src/services/*Service.ts` | Renderer data layer — IPC wrappers that map stored docs to UI types |
+| `src/App.tsx` | App shell, setup gate, global `delivery:event` → react-query invalidation |
+| `tsconfig.electron.json` / `tsconfig.json` / `tsconfig.test.json` | Main (CJS) / renderer (ESNext) / test typecheck |
 | `electron-builder.config.js` | `appId: com.company.axon`, NSIS on Win, DMG on Mac |
 
 ## Types (D8 BuildingBlock Artifact Model)
 
+Canonical definitions are the zod schemas in `shared/schemas.ts` (`BlockSchema`, `PipelineSchema`, `DeliverySchema`, `DeliveryStepSchema`, `AgentOutputSchema`, `DeliveryEventSchema`). `src/types/index.ts` holds the UI-shaped view models (e.g. `BuildingBlock` lists `cachedFiles` as paths; the stored `Block` holds `{relativePath, content}`) and re-exports the shared enums.
+
 ```ts
-// src/types/index.ts
-export type SourceType = 'Axon' | 'Local' | 'Marketplace' | 'CDF'
-export type AgentRuntime = 'Axon' | 'Claude' | 'Codex'
-export type ArtifactFormat = 'Native' | 'Skill'
-export type BlockType = 'Decision' | 'Execution' | 'Knowledge' | 'Control' | 'IO' | 'Utility'
+// Block essentials (shared/schemas.ts)
+role: 'Decision' | 'Execution' | 'Knowledge' | 'Control' | 'IO' | 'Utility'
+sourceType: 'Axon' | 'Local' | 'Marketplace' | 'CDF'   // Axon = seeded, immutable
+agentRuntime: 'Axon' | 'Claude' | 'Codex'                // Codex hidden in UI (D4)
+artifactFormat: 'Native' | 'Skill'
+executionType?: 'Prompt' | 'Agentic'
+version: number                                          // bumped on every update
+cachedFiles?: { relativePath: string; content: string }[]; entryPointPath?: string
+contextRequirements?: string[]; outputSchema?: string[]; allowedTools?: string[]
 
-export interface BuildingBlock {
-  id: string
-  name: string
-  role: BlockType                       // renamed from 'type'
-  description: string
-  version: string
-  sourceType: SourceType                // Axon (system), Local, Marketplace, CDF
-  agentRuntime: AgentRuntime            // Claude, Codex, Axon (fixed for Axon-sourced blocks)
-  artifactFormat: ArtifactFormat        // Native, Skill
-  artifactName?: string                 // user-facing name of attached artifact
-  cachedFiles?: string[]                // relative paths of all files in artifact
-  entryPointPath?: string               // path to SKILL.md or entry point file
-  contextRequirements?: string[]        // selective context injection
-  outputSchema?: string[]               // branch condition fields
-  tags: string[]
-  verified?: boolean
-  usageCount?: number
-  createdAt: string
-  updatedAt: string
-  createdByName?: string
-  usedInPipelineIds?: string[]
-  syncStatus?: SyncStatus
-  // Legacy fields for backward compatibility (being phased out)
-  type?: BlockType
-  adapterType?: string
-  executorType?: string
-}
-
-// electron/ipc/claude.ts
-interface DeliveryContext {
-  ticketId: string
-  ticketTitle?: string
-  previousStepsResults: Record<string, unknown>
-  currentInputs: Record<string, unknown>
-}
-
-interface StepInput {
-  blockId: string
-  blockName: string
-  cachedDefinition: string               // AGENT.md + prompt.md combined
-  deliveryContext: DeliveryContext
-  contextRequirements?: string[]         // selective context injection
-  claudeApiKey: string
-}
-
-interface AgentOutput {
-  status: 'success' | 'partial' | 'needs_human' | 'failed'
-  confidence: number
-  summary: string
-  result: Record<string, unknown>
-  humanGateReason?: string
-  errorMessage?: string
-  isTruncated?: boolean      // DS1 — set by executor.ts, not by runAgent()
-  outputFileRef?: string     // DS1 — relative path under {workspacePath}/.axon/outputs/
-}
+// Runner contract (electron/runners/types.ts)
+RunnerInput { block, nodeLabel, instructions /* entry-file content */, deliveryContext,
+              workspacePath, effectiveTools, timeoutSeconds, signal }
+AgentOutput { status: 'success'|'partial'|'failed', confidence?, summary, result, errorMessage?,
+              toolsUsed?, toolsDenied?, timedOut?, isTruncated?, outputFileRef? }   // confidence is display-only (D5)
 ```
 
 ## DS1 — Large Output Storage (implemented)
 
-`executor.ts`'s `runStepLoop` captures two things per step before POSTing to the backend:
+The engine captures two things per step:
 
-- **`contextSnapshot`** — the actual resolved values for the block's `contextRequirements`
-  (built via `buildContextSnapshot()`, mirroring `claude.ts`'s own field-selection logic) —
-  i.e. exactly what the block saw as input, not just which fields it declared needing.
-- **`outputResult`** — `AgentOutput.result` as returned by the agent.
+- **`contextSnapshot`** — the full resolved context pool the block saw (only when the delivery has `storeFullContext`).
+- **`output.result`** — `AgentOutput.result` as returned by the agent.
 
-Both pass through `checkAndStoreIfLarge(workspacePath, subfolder, nodeId, data)`:
-- If the serialized size is **under 50KB**, sent inline as-is.
-- If **50KB or over**, the full JSON is written to `{workspacePath}/.axon/{inputs|outputs}/{nodeId}-{timestamp}.json`,
-  and the backend instead receives a small marker (`{ truncated: true, sizeBytes, note }`)
-  plus the relative file path (`contextFileRef` / `output.outputFileRef`).
-
-The full (untruncated) `output.result` is still what's stored in `ctx.stepResults` for
-downstream steps' prompts — truncation only affects what's persisted to MongoDB, never the
-in-memory pipeline handoff between steps in the same run.
-
-Backend (`axon-api`) only stores/returns whatever it's sent — `POST /api/deliveries/{id}/steps`
-rejects payloads over 500KB (`Request.ContentLength`) with a 413 as a safety net, but does no
-truncation logic itself; that's entirely Desktop's responsibility, per DS1's local-first design.
+Both pass through `storeIfLarge()` (`electron/engine/runs.ts`):
+- **Under the threshold** (`maxContextSnapshotSizeKb`, default 50KB) they are stored inline in the delivery document.
+- **At/over it**, the full JSON is written to `{userData}/runs/{deliveryId}/{inputs|outputs}/{nodeId}-{ts}.json` (never inside the repo worktree) and the document keeps a marker (`{ truncated: true, sizeBytes, note }`) plus `contextFileRef` / `output.outputFileRef` (relative to the delivery's runs dir). A failed write fails the step.
+- **Resume** reloads the full result from the file (`reconstructResults`), so downstream steps never see the marker. `deliveries:stepData` (IPC) returns full content for the UI, reading the file when needed.
+- In-memory handoff between steps in one run always uses the full, untruncated result.
 
 ## window.axon API surface
 
 ```ts
-window.axon.auth.storeToken(token)
-window.axon.auth.getToken()
-window.axon.auth.clearToken()
-window.axon.auth.storeSecure(key, value)
-window.axon.auth.getSecure(key)
-window.axon.auth.clearSecure(key)
-
-window.axon.settings.get(key)
-window.axon.settings.set(key, value)
-window.axon.settings.getAll()
-
-window.axon.workspace.listDirs(path)
-window.axon.workspace.exists(path)
-window.axon.workspace.readFile(path)
-window.axon.workspace.writeFile(path, content)
-window.axon.workspace.createDir(path)
-window.axon.workspace.listFilesRecursive(path, maxDepth?)   // Used by artifact popup
-
-window.axon.git.clone(repoUrl, targetPath, token)       // stub (D7)
-window.axon.git.status(workspacePath)                   // stub (D7)
-window.axon.git.createBranch(workspacePath, branchName) // stub (D7)
-window.axon.git.addAndCommit(workspacePath, message)    // stub (D7)
-window.axon.git.push(workspacePath, branch, token)      // stub (D7)
-
-window.axon.executor.start(deliveryId)                  // Real (D6)
-window.axon.executor.resume(deliveryId)                 // Real (D6)
-window.axon.executor.cancel(deliveryId)                 // Real (D6)
-window.axon.executor.onProgress(handler)                // Real (D6)
-
-window.axon.claude.call(prompt, apiKey)                 // Internal only
+window.axon.blocks.{list,get,create,update,delete}
+window.axon.pipelines.{list,get,create,update,delete}
+window.axon.deliveries.{list,get,create,stepData(deliveryId,nodeId,'context'|'output')}
+window.axon.delivery.{start,resume,cancel,previewResume,approveGate(id,comment?),rejectGate(id,comment)}
+window.axon.events.onDeliveryEvent(cb) // returns unsubscribe; payload is the typed DeliveryEvent union
+window.axon.secrets.{setGitToken,hasGitToken,clearGitToken}
+window.axon.settings.{get,set,getAll}
+window.axon.workspace.{listDirs,exists,readFile,writeFile,createDir,listFilesRecursive,clear}
+window.axon.claudeKey.{getStatus,set}   // in-memory Claude key (D3: Console API key only)
+window.axon.dialog.{openDirectory,openFile}
+window.axon.shell.{openExternal,openPath,openInVSCode}
+window.axon.system.{getInfo,checkForUpdates}
+window.axon.window.setTitle(title)
 ```
 
 ## Constraints — do not change these
@@ -227,30 +146,6 @@ Examples: `auth:storeToken`, `workspace:readFile`, `git:clone`
 
 - D9: Marketplace/CDF browse UI, version management, edit/delete for blocks
 
-## What is built (D6)
-
-**Claude API Integration** — Real agent execution end-to-end:
-- `electron/ipc/claude.ts`:
-  - `callClaude(apiKey, systemPrompt, userMessage)` — POST to `https://api.anthropic.com/v1/messages` with model `claude-sonnet-4-5`, max_tokens 4096
-  - `runAgent(input: StepInput)` — Orchestrates: build system prompt from `block.cachedDefinition`, append output format instructions, build user message from selective context (filtered by `contextRequirements`), call Claude, parse + validate JSON, handle errors
-  - Error handling: invalid API key → clear error; rate limit (429) → retry after 60s; network/parse errors → logged + graceful failures
-  - Token tracking: logs input/output token usage to console
-
-- `electron/ipc/executor.ts`:
-  - `fetchBlocks(blockIds)` — Fetches all BuildingBlock definitions at delivery start
-  - ExecutionContext now includes `blocks: Map<blockId, BuildingBlock>` and `stepResults` accumulator
-  - Each step receives richer context: ticketId, ticketTitle, previousStepsResults (filtered by contextRequirements)
-  - After successful steps, results stored in stepResults for downstream steps to access
-
-- `src/hooks/useAuthReady.ts`:
-  - Auth guard hook that checks if backendUrl + token exist
-  - Used to delay queries until auth complete (fixes 401 race condition on dashboard load)
-  - Applied to: Dashboard, Deliveries, Pipelines, NewDeliveryModal
-
-- UI displays real Claude output via the Delivery Live View pipeline graph (see below) —
-  `StepList.tsx`/`StepOutputViewer.tsx` (the original D6/D8 linear step list) were removed
-  once the graph view replaced them entirely.
-
 ## Delivery Live View — Pipeline Graph
 
 `DeliveryLiveView.tsx` renders `delivery.pipelineSnapshot.nodes/edges` as a read-only
@@ -262,11 +157,11 @@ component. `nodesDraggable`/`nodesConnectable` are `false`.
   position, ...}` — no role/runtime. The view fetches all blocks once via `getBlocks()`
   (same as Pipeline Creator) and resolves `node.blockId → block.role/agentRuntime`.
 - **Status overlay**: `BaseNode.tsx` gained one new optional prop, `data.executionStatus?:
-  'Pending' | 'Running' | 'Success' | 'Failed' | 'NeedsHuman'` — renders a colored ring +
+  'Pending' | 'Running' | 'Success' | 'Failed' | 'AwaitingApproval'` — renders a colored ring +
   badge on the existing node shape. Undefined in Pipeline Creator's own usage (zero visual
   change there); driven by matching `delivery.steps[]` (by `nodeId`) in the Live View.
-- **Live updates**: driven entirely by the existing `executor.onProgress` IPC channel
-  (no SignalR — see DS1 section above for why SignalR isn't the live-update path here).
+- **Live updates**: driven entirely by the single typed `delivery:event` channel
+  (`window.axon.events.onDeliveryEvent`); SignalR is gone. `status_changed` events drive the displayed status.
 - **Node click → detail panel**: replaces the right-side Live Signals/Job Details panel
   while a node is selected (toggled via `display: none/block`, not unmount, to preserve
   the signals feed underneath). Shows status/timing, `contextSnapshot` (Input) and
@@ -276,7 +171,7 @@ component. `nodesDraggable`/`nodesConnectable` are `false`.
 - **Truncated content** (`isContextTruncated`/`isTruncated` — see DS1): shows a "view full
   content in workspace" button instead of the inline list, calling
   `window.axon.workspace.readFile()` on `contextFileRef`/`outputFileRef` and displaying the
-  result in a modal. No new backend endpoint — reuses the existing IPC file-read.
+  result in a modal. Uses `deliveries.stepData` (main reads the DS1 file from `{userData}/runs/`).
 
 ## Create Block Flow (D8 — Artifact Model)
 
@@ -325,60 +220,19 @@ component. `nodesDraggable`/`nodesConnectable` are `false`.
 - Create Block disabled until: Name filled, Role selected, Runtime selected (or fixed to Axon), Source Type selected, and (if Local) artifact attached
 - If Source Type = Marketplace or CDF: "Coming soon" placeholder, Create Block disabled
 
-## Delivery Execution Flow (D6)
+## Delivery Execution Flow
 
-1. User clicks "Start Delivery" on dashboard (after auth + setup complete)
-2. `executor.start(deliveryId)` invoked from renderer
-3. Main process:
-   - Fetches delivery details from backend API
-   - Fetches all pipeline blocks via `GET /api/blocks/{id}` (once per delivery)
-   - Clones/opens repo via git (D7 stub for now)
-   - Starts async runStepLoop
-4. For each step:
-   - Sends `execution:progress` with type `step_started`
-   - Fetches block definition from cached blocks Map
-   - Builds DeliveryContext: ticketId, title, previousStepsResults (accumulated from prior steps)
-   - Filters context by block.contextRequirements (selective injection)
-   - Calls `runAgent(StepInput)` → calls Claude → parses JSON
-   - Sends `execution:progress` with type `step_completed` + full AgentOutput
-   - Posts step result to backend API (`POST /api/deliveries/{id}/steps`)
-   - Stores step.result in context for next step
-5. On gate (needs_human or Control node):
-   - Sends `gate_reached` progress event
-   - Pauses delivery (stays in activeExecutions Map)
-   - Waits for `executor.resume()` or `executor.cancel()`
-6. After all steps or on error:
-   - Updates delivery status (Completed/Failed)
-   - Cleans up from activeExecutions Map
-
-## Auth Flow & Query Guard (D6 fix)
-
-**Problem (pre-D6):** Dashboard queries started immediately after setup, before token loaded → 401 errors
-
-**Solution:** `useAuthReady()` hook
-- Checks: `await Promise.all([settings.get('backendUrl'), auth.getSecure('axon-access-token')])`
-- Returns boolean flag
-- Applied to all data-fetching pages via `enabled` prop on useDeliveries/usePipelines
-- Queries automatically start once auth is ready (React Query reactivity)
-
-**Protected routes:**
-- Setup page shown until `setupComplete === true`
-- Dashboard waits for `useAuthReady()` before fetching
-- Auth token auto-refreshes on 401 via axios interceptor (apiClient.ts)
+1. User creates a delivery (`deliveries:create` → FileStore builds the snapshot) and the Live View calls `delivery:start`.
+2. `engine.start`: claim the delivery (double start blocked), validate the snapshot graph, `WorkspacePort.prepare` (clone/open + branch; failure leaves it `Pending`), mark `Running`, launch the run loop.
+3. Per node: emit `step_started`, upsert a Running step, build `DeliveryContext` (flat pool of prior results + inputs), call the `Runner`, store output (DS1), upsert the finalized step, emit `step_completed`.
+4. Control-role block → step `AwaitingApproval`, delivery `Paused`, `gate_reached`; the run unwinds (nothing is kept in memory). `approveGate` / `resume` rebuild context from the store and continue at the first node without a Completed step.
+5. After the last node: git tail (`finalize`) if a branch exists, then `Completed` (+ `prUrl`). Any failure → `Failed` + `failed` event.
 
 ## Verify it works
 
-Open DevTools Console in the Electron window and run:
-```js
-window.axon
-// → object with auth, settings, workspace, git, executor, claude
-
-// Start a delivery to watch Claude API calls
-const result = await window.axon.executor.start('delivery-id')
-console.log(result) // { success: true }
-
-// Listen to progress events
-window.axon.executor.onProgress((event, data) => {
-  console.log(data.type, data.output?.summary, data.output?.confidence)
-})
+```bash
+npm run typecheck && npm test && npm run build
+grep -rn "/api/\|signalr\|apiClient" src electron   # must print nothing
 ```
+
+In DevTools: `window.axon` → `blocks, pipelines, deliveries, delivery, events, secrets, settings, ...`. Subscribe with `window.axon.events.onDeliveryEvent(console.log)`, create a pipeline with the built-in Human Gate block, create a delivery and `window.axon.delivery.start(id)`.

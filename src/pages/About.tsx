@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ExternalLink, Clock } from 'lucide-react'
+import { ExternalLink } from 'lucide-react'
 import axonIcon from '@/assets/axon-icon.png'
 import axonTitle from '@/assets/axon-title.png'
 
@@ -8,12 +8,6 @@ interface SystemInfo {
   nodeVersion: string
   platform: string
   appVersion: string
-}
-
-interface HealthStatus {
-  latency: number | null
-  isHealthy: boolean
-  error: string | null
 }
 
 interface UserInfo {
@@ -25,9 +19,7 @@ interface UserInfo {
 
 export default function About() {
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
-  const [healthStatus, setHealthStatus] = useState<HealthStatus | null>(null)
   const [userInfo, setUserInfo] = useState<UserInfo>({})
-  const [backendUrl, setBackendUrl] = useState<string | null>(null)
   const [updateStatus, setUpdateStatus] = useState<string>('Checking...')
   const [loading, setLoading] = useState(true)
 
@@ -50,10 +42,6 @@ export default function About() {
         const info = await window.axon.system.getInfo()
         setSystemInfo(info)
 
-        // Get backend URL
-        const url = await window.axon.settings.get('backendUrl')
-        setBackendUrl(url)
-
         // Get user info from settings
         const [name, email, team, role] = await Promise.all([
           window.axon.settings.get('userName'),
@@ -61,13 +49,8 @@ export default function About() {
           window.axon.settings.get('team'),
           window.axon.settings.get('userRole'),
         ])
-        setUserInfo({ name: name || undefined, email: email || undefined, team: team || undefined, role: role || undefined })
-
-        // Check health status
-        if (url) {
-          const status = await window.axon.system.getLatency(url)
-          setHealthStatus(status)
-        }
+        const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined)
+        setUserInfo({ name: str(name), email: str(email), team: str(team), role: str(role) })
 
         // Check for updates
         const updates = await window.axon.system.checkForUpdates()
@@ -81,18 +64,6 @@ export default function About() {
 
     loadData()
   }, [])
-
-  const getHealthColor = () => {
-    if (!healthStatus) return 'var(--axon-t4)'
-    if (healthStatus.isHealthy) return 'var(--axon-green)'
-    return 'var(--axon-red)'
-  }
-
-  const getHealthLabel = () => {
-    if (!healthStatus) return 'Unknown'
-    if (healthStatus.isHealthy) return 'Connected'
-    return 'Disconnected'
-  }
 
   if (loading) {
     return (
@@ -118,7 +89,7 @@ export default function About() {
           </p>
         </div>
 
-        {/* Connection Status */}
+        {/* Mode */}
         <div style={{
           background: 'var(--axon-bg2)',
           border: '1px solid var(--axon-border)',
@@ -127,32 +98,12 @@ export default function About() {
           marginBottom: 16,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <div
-              style={{
-                width: 12,
-                height: 12,
-                borderRadius: '50%',
-                background: getHealthColor(),
-              }}
-            />
-            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--axon-t1)' }}>
-              {getHealthLabel()}
-            </span>
+            <div style={{ width: 12, height: 12, borderRadius: '50%', background: 'var(--axon-green)' }} />
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--axon-t1)' }}>Local mode</span>
           </div>
-          <div style={{ fontSize: 12, color: 'var(--axon-t3)', marginBottom: 8 }}>
-            Backend: <code style={{ fontSize: 11, color: 'var(--axon-t2)' }}>{backendUrl || 'Not configured'}</code>
+          <div style={{ fontSize: 12, color: 'var(--axon-t3)' }}>
+            Blocks, pipelines and deliveries are stored on this machine. No server connection is required.
           </div>
-          {healthStatus && healthStatus.latency !== null && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--axon-t3)' }}>
-              <Clock size={14} />
-              {healthStatus.latency}ms latency
-            </div>
-          )}
-          {healthStatus && healthStatus.error && (
-            <div style={{ fontSize: 12, color: 'var(--axon-red)', marginTop: 8 }}>
-              {healthStatus.error}
-            </div>
-          )}
         </div>
 
         {/* Current User Card */}

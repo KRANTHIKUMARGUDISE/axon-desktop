@@ -1,5 +1,5 @@
-import client from './apiClient'
-import type { Pipeline, ValidationResult } from '../types'
+import type { Pipeline as StoredPipeline } from '@shared'
+import type { Pipeline } from '../types'
 
 export interface PipelineFilter {
   search?: string
@@ -13,20 +13,30 @@ export interface CreatePipelineRequest {
   edges: unknown[]
 }
 
-export const getPipelines = (filter?: PipelineFilter): Promise<Pipeline[]> =>
-  client.get<Pipeline[]>('/api/pipelines', { params: filter }).then((r) => r.data)
+function toPipeline(p: StoredPipeline): Pipeline {
+  return { ...(p as unknown as Pipeline), nodeCount: p.nodes.length }
+}
 
-export const getPipeline = (id: string): Promise<Pipeline> =>
-  client.get<Pipeline>(`/api/pipelines/${id}`).then((r) => r.data)
+export const getPipelines = async (filter?: PipelineFilter): Promise<Pipeline[]> => {
+  let all = (await window.axon.pipelines.list()) as StoredPipeline[]
+  if (filter?.search) {
+    const q = filter.search.toLowerCase()
+    all = all.filter((p) => p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q))
+  }
+  if (filter?.isActive !== undefined) all = all.filter((p) => (p.isActive ?? true) === filter.isActive)
+  return all.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).map(toPipeline)
+}
 
-export const createPipeline = (req: CreatePipelineRequest): Promise<Pipeline> =>
-  client.post<Pipeline>('/api/pipelines', req).then((r) => r.data)
+export const getPipeline = async (id: string): Promise<Pipeline> => {
+  const p = (await window.axon.pipelines.get(id)) as StoredPipeline | null
+  if (!p) throw new Error('Pipeline not found')
+  return toPipeline(p)
+}
 
-export const updatePipeline = (id: string, req: Partial<CreatePipelineRequest>): Promise<Pipeline> =>
-  client.put<Pipeline>(`/api/pipelines/${id}`, req).then((r) => r.data)
+export const createPipeline = async (req: CreatePipelineRequest): Promise<Pipeline> =>
+  toPipeline((await window.axon.pipelines.create(req)) as StoredPipeline)
 
-export const deletePipeline = (id: string): Promise<void> =>
-  client.delete(`/api/pipelines/${id}`).then(() => undefined)
+export const updatePipeline = async (id: string, req: Partial<CreatePipelineRequest>): Promise<Pipeline> =>
+  toPipeline((await window.axon.pipelines.update(id, req)) as StoredPipeline)
 
-export const validatePipeline = (req: CreatePipelineRequest): Promise<ValidationResult> =>
-  client.post<ValidationResult>(`/api/pipelines/validate`, req).then((r) => r.data)
+export const deletePipeline = (id: string): Promise<void> => window.axon.pipelines.delete(id)

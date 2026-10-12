@@ -2,7 +2,7 @@ import { ipcMain } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
-import { consumeSecureFile } from './auth'
+import { consumeSecureFile } from './secrets'
 
 // Claude API key is resolved fresh on every launch (auto-detect, then manual
 // override) and lives only in this module's memory for the lifetime of the

@@ -3,11 +3,10 @@ import {
   getDeliveries,
   getDelivery,
   createDelivery,
-  updateDelivery,
   approveGate,
   rejectGate,
 } from '../services/deliveriesService'
-import type { DeliveryFilter, CreateDeliveryRequest, UpdateDeliveryRequest } from '../services/deliveriesService'
+import type { DeliveryFilter, CreateDeliveryRequest } from '../services/deliveriesService'
 
 export function useDeliveries(params?: DeliveryFilter, enabled = true) {
   const { data, isLoading, isError, error } = useQuery({
@@ -44,22 +43,13 @@ export function useCreateDelivery() {
   })
 }
 
-export function useUpdateDelivery(deliveryId: string) {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (data: UpdateDeliveryRequest) => updateDelivery(deliveryId, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['delivery', deliveryId] })
-    },
-  })
-}
-
 export function useApproveGate(deliveryId: string) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (comment?: string) => approveGate(deliveryId, comment ? { reason: comment } : undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['delivery', deliveryId] })
+      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
     },
   })
 }

@@ -1,15 +1,15 @@
-export type DeliveryStatus = 'Pending' | 'Running' | 'Paused' | 'Completed' | 'Failed' | 'Cancelled'
-export type StepStatus = 'Pending' | 'Running' | 'Completed' | 'Failed' | 'Skipped' | 'AwaitingApproval'
-export type WorkspaceType = 'Default' | 'Browse'
-export type NodeType = 'Decision' | 'Execution' | 'Knowledge' | 'Control' | 'IO' | 'Utility'
-export type BlockType = 'Decision' | 'Execution' | 'Knowledge' | 'Control' | 'IO' | 'Utility'
-export type SourceType = 'Axon' | 'Local' | 'Marketplace' | 'CDF'
-export type AgentRuntime = 'Axon' | 'Claude' | 'Codex'
-export type ArtifactFormat = 'Native' | 'Skill'
-export type ExecutionType = 'Prompt' | 'Agentic'
-export type BuildingBlockVisibility = 'Personal' | 'Team' | 'Organisation'
-export const AGENTIC_TOOL_OPTIONS = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'] as const
-export type AgenticTool = (typeof AGENTIC_TOOL_OPTIONS)[number]
+import type { BlockRole, Visibility, DeliveryStatus, StepStatus, WorkspaceType, SourceType, AgentRuntime, ArtifactFormat, ExecutionType } from '@shared'
+
+export type {
+  DeliveryStatus, StepStatus, WorkspaceType, SourceType, AgentRuntime, ArtifactFormat, ExecutionType,
+  DeliveryEvent, ResumePreview, ActionResult,
+} from '@shared'
+export { AGENTIC_TOOL_OPTIONS } from '@shared'
+export type { AgenticTool } from '@shared'
+
+export type NodeType = BlockRole
+export type BlockType = BlockRole
+export type BuildingBlockVisibility = Visibility
 
 export interface BranchCondition {
   expression: string
@@ -35,7 +35,6 @@ export interface PipelineNode {
   position: { x: number; y: number }
   config?: Record<string, unknown>
   timeoutSeconds?: number
-  confidenceThreshold?: number
   pinnedVersion?: string | null
 }
 
@@ -109,7 +108,7 @@ export interface Delivery {
   title: string
   pipelineId: string
   pipelineName: string
-  pipelineSnapshot?: { name: string; nodes?: Array<{ id: string; label: string; blockId: string }> }
+  pipelineSnapshot?: { name: string; nodes?: PipelineNode[]; edges?: PipelineEdge[] }
   status: DeliveryStatus
   currentNodeId?: string
   repoUrl: string
@@ -128,7 +127,8 @@ export interface Delivery {
   inputs?: Record<string, unknown>
   retriedFromDeliveryId?: string | null
   attemptNumber?: number
-  jobNumber?: number
+  errorMessage?: string
+  localSeq?: number
 }
 
 export interface DeliverySummary {
@@ -144,7 +144,7 @@ export interface DeliverySummary {
   createdByName?: string
   ownerTeam?: string
   duration?: string
-  jobNumber?: number
+  localSeq?: number
 }
 
 export interface PagedResponse<T> {
@@ -161,7 +161,6 @@ export interface BlockPort {
   description?: string
 }
 
-export type AdapterType = 'claude-skill' | 'mock' | 'native' | 'legacy-json'
 export type SyncStatus = 'Synced' | 'Stale' | 'Unavailable' | 'Missing' | 'Local' | 'NeverSynced'
 
 export interface BuildingBlock {
@@ -169,7 +168,7 @@ export interface BuildingBlock {
   name: string
   role: BlockType
   description: string
-  version: string
+  version: number
   inputs: BlockPort[]
   outputs: BlockPort[]
   tags: string[]
@@ -199,10 +198,6 @@ export interface BuildingBlock {
   defaultTimeoutSeconds?: number
   executionAgreementAcceptedAt?: string
   executionAgreementAcceptedBy?: string
-  // Legacy fields for backward compatibility (to be removed)
-  type?: BlockType
-  adapterType?: AdapterType
-  executorType?: string
 }
 
 export interface AgentInput {
@@ -221,62 +216,5 @@ export interface ValidationResult {
   warnings: string[]
 }
 
-export interface CreateDeliveryRequest {
-  ticketId: string
-  title: string
-  pipelineId: string
-  repoUrl: string
-  workspaceType: WorkspaceType
-  branch?: string
-}
+export type { ClaudeKeyStatus } from '@shared'
 
-export interface UpdateDeliveryRequest {
-  repoUrl?: string
-  workspaceType?: WorkspaceType
-  workspacePath?: string
-}
-
-export interface CreatePipelineRequest {
-  name: string
-  description: string
-  nodes: Omit<PipelineNode, 'id'>[]
-  edges: Omit<PipelineEdge, 'id'>[]
-}
-
-export interface ExecutionProgress {
-  type:
-    | 'workspace_provisioning' | 'workspace_provisioned'
-    | 'git_preparing' | 'git_prepared'
-    | 'step_started' | 'step_completed' | 'step_failed' | 'gate_reached'
-    | 'completed' | 'failed' | 'cancelled'
-  deliveryId: string
-  nodeId: string
-  blockName?: string
-  output?: {
-    status: string
-    confidence: number
-    summary: string
-    result: Record<string, unknown>
-    toolsUsed?: string[]
-    toolsDenied?: string[]
-    timedOut?: boolean
-  }
-  message?: string
-  prUrl?: string
-}
-
-export interface ClaudeKeyStatus {
-  hasKey: boolean
-  masked: string | null
-  source: string | null
-  conflict: { claudeJson: string; configJson: string } | null
-}
-
-export interface CreateBlockRequest {
-  name: string
-  type: BlockType
-  description: string
-  inputs: BlockPort[]
-  outputs: BlockPort[]
-  tags: string[]
-}

@@ -12,7 +12,7 @@ module.exports = {
     'build/icon.png',
     'package.json'
   ],
-  extraMetadata: { main: 'dist-electron/main.js' },
+  extraMetadata: { main: 'dist-electron/electron/main.js' },
   // The Claude Agent SDK's platform packages (claude-agent-sdk-win32-x64, -darwin-arm64,
   // etc.) ship a native claude.exe/claude binary. Native executables can't be spawned from
   // inside an asar archive — only unpacked, on-disk files can be exec'd by the OS — so

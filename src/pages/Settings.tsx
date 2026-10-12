@@ -1,16 +1,8 @@
 import { useState, useEffect } from 'react'
-import { Button } from '../components/ui/button'
-import { Input } from '../components/ui/input'
-import { CheckCircle, XCircle, Loader2, Save, ExternalLink, Eye, EyeOff } from 'lucide-react'
+import { CheckCircle, Save, ExternalLink, Eye, EyeOff } from 'lucide-react'
 import type { ClaudeKeyStatus } from '../types'
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
-
-interface CurrentUser {
-  name?: string
-  email?: string
-  team?: string
-}
 
 export default function Settings() {
   // Set window title
@@ -19,12 +11,6 @@ export default function Settings() {
       window.axon.window.setTitle('AXON — Settings')
     }
   }, [])
-
-  // Connection
-  const [backendUrl, setBackendUrl] = useState('')
-  const [connStatus, setConnStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle')
-  const [connError, setConnError] = useState('')
-  const [currentUser, setCurrentUser] = useState<CurrentUser>({})
 
   // Claude — resolved in-memory only (detected from ~/.claude.json /
   // ~/.claude/config.json on launch, or manually overridden for this session).
@@ -40,7 +26,6 @@ export default function Settings() {
 
   // Git
   const [gitProvider, setGitProvider] = useState<'github' | 'azure'>('github')
-  const [gitToken, setGitToken] = useState('')
   const [gitTokenSuffix, setGitTokenSuffix] = useState('')
   const [gitSaved, setGitSaved] = useState<SaveStatus>('idle')
   const [gitTokenSet, setGitTokenSet] = useState(false)
@@ -51,71 +36,26 @@ export default function Settings() {
   // Preferences
   const [theme, setTheme] = useState<'dark' | 'light' | 'system'>('dark')
   const [themeSaved, setThemeSaved] = useState<SaveStatus>('idle')
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.75)
-  const [confidenceSaved, setConfidenceSaved] = useState<SaveStatus>('idle')
   const [maxContextSnapshotSizeKb, setMaxContextSnapshotSizeKb] = useState(50)
   const [maxContextSnapshotSaved, setMaxContextSnapshotSaved] = useState<SaveStatus>('idle')
 
   useEffect(() => {
     async function load() {
       const all = await window.axon.settings.getAll()
-      setBackendUrl((all.backendUrl as string) || '')
       setWorkspacePath((all.workspaceRoot as string) || '')
       setGitProvider(((all.gitProvider as string) || 'github') as 'github' | 'azure')
       setTheme(((all.theme as string) || 'dark') as 'dark' | 'light' | 'system')
-      setConfidenceThreshold((all.confidenceThreshold as number) || 0.75)
       setMaxContextSnapshotSizeKb((all.maxContextSnapshotSizeKb as number) || 50)
 
       const claudeStatus = await window.axon.claudeKey.getStatus()
       setClaudeKeyStatus(claudeStatus)
 
-      const gitToken = await window.axon.auth.getSecure('axon-git-token')
-      setGitTokenSet(!!gitToken)
+      setGitTokenSet(await window.axon.secrets.hasGitToken())
       const gitSuffix = await window.axon.settings.get('gitTokenSuffix')
       if (gitSuffix) setGitTokenSuffix(gitSuffix as string)
-
-      // Fetch current user info
-      await fetchCurrentUser(all.backendUrl as string)
     }
     load()
   }, [])
-
-  async function fetchCurrentUser(url: string) {
-    try {
-      const token = await window.axon.auth.getSecure('axon-access-token')
-      if (!token || !url) return
-
-      const res = await fetch(`${url}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (res.ok) {
-        const data = await res.json()
-        setCurrentUser(data)
-      }
-    } catch {
-      // Silently fail
-    }
-  }
-
-  async function testConnection() {
-    setConnStatus('loading')
-    setConnError('')
-    try {
-      const url = backendUrl.replace(/\/$/, '')
-      const res = await fetch(`${url}/api/health`)
-      if (res.ok) {
-        setConnStatus('ok')
-        await window.axon.settings.set('backendUrl', url)
-        await fetchCurrentUser(url)
-      } else {
-        setConnStatus('error')
-        setConnError(`Server responded with ${res.status}`)
-      }
-    } catch (e: unknown) {
-      setConnStatus('error')
-      setConnError(e instanceof Error ? e.message : 'Connection failed')
-    }
-  }
 
   async function saveClaudeKey() {
     setClaudeSaved('saving')
@@ -154,7 +94,7 @@ export default function Settings() {
     setGitSaved('saving')
     await window.axon.settings.set('gitProvider', gitProvider)
     if (newGitToken) {
-      await window.axon.auth.storeSecure('axon-git-token', newGitToken)
+      await window.axon.secrets.setGitToken(newGitToken)
       const suffix = newGitToken.slice(-4)
       await window.axon.settings.set('gitTokenSuffix', suffix)
       setGitTokenSuffix(suffix)
@@ -174,23 +114,11 @@ export default function Settings() {
   }
 
 
-  async function saveConfidence() {
-    setConfidenceSaved('saving')
-    await window.axon.settings.set('confidenceThreshold', confidenceThreshold)
-    setConfidenceSaved('saved')
-    setTimeout(() => setConfidenceSaved('idle'), 2000)
-  }
-
   async function saveMaxContextSnapshotSize() {
     setMaxContextSnapshotSaved('saving')
     await window.axon.settings.set('maxContextSnapshotSizeKb', maxContextSnapshotSizeKb)
     setMaxContextSnapshotSaved('saved')
     setTimeout(() => setMaxContextSnapshotSaved('idle'), 2000)
-  }
-
-  const maskToken = (token: string) => {
-    if (!token || token.length < 4) return '••••'
-    return '•'.repeat(Math.max(0, token.length - 4)) + token.slice(-4)
   }
 
   return (
@@ -203,75 +131,6 @@ export default function Settings() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-        {/* ===== CONNECTION ===== */}
-        <Section title="Connection">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-            {/* Backend URL */}
-            <div>
-              <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--axon-t2)', display: 'block', marginBottom: 8 }}>
-                Backend URL
-              </label>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input
-                  value={backendUrl}
-                  onChange={e => { setBackendUrl(e.target.value); setConnStatus('idle') }}
-                  placeholder="https://localhost:7027"
-                  style={{
-                    flex: 1, padding: '8px 12px', borderRadius: 6, border: '1px solid var(--axon-border)',
-                    background: 'var(--axon-bg2)', color: 'var(--axon-t1)', fontSize: 13, outline: 'none',
-                  }}
-                />
-                <button
-                  onClick={testConnection}
-                  disabled={connStatus === 'loading'}
-                  style={{
-                    padding: '8px 16px', borderRadius: 6, border: '1px solid var(--axon-border)',
-                    background: 'var(--axon-bg2)', color: 'var(--axon-t1)', fontSize: 13, fontWeight: 500,
-                    cursor: connStatus === 'loading' ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-                    opacity: connStatus === 'loading' ? 0.7 : 1,
-                  }}
-                >
-                  {connStatus === 'loading' && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />}
-                  Test & Save
-                </button>
-              </div>
-              {connStatus === 'ok' && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 12, color: '#22c55e' }}>
-                  <CheckCircle size={14} /> Connection successful
-                </div>
-              )}
-              {connStatus === 'error' && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 12, color: '#ef4444' }}>
-                  <XCircle size={14} /> {connError}
-                </div>
-              )}
-            </div>
-
-            {/* Current User Info */}
-            {(currentUser.email || currentUser.name) && (
-              <div style={{ padding: 12, borderRadius: 6, background: 'var(--axon-bg3)', border: '1px solid var(--axon-border)' }}>
-                <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--axon-t2)', marginBottom: 8 }}>Current User</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  {currentUser.name && (
-                    <div style={{ fontSize: 13, color: 'var(--axon-t1)' }}>
-                      <span style={{ fontWeight: 500 }}>Name:</span> {currentUser.name}
-                    </div>
-                  )}
-                  {currentUser.email && (
-                    <div style={{ fontSize: 13, color: 'var(--axon-t1)' }}>
-                      <span style={{ fontWeight: 500 }}>Email:</span> {currentUser.email}
-                    </div>
-                  )}
-                  {currentUser.team && (
-                    <div style={{ fontSize: 13, color: 'var(--axon-t1)' }}>
-                      <span style={{ fontWeight: 500 }}>Team:</span> {currentUser.team}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        </Section>
 
         {/* ===== CLAUDE ===== */}
         <Section title="Claude">
@@ -325,7 +184,7 @@ export default function Settings() {
             </div>
             <div style={{ padding: 12, borderRadius: 6, background: 'var(--axon-bg3)', border: '1px solid var(--axon-border)' }}>
               <div style={{ fontSize: 12, color: 'var(--axon-t3)' }}>
-                <span style={{ fontWeight: 500, color: 'var(--axon-t2)' }}>Model:</span> claude-sonnet-4-5
+                <span style={{ fontWeight: 500, color: 'var(--axon-t2)' }}>Prompt-mode model:</span> claude-haiku-4-5
               </div>
             </div>
           </div>
@@ -543,53 +402,6 @@ export default function Settings() {
             </div>
 
 
-            {/* Confidence Threshold */}
-            <div>
-              <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--axon-t2)', display: 'block', marginBottom: 8 }}>
-                Confidence Threshold
-              </label>
-              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                <input
-                  type="range"
-                  min={0.5}
-                  max={0.95}
-                  step={0.05}
-                  value={confidenceThreshold}
-                  onChange={e => { setConfidenceThreshold(parseFloat(e.target.value)); setConfidenceSaved('idle') }}
-                  style={{ flex: 1, cursor: 'pointer' }}
-                />
-                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)', minWidth: 50, textAlign: 'right' }}>
-                  {confidenceThreshold.toFixed(2)}
-                </span>
-              </div>
-              <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '8px 0 0 0' }}>
-                Minimum confidence for autonomous actions (0.50 - 0.95)
-              </p>
-              {confidenceSaved === 'saved' && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 12, color: '#22c55e' }}>
-                  <CheckCircle size={14} /> Saved
-                </div>
-              )}
-              {confidenceSaved === 'saving' && (
-                <button
-                  onClick={saveConfidence}
-                  disabled={true}
-                  style={{ marginTop: 8, padding: '8px 16px', borderRadius: 6, border: '1px solid var(--axon-border)', background: 'var(--axon-bg2)', opacity: 0.5 }}
-                />
-              )}
-              {confidenceSaved === 'idle' && (
-                <button
-                  onClick={saveConfidence}
-                  style={{
-                    marginTop: 8, padding: '8px 16px', borderRadius: 6, border: '1px solid var(--axon-border)',
-                    background: 'var(--axon-bg2)', color: 'var(--axon-t1)', fontSize: 13, fontWeight: 500,
-                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-                  }}
-                >
-                  <Save size={14} /> Save
-                </button>
-              )}
-            </div>
 
             {/* Max Context Snapshot Size */}
             <div>

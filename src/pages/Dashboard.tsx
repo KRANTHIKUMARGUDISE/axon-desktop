@@ -1,7 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { useDeliveries } from '@/hooks/useDeliveries'
 import { usePipelines } from '@/hooks/usePipelines'
-import { useAuthReady } from '@/hooks/useAuthReady'
 import NewDeliveryModal, { useNewDeliveryModal } from '@/components/delivery/NewDeliveryModal'
 import StatCards from '@/components/dashboard/StatCards'
 import ActiveDeliveries from '@/components/dashboard/ActiveDeliveries'
@@ -36,9 +35,8 @@ function SectionHeader({ title, action }: { title: string; action?: React.ReactN
 export default function Dashboard() {
   const navigate = useNavigate()
   const modal = useNewDeliveryModal()
-  const authReady = useAuthReady()
-  const { data: paged, isLoading, isError } = useDeliveries({ pageSize: 5 }, authReady)
-  const { data: pipelines = [] } = usePipelines(undefined, authReady)
+  const { data: paged, isLoading, isError } = useDeliveries({ pageSize: 5 })
+  const { data: pipelines = [] } = usePipelines(undefined)
 
   const deliveries = paged?.items ?? []
   const runningCount = deliveries.filter(d => d.status === 'Running').length

@@ -1,5 +1,5 @@
-import client from './apiClient'
-import type { Delivery, DeliverySummary, DeliveryStatus, PagedResponse, DeliveryStep, WorkspaceType } from '../types'
+import type { Delivery as StoredDelivery, DeliveryStep as StoredStep, CreateDeliveryInput } from '@shared'
+import type { Delivery, DeliverySummary, DeliveryStatus, PagedResponse, DeliveryStep, WorkspaceType, ActionResult } from '../types'
 
 export interface DeliveryFilter {
   status?: string
@@ -16,72 +16,19 @@ export interface CreateDeliveryRequest {
   repoUrl: string
   workspaceType: WorkspaceType
   storeFullContext?: boolean
-  branch?: string
   inputs?: Record<string, unknown>
   retriedFromDeliveryId?: string
-}
-
-export interface UpdateDeliveryRequest {
-  repoUrl?: string
-  workspaceType?: WorkspaceType
-  workspacePath?: string
 }
 
 export interface GateRequest {
   reason?: string
 }
 
-export const getDeliveries = (filter?: DeliveryFilter): Promise<PagedResponse<DeliverySummary>> =>
-  client.get('/api/deliveries', { params: filter }).then((r) => {
-    const d = r.data
-    if (Array.isArray(d)) {
-      return { items: d as DeliverySummary[], total: d.length, page: filter?.page ?? 1, pageSize: filter?.pageSize ?? d.length }
-    }
-    // Support { data, total } shapes alongside { items, total }
-    if (d && !d.items && d.data) {
-      return { items: d.data as DeliverySummary[], total: d.total ?? d.count ?? d.data.length, page: d.page ?? filter?.page ?? 1, pageSize: d.pageSize ?? filter?.pageSize ?? d.data.length }
-    }
-    return d as PagedResponse<DeliverySummary>
-  })
-
-// Backend's DeliveryStep has no `id`/`name` — only nodeId/blockId/blockName/output.
-// Normalize to the shape the rest of the UI (DeliveryLiveView's pipeline graph) expects.
-// NOTE: the main GET /api/deliveries/{id} response now omits contextSnapshot and
-// output.result (lazy-loaded only, via getStepContext/getStepOutput below) — both
-// fields stay typed as optional here and are fetched on demand, not from this payload.
-interface RawDeliveryStep {
-  nodeId: string
-  blockId?: string
-  blockName: string
-  status: DeliveryStep['status']
-  contextSnapshot?: Record<string, unknown>
-  isContextTruncated?: boolean
-  contextFileRef?: string
-  contextAvailability?: Record<string, 'available' | 'missing' | 'empty'>
-  outputAvailability?: Record<string, 'available' | 'missing' | 'empty'>
-  output?: {
-    summary?: string
-    confidence?: number
-    humanGateReason?: string
-    result?: Record<string, unknown>
-    errorMessage?: string
-    errorCode?: string
-    recoverable?: boolean
-    approvedBy?: string
-    approvedAt?: string
-    rejectedBy?: string
-    rejectedAt?: string
-    reviewComment?: string
-    isTruncated?: boolean
-    outputFileRef?: string
-  }
-  startedAt?: string
-  completedAt?: string
-}
-
-function normalizeStep(raw: RawDeliveryStep): DeliveryStep {
+function normalizeStep(raw: StoredStep): DeliveryStep {
+  const out = raw.output
   return {
     id: raw.nodeId,
+    nodeId: raw.nodeId,
     name: raw.blockName,
     nodeName: raw.blockName,
     status: raw.status,
@@ -92,57 +39,127 @@ function normalizeStep(raw: RawDeliveryStep): DeliveryStep {
     contextFileRef: raw.contextFileRef,
     contextAvailability: raw.contextAvailability,
     outputAvailability: raw.outputAvailability,
-    agentOutput: raw.output
+    agentOutput: out
       ? {
-          summary: raw.output.summary,
-          confidence: raw.output.confidence,
-          humanGateReason: raw.output.humanGateReason,
-          result: raw.output.result,
-          errorCode: raw.output.errorCode,
-          recoverable: raw.output.recoverable,
-          approvedBy: raw.output.approvedBy,
-          approvedAt: raw.output.approvedAt,
-          rejectedBy: raw.output.rejectedBy,
-          rejectedAt: raw.output.rejectedAt,
-          reviewComment: raw.output.reviewComment,
-          isTruncated: raw.output.isTruncated,
-          outputFileRef: raw.output.outputFileRef,
+          summary: out.summary,
+          confidence: out.confidence,
+          humanGateReason: out.humanGateReason,
+          result: out.result,
+          errorCode: out.errorCode,
+          recoverable: out.recoverable,
+          approvedBy: out.approvedBy,
+          approvedAt: out.approvedAt,
+          rejectedBy: out.rejectedBy,
+          rejectedAt: out.rejectedAt,
+          reviewComment: out.reviewComment,
+          toolsUsed: out.toolsUsed,
+          toolsDenied: out.toolsDenied,
+          timedOut: out.timedOut,
+          isTruncated: out.isTruncated,
+          outputFileRef: out.outputFileRef,
         }
       : undefined,
-    errorMessage: raw.output?.errorMessage,
+    errorMessage: out?.errorMessage,
   }
 }
 
-export const getStepContext = (deliveryId: string, stepId: string): Promise<{ truncated: true; fileRef?: string } | Record<string, unknown>> =>
-  client.get(`/api/deliveries/${deliveryId}/steps/${stepId}/context`).then((r) => r.data)
+function progressOf(d: StoredDelivery): number {
+  const total = d.pipelineSnapshot.nodes.length
+  if (total === 0) return 0
+  if (d.status === 'Completed') return 100
+  const done = d.steps.filter((s) => s.status === 'Completed').length
+  return Math.round((done / total) * 100)
+}
 
-export const getStepOutput = (deliveryId: string, stepId: string): Promise<{ truncated: true; fileRef?: string } | Record<string, unknown>> =>
-  client.get(`/api/deliveries/${deliveryId}/steps/${stepId}/output`).then((r) => r.data)
+function formatDuration(startedAt: string, completedAt?: string): string | undefined {
+  if (!completedAt) return undefined
+  const secs = Math.max(0, Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000))
+  const m = Math.floor(secs / 60)
+  return m > 0 ? `${m}m ${secs % 60}s` : `${secs}s`
+}
 
-export const getDelivery = (id: string): Promise<Delivery> =>
-  client.get<Delivery>(`/api/deliveries/${id}`).then((r) => ({
-    ...r.data,
-    steps: ((r.data.steps as unknown as RawDeliveryStep[]) ?? []).map(normalizeStep),
-  }))
+function toSummary(d: StoredDelivery): DeliverySummary {
+  return {
+    id: d.id,
+    ticketId: d.ticketId,
+    title: d.title,
+    pipelineId: d.pipelineId,
+    pipelineName: d.pipelineName,
+    status: d.status,
+    progress: progressOf(d),
+    startedAt: d.startedAt,
+    completedAt: d.completedAt,
+    createdByName: d.createdByName,
+    duration: formatDuration(d.startedAt, d.completedAt),
+    localSeq: d.localSeq,
+  }
+}
 
-export const createDelivery = (req: CreateDeliveryRequest): Promise<Delivery> =>
-  client.post<Delivery>('/api/deliveries', req).then((r) => r.data)
+function toDelivery(d: StoredDelivery): Delivery {
+  return {
+    ...toSummary(d),
+    pipelineSnapshot: {
+      name: d.pipelineSnapshot.name,
+      nodes: d.pipelineSnapshot.nodes as unknown as NonNullable<Delivery['pipelineSnapshot']>['nodes'],
+      edges: d.pipelineSnapshot.edges as unknown as NonNullable<Delivery['pipelineSnapshot']>['edges'],
+    },
+    currentNodeId: d.currentNodeId,
+    repoUrl: d.repoUrl,
+    workspaceType: d.workspaceType,
+    storeFullContext: d.storeFullContext,
+    workspacePath: d.workspacePath,
+    steps: d.steps.map(normalizeStep),
+    branch: d.branch ?? undefined,
+    prUrl: d.prUrl,
+    inputs: d.inputs,
+    retriedFromDeliveryId: d.retriedFromDeliveryId,
+    errorMessage: d.errorMessage,
+  }
+}
 
-export const updateDelivery = (id: string, req: UpdateDeliveryRequest): Promise<Delivery> =>
-  client.patch<Delivery>(`/api/deliveries/${id}`, req).then((r) => r.data)
+export const getDeliveries = async (filter?: DeliveryFilter): Promise<PagedResponse<DeliverySummary>> => {
+  let all = (await window.axon.deliveries.list()) as StoredDelivery[]
+  all = all.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
+  if (filter?.status) all = all.filter((d) => d.status === filter.status)
+  if (filter?.pipelineId) all = all.filter((d) => d.pipelineId === filter.pipelineId)
+  if (filter?.search) {
+    const q = filter.search.toLowerCase()
+    all = all.filter((d) => d.ticketId.toLowerCase().includes(q) || d.title.toLowerCase().includes(q))
+  }
+  const page = filter?.page ?? 1
+  const pageSize = filter?.pageSize ?? (all.length || 1)
+  const items = all.slice((page - 1) * pageSize, page * pageSize).map(toSummary)
+  return { items, total: all.length, page, pageSize }
+}
 
-export const updateStatus = (
-  id: string,
-  status: DeliveryStatus,
-  opts?: { nodeId?: string; workspacePath?: string },
-): Promise<void> =>
-  client.patch(`/api/deliveries/${id}/status`, { status, ...opts }).then(() => undefined)
+export const getDelivery = async (id: string): Promise<Delivery> => {
+  const d = (await window.axon.deliveries.get(id)) as StoredDelivery | null
+  if (!d) throw new Error('Delivery not found')
+  return toDelivery(d)
+}
 
-export const appendStep = (id: string, step: Partial<DeliveryStep>): Promise<void> =>
-  client.post(`/api/deliveries/${id}/steps`, step).then(() => undefined)
+export const createDelivery = async (req: CreateDeliveryRequest): Promise<Delivery> => {
+  const input: CreateDeliveryInput = { ...req }
+  return toDelivery((await window.axon.deliveries.create(input)) as StoredDelivery)
+}
 
-export const approveGate = (id: string, req?: GateRequest): Promise<void> =>
-  client.post(`/api/deliveries/${id}/gate/approve`, req ?? {}).then(() => undefined)
+// Full context / output for one step. The main process reads the DS1 file when the
+// delivery document only holds a truncated marker, so callers always get real content.
+export const getStepContext = (deliveryId: string, stepId: string): Promise<Record<string, unknown>> =>
+  window.axon.deliveries.stepData(deliveryId, stepId, 'context')
 
-export const rejectGate = (id: string, req?: GateRequest): Promise<void> =>
-  client.post(`/api/deliveries/${id}/gate/reject`, req ?? {}).then(() => undefined)
+export const getStepOutput = (deliveryId: string, stepId: string): Promise<Record<string, unknown>> =>
+  window.axon.deliveries.stepData(deliveryId, stepId, 'output')
+
+function assertOk(res: ActionResult, fallback: string): void {
+  if (!res.success) throw new Error(res.error ?? fallback)
+}
+
+// Approving also resumes the delivery (handled in the main process).
+export const approveGate = async (id: string, req?: GateRequest): Promise<void> =>
+  assertOk(await window.axon.delivery.approveGate(id, req?.reason), 'Failed to approve gate')
+
+export const rejectGate = async (id: string, req?: GateRequest): Promise<void> =>
+  assertOk(await window.axon.delivery.rejectGate(id, req?.reason ?? ''), 'Failed to reject gate')
+
+export type { DeliveryStatus }

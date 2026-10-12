@@ -39,13 +39,6 @@ const purpleChip: React.CSSProperties = {
   border: '1px solid rgba(111,95,232,0.2)',
 }
 
-function hoursAgo(iso?: string): string {
-  if (!iso) return '?'
-  const diff = Date.now() - new Date(iso).getTime()
-  const h = Math.floor(diff / 3600000)
-  return h < 1 ? '<1' : String(h)
-}
-
 function formatCachedAt(iso?: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
@@ -95,7 +88,7 @@ export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
     )
   if (!block) return null
 
-  const blockType = block.role || block.type || 'Execution'
+  const blockType = block.role || 'Execution'
   const color = TYPE_COLORS[blockType]
   const sourceType = block.sourceType || 'Local'
   const runtime = block.agentRuntime || 'Claude'
@@ -103,7 +96,6 @@ export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
   const outputSchema = block.outputSchema ?? []
   const inputs = block.inputs ?? []
   const outputs = block.outputs ?? []
-  const tags = block.tags ?? []
   const cachedFiles = block.cachedFiles ?? []
   const isAxonBlock = sourceType === 'Axon'
 
@@ -267,7 +259,7 @@ export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
                       }}
                     >
                       {cachedFiles.map((file) => {
-                        const filePath = typeof file === 'string' ? file : file.relativePath || file
+                        const filePath = file
                         return (
                           <div key={filePath} style={{ fontFamily: 'monospace', marginBottom: 2 }}>
                             {filePath === block.entryPointPath && '✓ '}

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { toast } from 'sonner'
 import { getBlockTypeIcon } from '../../utils/blockTypeIcons'
-import type { Pipeline, NodeType, BlockType } from '../../types'
+import type { Pipeline, PipelineNode, BlockType } from '../../types'
 
 interface PipelineCardProps {
   pipeline: Pipeline
@@ -13,20 +13,11 @@ interface PipelineCardProps {
   onPromote?: (pipeline: Pipeline) => void
 }
 
-const NODE_COLORS: Record<NodeType, string> = {
-  IO: '#22d3b8',
-  Decision: '#f472b6',
-  Knowledge: '#2dd4bf',
-  Execution: '#60a5fa',
-  Control: '#fbbf24',
-  Utility: '#c084fc',
-}
-
 // `pipeline.nodes` is array-insertion order, not execution order (nodes can be added to
 // the canvas in any sequence) — walk it via `edges` so the icon row actually reflects the
 // real start-to-finish flow. Linear-only pipelines (current MVP — see executor.ts's
 // identical findStartNode/nextNode pattern), so each node has at most one outgoing edge.
-function orderNodesByFlow(nodes: Pipeline['nodes'], edges: Pipeline['edges']): Pipeline['nodes'] {
+function orderNodesByFlow(nodes: Pipeline['nodes'], edges: Pipeline['edges']): PipelineNode[] {
   const safeNodes = nodes ?? []
   const safeEdges = edges ?? []
   if (safeNodes.length === 0 || safeEdges.length === 0) return safeNodes
@@ -35,9 +26,9 @@ function orderNodesByFlow(nodes: Pipeline['nodes'], edges: Pipeline['edges']): P
   const hasIncoming = new Set(safeEdges.map((e) => e.targetNodeId))
   const start = safeNodes.find((n) => !hasIncoming.has(n.id)) ?? safeNodes[0]
 
-  const ordered: typeof safeNodes = []
+  const ordered: PipelineNode[] = []
   const visited = new Set<string>()
-  let current = start
+  let current: PipelineNode | undefined = start
   while (current && !visited.has(current.id)) {
     ordered.push(current)
     visited.add(current.id)

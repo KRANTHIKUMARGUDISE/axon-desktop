@@ -22,8 +22,8 @@ function BlockDetailsPopover({ block }: { block: BuildingBlock }) {
     <div className="w-60 space-y-3">
       <div className="flex items-center gap-2">
         <img
-          src={getBlockTypeIcon((block.role || block.type) as BlockType)}
-          alt={block.role || block.type}
+          src={getBlockTypeIcon(block.role as BlockType)}
+          alt={block.role}
           className="size-5 rounded"
         />
         <span className="font-bold text-sm text-slate-200">{block.name}</span>
@@ -72,7 +72,7 @@ export default function Palette({ blocks }: Props) {
   )
 
   const grouped = TYPE_ORDER.reduce<Record<string, BuildingBlock[]>>((acc, t) => {
-    const items = filtered.filter(b => (b.role || b.type) === t)
+    const items = filtered.filter(b => b.role === t)
     if (items.length) acc[t] = items
     return acc
   }, {})
@@ -118,7 +118,7 @@ export default function Palette({ blocks }: Props) {
                   draggable
                   onDragStart={e => {
                     e.dataTransfer.setData('blockId', block.id)
-                    e.dataTransfer.setData('blockType', (block.role || block.type) as string)
+                    e.dataTransfer.setData('blockType', block.role as string)
                     e.dataTransfer.setData('blockName', block.name)
                     e.dataTransfer.setData('blockRuntime', block.agentRuntime || 'Claude')
                     e.dataTransfer.effectAllowed = 'copy'

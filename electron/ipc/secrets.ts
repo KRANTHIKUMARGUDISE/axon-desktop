@@ -1,14 +1,21 @@
 import { ipcMain, safeStorage, app } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
+import { atomicWrite } from '../store/atomic'
 
-const tokenPath = () => path.join(app.getPath('userData'), 'auth.token')
+// Secrets live in {userData}/{key}.enc, encrypted with the OS keychain via safeStorage.
+// Keys are a closed set (SecretKey) — there is deliberately no generic get/set-by-name
+// IPC, and the renderer can never read a secret value back.
+
+export const SECRET_KEYS = {
+  gitToken: 'axon-git-token',
+} as const
+
 const securePath = (key: string) => path.join(app.getPath('userData'), `${key}.enc`)
 
 export async function readSecure(key: string): Promise<string | null> {
   try {
-    const filePath = path.join(app.getPath('userData'), `${key}.enc`)
-    const encrypted = await fs.readFile(filePath)
+    const encrypted = await fs.readFile(securePath(key))
     if (!safeStorage.isEncryptionAvailable()) return null
     return safeStorage.decryptString(encrypted)
   } catch {
@@ -16,86 +23,46 @@ export async function readSecure(key: string): Promise<string | null> {
   }
 }
 
-// Directly callable from main-process code (executor.ts's token refresh) — mirrors the
-// 'auth:storeSecure' IPC handler below so a token refreshed mid-delivery lands in the
-// SAME encrypted file the renderer's own axios interceptor reads from, keeping both in
-// sync rather than drifting into two different "current token" values.
 export async function writeSecure(key: string, value: string): Promise<void> {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('Safe storage not available on this platform')
   }
-  const encrypted = safeStorage.encryptString(value)
-  await fs.writeFile(securePath(key), encrypted)
+  await atomicWrite(securePath(key), safeStorage.encryptString(value))
 }
 
-// One-time migration helper: decrypts a legacy secure-storage file (if present)
-// and deletes it unconditionally, regardless of whether the value is used —
-// callers retiring disk persistence for a key call this once on launch.
+// One-time migration helper: decrypts a legacy secure-storage file (if present) and
+// deletes it unconditionally — used by claudeKeyStore to retire Claude-key disk persistence.
 export async function consumeSecureFile(key: string): Promise<string | null> {
-  const filePath = path.join(app.getPath('userData'), `${key}.enc`)
   let value: string | null = null
   try {
-    const encrypted = await fs.readFile(filePath)
-    if (safeStorage.isEncryptionAvailable()) {
-      value = safeStorage.decryptString(encrypted)
-    }
+    const encrypted = await fs.readFile(securePath(key))
+    if (safeStorage.isEncryptionAvailable()) value = safeStorage.decryptString(encrypted)
   } catch {
     value = null
   }
-  await fs.unlink(filePath).catch(() => {})
+  await fs.unlink(securePath(key)).catch(() => {})
   return value
 }
 
-export function registerAuthHandlers() {
-  ipcMain.handle('auth:storeToken', async (_event, token: string) => {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('Safe storage not available on this platform')
-    }
-    const encrypted = safeStorage.encryptString(token)
-    await fs.writeFile(tokenPath(), encrypted)
-  })
+// Single typed accessor for the git token (the old executor and Settings used two
+// different key names, so PR creation silently never had a token).
+export const getGitToken = (): Promise<string | null> => readSecure(SECRET_KEYS.gitToken)
 
-  ipcMain.handle('auth:getToken', async () => {
-    try {
-      const encrypted = await fs.readFile(tokenPath())
-      if (!safeStorage.isEncryptionAvailable()) return null
-      return safeStorage.decryptString(encrypted)
-    } catch {
-      return null
-    }
-  })
+// Removes secret files left behind by the retired API-auth flow.
+export async function purgeLegacyAuthFiles(): Promise<void> {
+  const userData = app.getPath('userData')
+  for (const name of ['auth.token', 'axon-access-token.enc', 'axon-refresh-token.enc', 'git-token.enc']) {
+    await fs.unlink(path.join(userData, name)).catch(() => {})
+  }
+}
 
-  ipcMain.handle('auth:clearToken', async () => {
-    try {
-      await fs.unlink(tokenPath())
-    } catch {
-      // file may not exist
-    }
+export function registerSecretHandlers() {
+  ipcMain.handle('secrets:setGitToken', async (_event, token: unknown) => {
+    if (typeof token !== 'string' || !token.trim()) throw new Error('Token must be a non-empty string')
+    await writeSecure(SECRET_KEYS.gitToken, token.trim())
   })
-
-  ipcMain.handle('auth:storeSecure', async (_event, key: string, value: string) => {
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('Safe storage not available on this platform')
-    }
-    const encrypted = safeStorage.encryptString(value)
-    await fs.writeFile(securePath(key), encrypted)
-  })
-
-  ipcMain.handle('auth:getSecure', async (_event, key: string) => {
-    try {
-      const encrypted = await fs.readFile(securePath(key))
-      if (!safeStorage.isEncryptionAvailable()) return null
-      return safeStorage.decryptString(encrypted)
-    } catch {
-      return null
-    }
-  })
-
-  ipcMain.handle('auth:clearSecure', async (_event, key: string) => {
-    try {
-      await fs.unlink(securePath(key))
-    } catch {
-      // file may not exist
-    }
+  ipcMain.handle('secrets:hasGitToken', async () => !!(await getGitToken()))
+  ipcMain.handle('secrets:clearGitToken', async () => {
+    await fs.unlink(securePath(SECRET_KEYS.gitToken)).catch(() => {})
   })
 }

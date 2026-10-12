@@ -1,5 +1,4 @@
-import { useState, useEffect } from 'react'
-import { toast } from 'sonner'
+import { useState } from 'react'
 import { parseSkillFrontmatter } from '../../utils/skillParser'
 import { readFilesFromFolder, readSingleFile, type CachedFile } from '../../utils/fileHandler'
 
@@ -8,7 +7,7 @@ interface ArtifactData {
   folderPath: string
   cachedFiles: CachedFile[]
   entryPointPath: string
-  artifactName?: string
+  artifactName: string
   skillMeta?: { name?: string; description?: string }
 }
 
@@ -81,8 +80,6 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
         window.axon.workspace.readFile
       )
 
-      // Normalize paths to forward slashes for checking
-      const normalizedPaths = files.map((f) => f.relativePath.toLowerCase())
       const skillMdFile = files.find((f) => f.relativePath.toLowerCase() === 'skill.md')
 
       if (!skillMdFile) {
@@ -119,7 +116,7 @@ export default function ArtifactPopup({ onAttach, onClose }: ArtifactPopupProps)
       cachedFiles,
       entryPointPath,
       artifactName,
-      skillMeta,
+      skillMeta: skillMeta ?? undefined,
     })
   }
 

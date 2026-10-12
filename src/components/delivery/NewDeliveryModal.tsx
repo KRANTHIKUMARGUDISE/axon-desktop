@@ -14,7 +14,6 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { usePipelines } from '@/hooks/usePipelines'
 import { useCreateDelivery } from '@/hooks/useDeliveries'
-import { useAuthReady } from '@/hooks/useAuthReady'
 import type { WorkspaceType } from '@/types'
 
 // ── hook ──────────────────────────────────────────────────────────────────────
@@ -46,8 +45,7 @@ export default function NewDeliveryModal({
   defaultPipelineId,
 }: NewDeliveryModalProps) {
   const navigate = useNavigate()
-  const authReady = useAuthReady()
-  const { data: pipelines } = usePipelines(undefined, authReady)
+  const { data: pipelines } = usePipelines(undefined)
   const createDelivery = useCreateDelivery()
 
   const [ticketId, setTicketId] = useState('')

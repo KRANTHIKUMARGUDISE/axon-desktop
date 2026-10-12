@@ -11,6 +11,7 @@ const DOT_COLORS: Record<DeliveryStatus, string> = {
   Completed: 'var(--axon-green)',
   Failed:    'var(--axon-red)',
   Cancelled: 'var(--axon-t3)',
+  Interrupted: 'var(--axon-amber)',
 }
 
 function describe(d: DeliverySummary): string {

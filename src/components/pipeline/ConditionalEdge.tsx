@@ -1,4 +1,4 @@
-import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from '@xyflow/react'
+import { BaseEdge, getBezierPath, type EdgeProps } from '@xyflow/react'
 
 const ARROW_ID = 'pipeline-arrow'
 
@@ -6,7 +6,6 @@ export default function ConditionalEdge({
   id, sourceX, sourceY, targetX, targetY,
   sourcePosition, targetPosition,
   data,
-  markerEnd,
 }: EdgeProps) {
   const [edgePath] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
 
