@@ -59,3 +59,17 @@
 - Jira/registry hosts are not in `connect-src` yet (the renderer makes no direct network calls; S3/S5 add them in `vite.config.mts`).
 - The GitHub REST PR call still sends the PAT in an `Authorization` header from main (never logged; redacted if it appears in an error).
 - Packaged-build check was done on the built `dist/index.html` (meta present, no inline script, no Google hosts), not by launching an installer build.
+
+## Session 2b — Dependency hardening (2026-10-13)
+
+Branch `chore/v1-s2b-dependency-hardening`, one commit per step. Full record in `docs/security/dependency-audit.md`.
+- `npm audit --omit=dev`: **26 → 0**; full audit **47 → 15** (remaining: shadcn CLI chain ×7 high, electron-builder download-helper chain ×8 moderate — all dev/build-time, justified in the audit doc).
+- `npm audit fix`; **simple-git 3.36 → 4.0.2** (named export; its environment guard blocks git when `EDITOR`/`VISUAL`/`GIT_SSH_COMMAND`/… are inherited, so `buildGitEnv` strips them and `makeGit` passes `allowEnvironment` — would otherwise have broken git for users with `EDITOR` set); **Electron 31 → 44.7.0** (no app code changes; S2 hardening re-verified on the packaged build); **electron-builder 24 → 26.17.0**; `shadcn`/`tw-animate-css` → devDependencies; **vite 5 → 6.4.4, vitest 3 → 5.0.4**; `--legacy-peer-deps` no longer needed (clean `npm ci` resolves).
+- New: `scripts/smoke-packaged.js <AXON.exe>` — launches a packaged build with a debug port and checks the S2 hardening over CDP (prod CSP, no Node globals, IPC works, traversal/bad-setting/`file:` rejected, window.open/navigation guards, permission denials, no remote fonts, Claude binary unpacked). First time the **production** (file://) path was exercised.
+- Tests: 111 (+4 real-git tests: protocol.file refused, ext:: never executes, EDITOR/VISUAL/PAGER set, askpass wiring).
+
+### Not done / caveats
+- **Installer not actually installed**: an AXON 0.1.0 install is registered on this machine (`HKLM…\Uninstall\AXON`), so I did not run a second silent install/uninstall. The NSIS payload was extracted with 7za and the extracted app passed the smoke test. Run `release\AXON Setup 0.1.0.exe` yourself (or tell me to) for the install-and-launch check.
+- Electron 32–44 breaking-change list not read line by line; verification is behavioural (smoke + tests). IPC-from-foreign-frame rejection is covered by unit tests only (iframes are blocked by CSP so it can't be exercised from the page).
+- The opt-in live agent tests (`live.agent.test.ts`, needs `AXON_LIVE_API_KEY`) were not run after the SDK/Electron bumps.
+- I mistakenly claimed in the step 4 commit message/doc that `allowScripts` gates Electron's binary download; Electron 44 has no postinstall. Corrected in step 7 (docs + package.json).
