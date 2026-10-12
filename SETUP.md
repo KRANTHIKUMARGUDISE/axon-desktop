@@ -12,7 +12,7 @@ Install these before anything else.
 
 > **Node note:** Electron 44's npm package needs Node ≥ 22.12 (Node 20 no longer works). Node 24 is fine — the old Electron 31 / Node 24 download problem is gone.
 >
-> **Install-script gate:** `package.json` → `allowScripts` is keyed by exact version (`electron@44.7.0`). When you bump Electron, update that key too, otherwise npm skips Electron's postinstall and the binary silently isn't downloaded (run `node node_modules/electron/install.js` to fix).
+> **Electron binary:** Electron 44's npm package has no postinstall script; the ~105 MB binary is downloaded the first time you run `npx electron .` (or eagerly with `npx install-electron`).
 
 ---
 
@@ -31,7 +31,7 @@ cd axon-desktop
 npm install
 ```
 
-This installs all packages. The Electron binary (~105 MB) downloads automatically from GitHub during install.
+This installs all packages. The Electron binary (~105 MB) downloads from GitHub on first run (or run `npx install-electron` to fetch it now).
 
 **If `npx electron .` later throws "Electron failed to install correctly"**, the binary didn't download (network/proxy issue). Fix it manually:
 
