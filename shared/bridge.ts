@@ -6,6 +6,8 @@ export interface ClaudeKeyStatus {
   masked: string | null
   source: string | null
   conflict: { claudeJson: string; configJson: string } | null
+  /** Key found in Claude's own config files — unused until the user confirms it (D3). */
+  candidate: { masked: string; source: string } | null
 }
 
 // Documents cross the IPC boundary as plain JSON; the renderer services narrow them to
@@ -14,7 +16,9 @@ export interface AxonBridge {
   secrets: {
     setGitToken(token: string): Promise<void>
     hasGitToken(): Promise<boolean>
-    clearGitToken(): Promise<void>
+    setJiraToken(token: string): Promise<void>
+    hasJiraToken(): Promise<boolean>
+    clearJiraToken(): Promise<void>
   }
   settings: {
     get(key: string): Promise<unknown>
@@ -48,23 +52,21 @@ export interface AxonBridge {
     previewResume(id: string): Promise<ActionResult & { preview?: ResumePreview }>
     approveGate(id: string, comment?: string): Promise<ActionResult>
     rejectGate(id: string, comment: string): Promise<ActionResult>
+    clearWorkspace(id: string): Promise<{ success: boolean; error?: string }>
   }
   events: {
     /** Subscribes to the single typed delivery event channel; returns an unsubscribe function. */
     onDeliveryEvent(callback: (event: DeliveryEvent) => void): () => void
   }
   workspace: {
-    listDirs(path: string): Promise<string[]>
-    exists(path: string): Promise<boolean>
     readFile(path: string): Promise<string>
-    writeFile(path: string, content: string): Promise<void>
-    createDir(path: string): Promise<void>
     listFilesRecursive(path: string, maxDepth?: number): Promise<string[]>
-    clear(path: string): Promise<{ success: boolean; error?: string }>
   }
   claudeKey: {
     getStatus(): Promise<ClaudeKeyStatus>
     set(value: string): Promise<ClaudeKeyStatus>
+    confirmDetected(): Promise<ClaudeKeyStatus>
+    rejectDetected(): Promise<ClaudeKeyStatus>
   }
   dialog: {
     openDirectory(): Promise<string | null>

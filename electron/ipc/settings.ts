@@ -1,8 +1,11 @@
-import { ipcMain, app } from 'electron'
+import { app } from 'electron'
 import Store from 'electron-store'
 import path from 'path'
 import os from 'os'
-import type { Settings } from '../../shared'
+import { z } from 'zod'
+import { SETTING_VALIDATORS } from '../../shared'
+import type { Settings, WritableSettingKey } from '../../shared'
+import { handle } from './guard'
 
 interface StoredSettings extends Settings {
   gitTokenSuffix: string
@@ -49,21 +52,31 @@ export function getDS1ThresholdBytes(): number {
   return kb && kb > 0 ? kb * 1024 : 50_000
 }
 
-const EDITABLE: ReadonlySet<string> = new Set([
-  'workspaceRoot', 'gitProvider', 'theme', 'setupComplete', 'userEmail', 'userName',
-  'maxContextSnapshotSizeKb', 'gitTokenSuffix',
-])
+/** Main-side only (derived from the stored git token) — never writable from the renderer. */
+export function setGitTokenSuffix(suffix: string): void {
+  store.set('gitTokenSuffix', suffix)
+}
+
+const READABLE = new Set<string>([...Object.keys(SETTING_VALIDATORS), 'gitTokenSuffix'])
+
+// Typed per-key setter: dispatches to the key's own validator, so a value of the wrong
+// type/shape (e.g. a non-path workspaceRoot) is rejected here rather than persisted.
+export function applySetting(key: unknown, value: unknown): void {
+  if (typeof key !== 'string' || !Object.prototype.hasOwnProperty.call(SETTING_VALIDATORS, key)) {
+    throw new Error(`Setting is not writable: ${String(key)}`)
+  }
+  const parsed = SETTING_VALIDATORS[key as WritableSettingKey].parse(value)
+  store.set(key as keyof StoredSettings, parsed as never)
+}
 
 export function registerSettingsHandlers() {
-  ipcMain.handle('settings:get', (_event, key: keyof StoredSettings) => {
+  handle('settings:get', z.tuple([z.string()]), ([key]) => {
+    if (!READABLE.has(key)) throw new Error(`Unknown setting: ${key}`)
     if (key === 'workspaceRoot') return getWorkspaceRoot()
-    return store.get(key)
+    return store.get(key as keyof StoredSettings)
   })
 
-  ipcMain.handle('settings:set', (_event, key: string, value: unknown) => {
-    if (!EDITABLE.has(key)) throw new Error(`Unknown setting: ${key}`)
-    store.set(key as keyof StoredSettings, value as never)
-  })
+  handle('settings:set', z.tuple([z.string(), z.unknown()]), ([key, value]) => applySetting(key, value))
 
-  ipcMain.handle('settings:getAll', () => ({ ...store.store, workspaceRoot: getWorkspaceRoot() }))
+  handle('settings:getAll', z.tuple([]), () => ({ ...store.store, workspaceRoot: getWorkspaceRoot() }))
 }

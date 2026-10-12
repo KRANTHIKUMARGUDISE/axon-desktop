@@ -1,4 +1,5 @@
 import type { DeliveryEvent } from '../../shared'
+import { log } from '../log'
 
 export type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never
 export type EventInput = DistributiveOmit<DeliveryEvent, 'at' | 'deliveryId'>
@@ -16,7 +17,7 @@ export function createBus(): EventBus {
         try {
           l(event)
         } catch (err) {
-          console.warn(`[bus] listener threw: ${err}`)
+          log.warn('[bus] listener threw', err)
         }
       }
     },

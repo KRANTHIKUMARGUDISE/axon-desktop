@@ -1,5 +1,5 @@
 import type { AgentOutput } from '../../shared'
-import { normalizeAgentOutput, buildInputFieldsText } from './output'
+import { normalizeAgentOutput, buildUntrustedContext } from './output'
 import type { RunnerInput } from './types'
 
 const MODEL = 'claude-haiku-4-5-20251001'
@@ -108,16 +108,11 @@ Respond ONLY with a valid JSON object. No preamble, no markdown fences.
   "result": { ...fields declared in outputSchema... },
   "errorMessage": "Optional - what went wrong"
 }`
-    const pool = { ...deliveryContext.previousStepsResults, ...deliveryContext.currentInputs }
-    const userMessage = `## Delivery Context
-Ticket: ${deliveryContext.ticketId}${deliveryContext.ticketTitle ? ` — ${deliveryContext.ticketTitle}` : ''}
-
-## Input Fields
-${buildInputFieldsText(pool, block.contextRequirements)}`
+    const userMessage = buildUntrustedContext(deliveryContext, block)
 
     try {
       const text = await callClaude(getApiKey(), systemPrompt, userMessage, { timeoutSeconds, signal }, deps)
-      return normalizeAgentOutput(text, block.outputMapping)
+      return normalizeAgentOutput(text, block.outputMapping, block.outputSchema)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return {

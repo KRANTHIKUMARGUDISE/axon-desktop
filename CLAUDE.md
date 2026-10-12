@@ -115,17 +115,28 @@ Both pass through `storeIfLarge()` (`electron/engine/runs.ts`):
 window.axon.blocks.{list,get,create,update,delete}
 window.axon.pipelines.{list,get,create,update,delete}
 window.axon.deliveries.{list,get,create,stepData(deliveryId,nodeId,'context'|'output')}
-window.axon.delivery.{start,resume,cancel,previewResume,approveGate(id,comment?),rejectGate(id,comment)}
+window.axon.delivery.{start,resume,cancel,previewResume,approveGate(id,comment?),rejectGate(id,comment),clearWorkspace(id)}
 window.axon.events.onDeliveryEvent(cb) // returns unsubscribe; payload is the typed DeliveryEvent union
-window.axon.secrets.{setGitToken,hasGitToken,clearGitToken}
+window.axon.secrets.{setGitToken,hasGitToken,setJiraToken,hasJiraToken,clearJiraToken}
 window.axon.settings.{get,set,getAll}
-window.axon.workspace.{listDirs,exists,readFile,writeFile,createDir,listFilesRecursive,clear}
-window.axon.claudeKey.{getStatus,set}   // in-memory Claude key (D3: Console API key only)
+window.axon.workspace.{readFile,listFilesRecursive}   // path-guarded; clearing = delivery.clearWorkspace(id)
+window.axon.claudeKey.{getStatus,set,confirmDetected,rejectDetected}   // in-memory Claude key (D3: Console API key only)
 window.axon.dialog.{openDirectory,openFile}
 window.axon.shell.{openExternal,openPath,openInVSCode}
 window.axon.system.{getInfo,checkForUpdates}
 window.axon.window.setTitle(title)
 ```
+
+## Security model (S2)
+
+- **IPC**: register channels only via `electron/ipc/guard.ts` `handle(channel, zodTupleSchema, fn)` / `on(...)` — it checks the sender frame (dev server origin or packaged index.html) and validates args. Never call `ipcMain.handle` directly.
+- **Paths**: `electron/security/paths.ts` `resolveInside(p, roots)` (realpath, no `~`/UNC/relative) for anything renderer- or agent-supplied. Renderer file access = `workspaceRoot` / `{userData}` / `{userData}/registry` + folders picked in a native dialog this session (read-only). No renderer write/clear of arbitrary paths exists.
+- **Settings**: writable keys have validators in `SETTING_VALIDATORS` (`shared/schemas.ts`); add a validator before exposing a new key. URL settings must use `parseHttpsUrl(value, allowedHosts)`.
+- **Secrets**: named `secrets:*` / `claudeKey:*` APIs only, never returning values. Register new secrets with `registerSecret()` (logger redaction). A Claude key found in `~/.claude.json` is a *candidate* until confirmed in the UI (D3).
+- **Logging**: use `log` from `electron/log.ts` (no `console.*` in `electron/`); output is redacted and rotated in `{userData}/logs`.
+- **Git credentials**: never in URLs/argv — `makeGit()` in `ipc/git.ts` supplies the token via `GIT_ASKPASS` env and applies `protocol.ext/file.allow=never`.
+- **Agents**: `security/agentPolicy.ts` (`decideToolUse`, `buildAgentEnv`, `MANAGED_DENY_RULES`) powers the PreToolUse hook in `runners/claudeAgentic.ts`; denials land in `toolsDenied` + `denials`. Ticket text is fenced via `buildUntrustedContext`; `outputSchema` fields are enforced on success outputs.
+- **CSP** is a `<meta>` injected by the `axon-csp-meta` Vite plugin (`vite.config.mts`); add new `connect-src` hosts there. Fonts are bundled (`@fontsource-variable/*`), no remote font hosts.
 
 ## Constraints — do not change these
 

@@ -1,9 +1,13 @@
-import { app, BrowserWindow, session, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, session, dialog, shell } from 'electron'
 import path from 'path'
-import { execFile } from 'child_process'
+import { pathToFileURL } from 'url'
 import { registerSecretHandlers, getGitToken, purgeLegacyAuthFiles } from './ipc/secrets'
 import { registerSettingsHandlers, getWorkspaceRoot, getDS1ThresholdBytes } from './ipc/settings'
-import { registerWorkspaceHandlers } from './ipc/workspace'
+import { registerWorkspaceHandlers, createGrants } from './ipc/workspace'
+import { registerShellHandlers } from './ipc/shell'
+import { configureTrustedSender, makeTrustedUrlCheck } from './ipc/guard'
+import { initLogger, log } from './log'
+import { isAllowedExternalUrl } from './security/shell'
 import { registerSystemHandlers } from './ipc/system'
 import { registerDataHandlers } from './ipc/data'
 import { registerDeliveryHandlers } from './ipc/delivery'
@@ -17,6 +21,12 @@ import { createRunner } from './runners'
 import { createGitWorkspace } from './workspace/gitWorkspace'
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+
+// The renderer's only legitimate origin: the Vite dev server, or the packaged index.html.
+const DEV_ORIGIN = 'http://localhost:5173'
+const PROD_INDEX = path.join(__dirname, '../../dist/index.html')
+const isTrustedUrl = makeTrustedUrlCheck(isDev ? { devOrigin: DEV_ORIGIN } : { fileUrl: pathToFileURL(PROD_INDEX).href })
+configureTrustedSender(isTrustedUrl)
 
 const lock = app.requestSingleInstanceLock()
 if (!lock) {
@@ -49,26 +59,34 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
     },
   })
 
-  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    const csp = isDev
-      ? "default-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' http://localhost:* ws://localhost:* https:; font-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:;"
-      : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self' https:; font-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com;"
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [csp],
-      },
-    })
+  const wc = mainWindow.webContents
+  // No child windows ever; https links go to the OS browser through the same allow-list.
+  wc.setWindowOpenHandler(({ url }) => {
+    if (isAllowedExternalUrl(url)) void shell.openExternal(url)
+    return { action: 'deny' }
   })
+  const blockForeignNavigation = (event: Electron.Event, url: string) => {
+    if (!isTrustedUrl(url)) {
+      event.preventDefault()
+      log.warn('[window] blocked navigation', url)
+    }
+  }
+  wc.on('will-navigate', blockForeignNavigation)
+  wc.on('will-redirect', blockForeignNavigation)
+  wc.on('will-attach-webview', (event) => event.preventDefault())
 
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173')
+    mainWindow.loadURL(DEV_ORIGIN)
   } else {
     mainWindow.webContents.session.clearCache().then(() => {
-      mainWindow!.loadFile(path.join(__dirname, '../../dist/index.html'))
+      mainWindow!.loadFile(PROD_INDEX)
     })
   }
 
@@ -91,13 +109,17 @@ let engine: Engine | null = null
 
 app.whenReady().then(async () => {
   const userData = app.getPath('userData')
+  initLogger({ dir: path.join(userData, 'logs'), level: isDev ? 'debug' : 'info', mirror: isDev })
+  log.info(`AXON ${app.getVersion()} starting (electron ${process.versions.electron})`)
+  // Deny every renderer permission request (camera, geolocation, notifications, …).
+  session.defaultSession.setPermissionRequestHandler((_wc, _perm, callback) => callback(false))
   const store = new FileStore({ dir: path.join(userData, 'store') })
   const runsDir = path.join(userData, 'runs')
   const bus = createBus()
+  const grants = createGrants()
 
   registerSecretHandlers()
   registerSettingsHandlers()
-  registerWorkspaceHandlers()
   registerSystemHandlers()
   registerClaudeKeyHandlers()
   await initClaudeKey()
@@ -115,84 +137,26 @@ app.whenReady().then(async () => {
       pickDirectory: async () => {
         if (!mainWindow) return null
         const res = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'], title: 'Select workspace folder' })
-        return res.canceled ? null : res.filePaths[0] ?? null
+        const picked = res.canceled ? null : res.filePaths[0] ?? null
+        if (picked) grants.grant(picked)
+        return picked
       },
     }),
     ds1ThresholdBytes: getDS1ThresholdBytes,
   })
+  registerWorkspaceHandlers({
+    store,
+    getWorkspaceRoot,
+    access: {
+      getRoots: () => [getWorkspaceRoot(), userData, path.join(userData, 'registry')],
+      isGranted: grants.isGranted,
+    },
+  })
+  registerShellHandlers({ getWindow: () => mainWindow, store, getWorkspaceRoot, grants })
   registerDataHandlers(store, runsDir)
   registerDeliveryHandlers(engine, bus)
   // A delivery left Running by a crash/kill has no active run — make it resumable.
   await engine.reconcileOnBoot()
-
-  ipcMain.handle('dialog:openDirectory', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openDirectory'],
-    })
-    return result.canceled ? null : result.filePaths[0]
-  })
-
-  ipcMain.handle('dialog:openFile', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openFile'],
-    })
-    return result.canceled ? null : result.filePaths[0]
-  })
-
-  ipcMain.handle('shell:openExternal', async (_event, url: string) => {
-    try {
-      await shell.openExternal(url)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle('shell:openPath', async (_event, path: string) => {
-    try {
-      // shell.openPath resolves to an error STRING on failure (e.g. path doesn't exist),
-      // not a rejected promise — unlike most Electron APIs.
-      const error = await shell.openPath(path)
-      return error ? { success: false, error } : { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
-
-  ipcMain.handle('shell:openInVSCode', async (_event, path: string) => {
-    try {
-      // Prefer the `code` CLI (correctly opens the folder as a VS Code *workspace*,
-      // not a single-file view) — falls back to the vscode:// URI handler, which VS
-      // Code's installer registers by default, if the CLI isn't on PATH.
-      // -n/--new-window: without this, `code <path>` reuses whatever VS Code window is
-      // already open and replaces ITS folder — e.g. opening a delivery's workspace while
-      // editing axon-desktop itself would swap that window away from axon-desktop
-      // entirely. A delivery's workspace must always open as its own separate window.
-      await new Promise<void>((resolve, reject) => {
-        execFile('code', ['-n', path], (err) => (err ? reject(err) : resolve()))
-      })
-      return { success: true }
-    } catch {
-      try {
-        await shell.openExternal(`vscode://file/${path.replace(/\\/g, '/')}`)
-        return { success: true }
-      } catch (err) {
-        return { success: false, error: String(err) }
-      }
-    }
-  })
-
-  ipcMain.on('window:setTitle', (_event, title: string) => {
-    console.log('[IPC] window:setTitle received:', title)
-    if (mainWindow) {
-      mainWindow.setTitle(title)
-      console.log('[Electron] Window title set to:', title)
-    } else {
-      console.log('[Electron] mainWindow not available')
-    }
-  })
 
   createWindow()
 })
@@ -203,7 +167,7 @@ app.on('before-quit', (event) => {
   if (shuttingDown || !engine) return
   event.preventDefault()
   shuttingDown = true
-  engine.shutdown().catch((err) => console.warn(`shutdown failed: ${err}`)).finally(() => app.quit())
+  engine.shutdown().catch((err) => log.warn('shutdown failed', err)).finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {
@@ -217,3 +181,6 @@ app.on('activate', () => {
     createWindow()
   }
 })
+
+process.on('uncaughtException', (err) => log.error('uncaughtException', err))
+process.on('unhandledRejection', (err) => log.error('unhandledRejection', err))

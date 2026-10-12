@@ -86,7 +86,7 @@ export default function Settings() {
 
   async function openWorkspaceFolder() {
     if (workspacePath) {
-      window.axon.shell.openExternal(workspacePath)
+      window.axon.shell.openPath(workspacePath)
     }
   }
 
@@ -95,9 +95,7 @@ export default function Settings() {
     await window.axon.settings.set('gitProvider', gitProvider)
     if (newGitToken) {
       await window.axon.secrets.setGitToken(newGitToken)
-      const suffix = newGitToken.slice(-4)
-      await window.axon.settings.set('gitTokenSuffix', suffix)
-      setGitTokenSuffix(suffix)
+      setGitTokenSuffix(newGitToken.slice(-4))
       setGitTokenSet(true)
     }
     setGitSaved('saved')
@@ -162,6 +160,26 @@ export default function Settings() {
                 <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '8px 0 0 0' }}>
                   Resolved from <span style={{ color: 'var(--axon-t2)' }}>{claudeKeyStatus.source}</span> — not stored on disk, re-detected on every launch.
                 </p>
+              )}
+              {claudeKeyStatus?.candidate && (
+                <div style={{ marginTop: 8, padding: 10, borderRadius: 6, background: 'rgba(111,95,232,0.1)', border: '1px solid var(--axon-nexus2)' }}>
+                  <p style={{ fontSize: 12, color: 'var(--axon-t1)', margin: 0, fontWeight: 500 }}>
+                    Use the key found in {claudeKeyStatus.candidate.source}?
+                  </p>
+                  <p style={{ fontSize: 11, color: 'var(--axon-t3)', margin: '6px 0 8px 0', fontFamily: 'monospace' }}>
+                    {claudeKeyStatus.candidate.masked}
+                  </p>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={async () => { setClaudeKeyStatus(await window.axon.claudeKey.confirmDetected()); window.dispatchEvent(new CustomEvent('axon:claudeKeyChanged')) }}
+                      style={{ padding: '6px 12px', borderRadius: 6, border: 'none', background: 'var(--axon-nexus)', color: '#fff', fontSize: 12, cursor: 'pointer' }}
+                    >Use this key</button>
+                    <button
+                      onClick={async () => setClaudeKeyStatus(await window.axon.claudeKey.rejectDetected())}
+                      style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid var(--axon-border)', background: 'var(--axon-bg2)', color: 'var(--axon-t1)', fontSize: 12, cursor: 'pointer' }}
+                    >Don't use</button>
+                  </div>
+                </div>
               )}
               {claudeKeyStatus?.conflict && (
                 <div style={{ marginTop: 8, padding: 10, borderRadius: 6, background: 'rgba(217,119,6,0.1)', border: '1px solid var(--axon-amber)' }}>

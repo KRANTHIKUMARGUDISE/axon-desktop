@@ -1,14 +1,16 @@
-import { app, ipcMain } from 'electron'
+import { app } from 'electron'
+import { z } from 'zod'
+import { handle } from './guard'
 
 export function registerSystemHandlers() {
-  ipcMain.handle('system:getInfo', async () => ({
+  handle('system:getInfo', z.tuple([]), () => ({
     electronVersion: process.versions.electron,
     nodeVersion: process.versions.node,
     platform: process.platform,
     appVersion: app.getVersion(),
   }))
 
-  ipcMain.handle('system:checkForUpdates', async () => {
+  handle('system:checkForUpdates', z.tuple([]), () => {
     // MVP: always return "up to date"
     return { status: 'up-to-date', message: 'You are running the latest version' }
   })

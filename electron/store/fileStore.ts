@@ -10,6 +10,7 @@ import type {
   Block, BlockInput, Pipeline, PipelineInput, Delivery, CreateDeliveryInput, DeliveryStep,
 } from '../../shared'
 import { atomicWrite } from './atomic'
+import { log } from '../log'
 import { KeyedMutex } from './mutex'
 import { sameStepKey } from './types'
 import type { Store } from './types'
@@ -76,7 +77,7 @@ export class FileStore implements Store {
         const raw = await fs.readFile(path.join(this.dir, kind, name), 'utf-8')
         out.push(schema.parse(JSON.parse(raw)))
       } catch (err) {
-        console.warn(`[store] skipping unreadable ${kind}/${name}: ${err}`)
+        log.warn(`[store] skipping unreadable ${kind}/${name}`, err)
       }
     }
     return out

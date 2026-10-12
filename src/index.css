@@ -1,8 +1,9 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -89,8 +90,8 @@
   --axon-t2:       #94a3b8;
   --axon-t3:       #64748b;
   --axon-t4:       #475569;
-  --font-inter:    'Inter', sans-serif;
-  --font-mono:     'JetBrains Mono', monospace;
+  --font-inter:    'Inter Variable', 'Inter', sans-serif;
+  --font-mono:     'JetBrains Mono Variable', 'JetBrains Mono', monospace;
 }
 
 :root {
@@ -167,7 +168,7 @@
     @apply border-border outline-ring/50;
   }
   html {
-    font-family: 'Inter', sans-serif;
+    font-family: 'Inter Variable', 'Inter', sans-serif;
     -webkit-font-smoothing: antialiased;
     font-size: 14px;
   }

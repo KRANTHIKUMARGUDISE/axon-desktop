@@ -7,7 +7,9 @@ contextBridge.exposeInMainWorld('axon', {
   secrets: {
     setGitToken: (token: string) => ipcRenderer.invoke('secrets:setGitToken', token),
     hasGitToken: () => ipcRenderer.invoke('secrets:hasGitToken'),
-    clearGitToken: () => ipcRenderer.invoke('secrets:clearGitToken'),
+    setJiraToken: (token: string) => ipcRenderer.invoke('secrets:setJiraToken', token),
+    hasJiraToken: () => ipcRenderer.invoke('secrets:hasJiraToken'),
+    clearJiraToken: () => ipcRenderer.invoke('secrets:clearJiraToken'),
   },
   settings: {
     get: (key: string) => ipcRenderer.invoke('settings:get', key),
@@ -42,6 +44,7 @@ contextBridge.exposeInMainWorld('axon', {
     previewResume: (id: string) => ipcRenderer.invoke('delivery:previewResume', id),
     approveGate: (id: string, comment?: string) => ipcRenderer.invoke('delivery:approveGate', id, comment),
     rejectGate: (id: string, comment: string) => ipcRenderer.invoke('delivery:rejectGate', id, comment),
+    clearWorkspace: (id: string) => ipcRenderer.invoke('delivery:clearWorkspace', id),
   },
   events: {
     // Returns an unsubscribe function.
@@ -52,17 +55,14 @@ contextBridge.exposeInMainWorld('axon', {
     },
   },
   workspace: {
-    listDirs: (path: string) => ipcRenderer.invoke('workspace:listDirs', path),
-    exists: (path: string) => ipcRenderer.invoke('workspace:exists', path),
     readFile: (path: string) => ipcRenderer.invoke('workspace:readFile', path),
-    writeFile: (path: string, content: string) => ipcRenderer.invoke('workspace:writeFile', path, content),
-    createDir: (path: string) => ipcRenderer.invoke('workspace:createDir', path),
     listFilesRecursive: (path: string, maxDepth?: number) => ipcRenderer.invoke('workspace:listFilesRecursive', path, maxDepth),
-    clear: (path: string) => ipcRenderer.invoke('workspace:clear', path),
   },
   claudeKey: {
     getStatus: () => ipcRenderer.invoke('claudeKey:status'),
     set: (value: string) => ipcRenderer.invoke('claudeKey:set', value),
+    confirmDetected: () => ipcRenderer.invoke('claudeKey:confirmDetected'),
+    rejectDetected: () => ipcRenderer.invoke('claudeKey:rejectDetected'),
   },
   dialog: {
     openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),

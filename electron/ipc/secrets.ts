@@ -1,4 +1,8 @@
-import { ipcMain, safeStorage, app } from 'electron'
+import { safeStorage, app } from 'electron'
+import { z } from 'zod'
+import { handle } from './guard'
+import { registerSecret } from '../log'
+import { setGitTokenSuffix } from './settings'
 import fs from 'fs/promises'
 import path from 'path'
 import { atomicWrite } from '../store/atomic'
@@ -9,6 +13,7 @@ import { atomicWrite } from '../store/atomic'
 
 export const SECRET_KEYS = {
   gitToken: 'axon-git-token',
+  jiraToken: 'axon-jira-token',
 } as const
 
 const securePath = (key: string) => path.join(app.getPath('userData'), `${key}.enc`)
@@ -46,7 +51,16 @@ export async function consumeSecureFile(key: string): Promise<string | null> {
 
 // Single typed accessor for the git token (the old executor and Settings used two
 // different key names, so PR creation silently never had a token).
-export const getGitToken = (): Promise<string | null> => readSecure(SECRET_KEYS.gitToken)
+export const getGitToken = async (): Promise<string | null> => {
+  const token = await readSecure(SECRET_KEYS.gitToken)
+  registerSecret(token)
+  return token
+}
+export const getJiraToken = async (): Promise<string | null> => {
+  const token = await readSecure(SECRET_KEYS.jiraToken)
+  registerSecret(token)
+  return token
+}
 
 // Removes secret files left behind by the retired API-auth flow.
 export async function purgeLegacyAuthFiles(): Promise<void> {
@@ -56,13 +70,27 @@ export async function purgeLegacyAuthFiles(): Promise<void> {
   }
 }
 
+const Token = z.string().trim().min(1).max(512)
+
+// Named setters only; none of these ever return a secret value to the renderer.
 export function registerSecretHandlers() {
-  ipcMain.handle('secrets:setGitToken', async (_event, token: unknown) => {
-    if (typeof token !== 'string' || !token.trim()) throw new Error('Token must be a non-empty string')
-    await writeSecure(SECRET_KEYS.gitToken, token.trim())
+  handle('secrets:setGitToken', z.tuple([Token]), async ([token]) => {
+    await writeSecure(SECRET_KEYS.gitToken, token)
+    registerSecret(token)
+    setGitTokenSuffix(token.slice(-4))
   })
-  ipcMain.handle('secrets:hasGitToken', async () => !!(await getGitToken()))
-  ipcMain.handle('secrets:clearGitToken', async () => {
+  handle('secrets:hasGitToken', z.tuple([]), async () => !!(await getGitToken()))
+  handle('secrets:clearGitToken', z.tuple([]), async () => {
     await fs.unlink(securePath(SECRET_KEYS.gitToken)).catch(() => {})
+    setGitTokenSuffix('')
+  })
+
+  handle('secrets:setJiraToken', z.tuple([Token]), async ([token]) => {
+    await writeSecure(SECRET_KEYS.jiraToken, token)
+    registerSecret(token)
+  })
+  handle('secrets:hasJiraToken', z.tuple([]), async () => !!(await getJiraToken()))
+  handle('secrets:clearJiraToken', z.tuple([]), async () => {
+    await fs.unlink(securePath(SECRET_KEYS.jiraToken)).catch(() => {})
   })
 }

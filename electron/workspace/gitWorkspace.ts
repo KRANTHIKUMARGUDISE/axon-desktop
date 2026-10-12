@@ -41,7 +41,7 @@ export function createGitWorkspace(deps: GitWorkspaceDeps): WorkspacePort {
       if (!cloned.success) throw new Error(`Git setup failed: ${cloned.error}`)
 
       const branch = deliveryBranchName(delivery.id, delivery.ticketId, os.userInfo().username)
-      await createDeliveryBranch(workspacePath, branch)
+      await createDeliveryBranch(workspacePath, branch, token)
       return { workspacePath, branch }
     },
 

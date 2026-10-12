@@ -13,6 +13,7 @@ import {
 } from './context'
 import type { DeliveryContext } from './context'
 import { storeIfLarge, readStored } from './runs'
+import { log } from '../log'
 
 // Workspace + git side effects, injected so the engine stays a pure state machine.
 export interface WorkspacePort {
@@ -312,7 +313,7 @@ export function createEngine(deps: EngineDeps): Engine {
     active.set(id, run)
     run.done = runLoop(id, run, startNodeId)
       .catch(async (err) => {
-        await failDelivery(id, run, errMsg(err)).catch((e) => console.warn(`[engine] failDelivery failed: ${e}`))
+        await failDelivery(id, run, errMsg(err)).catch((e) => log.warn('[engine] failDelivery failed', e))
       })
       .finally(() => {
         active.delete(id)
@@ -560,7 +561,7 @@ export function createEngine(deps: EngineDeps): Engine {
           if (d.status !== 'Running') return
           markRunningSteps(d, 'Interrupted (AXON was closed while this step was running)')
           d.status = 'Interrupted'
-        }).catch((err) => console.warn(`[engine] shutdown persist failed for ${id}: ${err}`)),
+        }).catch((err) => log.warn(`[engine] shutdown persist failed for ${id}`, err)),
       ),
     )
     await Promise.race([

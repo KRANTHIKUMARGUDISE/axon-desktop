@@ -16,12 +16,13 @@ export default function Setup({ onComplete }: { onComplete?: () => void }) {
   const [workspaceRoot, setWorkspaceRoot] = useState('')
   const [claudeKey, setClaudeKey] = useState('')
   const [keyDetected, setKeyDetected] = useState<string | null>(null)
+  const [candidate, setCandidate] = useState<{ masked: string; source: string } | null>(null)
   const [error, setError] = useState('')
   const [finishing, setFinishing] = useState(false)
 
   useEffect(() => {
     window.axon.settings.get('workspaceRoot').then((v) => typeof v === 'string' && setWorkspaceRoot(v)).catch(() => {})
-    window.axon.claudeKey.getStatus().then((s) => s.hasKey && setKeyDetected(s.masked)).catch(() => {})
+    window.axon.claudeKey.getStatus().then((s) => { if (s.hasKey) setKeyDetected(s.masked); setCandidate(s.candidate) }).catch(() => {})
   }, [])
 
   async function browse() {
@@ -137,9 +138,20 @@ export default function Setup({ onComplete }: { onComplete?: () => void }) {
                 The key is kept in memory only and is never written to disk. You can skip this and add it later in Settings.
               </p>
             </div>
+            {candidate && !keyDetected && (
+              <div className="space-y-2">
+                <p className="text-xs" style={{ color: 'var(--axon-t2)' }}>
+                  A key was found in {candidate.source} ({candidate.masked}). Use it?
+                </p>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={async () => { const s = await window.axon.claudeKey.confirmDetected(); setKeyDetected(s.masked); setCandidate(null) }}>Use this key</Button>
+                  <Button size="sm" variant="outline" onClick={async () => { await window.axon.claudeKey.rejectDetected(); setCandidate(null) }}>Don't use</Button>
+                </div>
+              </div>
+            )}
             {keyDetected && (
               <p className="text-xs" style={{ color: 'var(--axon-green)' }}>
-                A key was detected on this machine ({keyDetected}). Leave the field empty to use it.
+                Using key {keyDetected}. Leave the field empty to keep it.
               </p>
             )}
             <Input

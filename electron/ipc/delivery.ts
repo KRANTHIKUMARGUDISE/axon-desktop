@@ -1,4 +1,5 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { BrowserWindow } from 'electron'
+import { handle } from './guard'
 import { z } from 'zod'
 import type { Engine } from '../engine/engine'
 import type { EventBus } from '../engine/bus'
@@ -9,14 +10,14 @@ const Id = z.string().min(1)
 export const DELIVERY_EVENT_CHANNEL = 'delivery:event'
 
 export function registerDeliveryHandlers(engine: Engine, bus: EventBus) {
-  ipcMain.handle('delivery:start', (_e, id: unknown) => engine.start(Id.parse(id)))
-  ipcMain.handle('delivery:resume', (_e, id: unknown) => engine.resume(Id.parse(id)))
-  ipcMain.handle('delivery:cancel', (_e, id: unknown) => engine.cancel(Id.parse(id)))
-  ipcMain.handle('delivery:previewResume', (_e, id: unknown) => engine.previewResume(Id.parse(id)))
-  ipcMain.handle('delivery:approveGate', (_e, id: unknown, comment: unknown) =>
-    engine.approveGate(Id.parse(id), z.string().optional().parse(comment)))
-  ipcMain.handle('delivery:rejectGate', (_e, id: unknown, comment: unknown) =>
-    engine.rejectGate(Id.parse(id), z.string().parse(comment)))
+  handle('delivery:start', z.tuple([Id]), ([id]) => engine.start(id))
+  handle('delivery:resume', z.tuple([Id]), ([id]) => engine.resume(id))
+  handle('delivery:cancel', z.tuple([Id]), ([id]) => engine.cancel(id))
+  handle('delivery:previewResume', z.tuple([Id]), ([id]) => engine.previewResume(id))
+  handle('delivery:approveGate', z.tuple([Id, z.string().max(10_000).optional()]), ([id, comment]) =>
+    engine.approveGate(id, comment))
+  handle('delivery:rejectGate', z.tuple([Id, z.string().max(10_000)]), ([id, comment]) =>
+    engine.rejectGate(id, comment))
 
   bus.subscribe((event) => {
     for (const win of BrowserWindow.getAllWindows()) {

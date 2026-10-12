@@ -1,13 +1,15 @@
-import { ipcMain } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
+import { z } from 'zod'
 import { consumeSecureFile } from './secrets'
+import { handle } from './guard'
+import { registerSecret } from '../log'
 
-// Claude API key is resolved fresh on every launch (auto-detect, then manual
-// override) and lives only in this module's memory for the lifetime of the
-// process — never written to disk. See CLAUDE.md "BUILD — Claude key
-// resolution" for the rationale.
+// Claude API key lives only in this module's memory for the lifetime of the process — never
+// written to disk. A key harvested from ~/.claude.json / ~/.claude/config.json is only a
+// *candidate* until the user explicitly confirms it (D3); getClaudeKey() never returns a
+// candidate. A manually entered key is the user's own act and needs no confirmation.
 interface ClaudeKeyConflict {
   claudeJson: string
   configJson: string
@@ -15,11 +17,12 @@ interface ClaudeKeyConflict {
 
 interface ClaudeKeyState {
   key: string | null
+  candidate: { key: string; source: string } | null
   source: string | null
   conflict: ClaudeKeyConflict | null
 }
 
-let state: ClaudeKeyState = { key: null, source: null, conflict: null }
+let state: ClaudeKeyState = { key: null, candidate: null, source: null, conflict: null }
 
 function mask(key: string): string {
   if (key.length <= 8) return '••••'
@@ -72,13 +75,15 @@ export async function initClaudeKey(): Promise<void> {
   const migratedValue = await consumeSecureFile('axon-claude-key')
 
   if (detected.key) {
-    state = { key: detected.key, source: detected.source, conflict: null }
+    state = { key: null, candidate: { key: detected.key, source: detected.source ?? '~/.claude.json' }, source: null, conflict: null }
+    registerSecret(detected.key)
   } else if (detected.conflict) {
-    state = { key: null, source: null, conflict: detected.conflict }
+    state = { key: null, candidate: null, source: null, conflict: detected.conflict }
   } else if (migratedValue) {
-    state = { key: migratedValue, source: 'migrated from prior manual entry', conflict: null }
+    state = { key: migratedValue, candidate: null, source: 'migrated from prior manual entry', conflict: null }
+    registerSecret(migratedValue)
   } else {
-    state = { key: null, source: null, conflict: null }
+    state = { key: null, candidate: null, source: null, conflict: null }
   }
 }
 
@@ -86,22 +91,35 @@ export function getClaudeKey(): string {
   return state.key ?? ''
 }
 
-export function registerClaudeKeyHandlers(): void {
-  ipcMain.handle('claudeKey:status', () => ({
+function status() {
+  return {
     hasKey: !!state.key,
     masked: state.key ? mask(state.key) : null,
     source: state.source,
     conflict: state.conflict,
-  }))
+    candidate: state.candidate ? { masked: mask(state.candidate.key), source: state.candidate.source } : null,
+  }
+}
 
-  ipcMain.handle('claudeKey:set', (_event, value: string) => {
+export function registerClaudeKeyHandlers(): void {
+  handle('claudeKey:status', z.tuple([]), () => status())
+
+  handle('claudeKey:set', z.tuple([z.string().max(512)]), ([value]) => {
     const trimmed = value.trim()
-    state = { key: trimmed || null, source: trimmed ? 'manual' : null, conflict: null }
-    return {
-      hasKey: !!state.key,
-      masked: state.key ? mask(state.key) : null,
-      source: state.source,
-      conflict: state.conflict,
+    registerSecret(trimmed)
+    state = { key: trimmed || null, candidate: null, source: trimmed ? 'manual' : null, conflict: null }
+    return status()
+  })
+
+  // D3: explicit "Use this key?" confirmation for a key found in Claude's own config files.
+  handle('claudeKey:confirmDetected', z.tuple([]), () => {
+    if (state.candidate) {
+      state = { key: state.candidate.key, candidate: null, source: state.candidate.source, conflict: null }
     }
+    return status()
+  })
+  handle('claudeKey:rejectDetected', z.tuple([]), () => {
+    state = { ...state, candidate: null }
+    return status()
   })
 }

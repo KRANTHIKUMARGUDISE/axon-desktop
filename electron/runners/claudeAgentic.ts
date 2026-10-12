@@ -4,7 +4,9 @@
 // erased at compile time, so importing them statically is fine.
 import type { query as QueryFn, HookJSONOutput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentOutput } from '../../shared'
-import { normalizeAgentOutput, buildInputFieldsText } from './output'
+import { normalizeAgentOutput, buildUntrustedContext } from './output'
+import { decideToolUse, buildAgentEnv, MANAGED_DENY_RULES } from '../security/agentPolicy'
+import { log } from '../log'
 import type { RunnerInput } from './types'
 import path from 'path'
 import fs from 'fs'
@@ -54,14 +56,8 @@ function resolveClaudeBinaryPath(): string | undefined {
   })
 }
 
-function buildUserMessage(input: RunnerInput): string {
-  const { deliveryContext, block } = input
-  const pool = { ...deliveryContext.previousStepsResults, ...deliveryContext.currentInputs }
-  return `## Delivery Context
-Ticket: ${deliveryContext.ticketId}${deliveryContext.ticketTitle ? ` — ${deliveryContext.ticketTitle}` : ''}
-
-## Input Fields
-${buildInputFieldsText(pool, block.contextRequirements)}
+export function buildUserMessage(input: RunnerInput): string {
+  return `${buildUntrustedContext(input.deliveryContext, input.block)}
 
 ## Required Output Format
 When you are done, respond with ONLY a valid JSON object (no preamble, no markdown fences):
@@ -74,12 +70,54 @@ When you are done, respond with ONLY a valid JSON object (no preamble, no markdo
 }`
 }
 
+export interface ToolPolicyState {
+  worktree: string
+  effectiveTools: readonly string[]
+  toolsUsed: Set<string>
+  toolsDenied: Set<string>
+  denials: string[]
+}
+
+// PreToolUse hook: tool-list ceiling, worktree path scope and Bash network/git-remote rules all
+// live in decideToolUse — compared against the SAME resolved effectiveTools list passed to
+// `tools`, not the raw block.allowedTools. Every denial is recorded in toolsDenied/denials.
+export function createToolPolicyHook(state: ToolPolicyState) {
+  return async (hookInput: unknown): Promise<HookJSONOutput> => {
+    const toolInput = hookInput as PreToolUseHookInput
+    const decision = decideToolUse({
+      toolName: toolInput.tool_name,
+      toolInput: toolInput.tool_input,
+      worktree: state.worktree,
+      effectiveTools: state.effectiveTools,
+    })
+    if (!decision.allow) {
+      state.toolsDenied.add(toolInput.tool_name)
+      state.denials.push(`${toolInput.tool_name}: ${decision.reason}`)
+      log.warn(`[agent] denied ${toolInput.tool_name}: ${decision.reason}`)
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: `AXON policy: ${decision.reason}.`,
+        },
+      }
+    }
+    // Recorded as "used" only once permitted — never the same set as denials, so the
+    // "restrict to these" suggestion can never prefill a tool the block was blocked from using.
+    state.toolsUsed.add(toolInput.tool_name)
+    return { continue: true }
+  }
+}
+
 export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string): Promise<AgentOutput> {
   const { instructions, workspacePath, effectiveTools, timeoutSeconds, signal: externalSignal } = input
   const outputMapping = input.block.outputMapping
 
   const toolsUsed = new Set<string>()
   const toolsDenied = new Set<string>()
+  const denials: string[] = []
+  const deniedList = () => Array.from(toolsDenied)
   const abortController = new AbortController()
   const timeoutMs = Math.max(1, timeoutSeconds) * 1000
   const timer = setTimeout(() => abortController.abort(), timeoutMs)
@@ -104,35 +142,18 @@ export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string):
         // disallowedTools is the only thing that survives bypassPermissions (see Part 1's
         // naming-collision note: the SDK's own `allowedTools` would NOT have restricted this).
         disallowedTools: ['AskUserQuestion'],
-        env: { ...process.env, ANTHROPIC_API_KEY: claudeApiKey },
+        // Allow-list only: no Git/Jira tokens, nothing else from process.env.
+        env: buildAgentEnv(process.env, claudeApiKey),
+        // Policy-tier deny rules: a repo's .claude/settings.json (settingSources: ['project'], D11)
+        // can add permissions but cannot remove or override managed denies.
+        managedSettings: { permissions: { deny: [...MANAGED_DENY_RULES] } },
         pathToClaudeCodeExecutable: resolveClaudeBinaryPath(),
         abortController,
         hooks: {
           PreToolUse: [
             {
               hooks: [
-                async (hookInput): Promise<HookJSONOutput> => {
-                  const toolInput = hookInput as PreToolUseHookInput
-                  // Compare against the SAME resolved effectiveTools list passed to `tools`
-                  // above — not the raw block.allowedTools — so exploration mode's six-tool
-                  // ceiling isn't denied by a hook that only sees an empty raw list.
-                  if (!effectiveTools.includes(toolInput.tool_name)) {
-                    toolsDenied.add(toolInput.tool_name)
-                    return {
-                      continue: true,
-                      hookSpecificOutput: {
-                        hookEventName: 'PreToolUse',
-                        permissionDecision: 'deny',
-                        permissionDecisionReason: `Tool "${toolInput.tool_name}" is outside this block's resolved tool list.`,
-                      },
-                    }
-                  }
-                  // Recorded as "used" only once permitted past this check — never the
-                  // same array as denials, so Task 5's "restrict to these" suggestion can
-                  // never accidentally prefill a tool the block was blocked from using.
-                  toolsUsed.add(toolInput.tool_name)
-                  return { continue: true }
-                },
+                createToolPolicyHook({ worktree: workspacePath, effectiveTools, toolsUsed, toolsDenied, denials }),
               ],
             },
           ],
@@ -153,7 +174,7 @@ export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string):
     }
 
     if (resultError) {
-      return { status: 'failed', confidence: 0, summary: resultError, result: {}, errorMessage: resultError, toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied) }
+      return { status: 'failed', confidence: 0, summary: resultError, result: {}, errorMessage: resultError, toolsUsed: Array.from(toolsUsed), toolsDenied: deniedList(), denials }
     }
     if (resultText === undefined) {
       // When the timeout's (or an externally-relayed Stop's) AbortController fires
@@ -168,11 +189,11 @@ export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string):
         : timedOut
           ? `Agentic execution timed out after ${timeoutSeconds}s`
           : 'Agentic execution produced no result message'
-      return { status: 'failed', confidence: 0, summary: message, result: {}, errorMessage: message, toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied), timedOut: timedOut || undefined }
+      return { status: 'failed', confidence: 0, summary: message, result: {}, errorMessage: message, toolsUsed: Array.from(toolsUsed), toolsDenied: deniedList(), denials, timedOut: timedOut || undefined }
     }
 
-    const normalized = normalizeAgentOutput(resultText, outputMapping)
-    return { ...normalized, toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied) }
+    const normalized = normalizeAgentOutput(resultText, outputMapping, input.block.outputSchema)
+    return { ...normalized, toolsUsed: Array.from(toolsUsed), toolsDenied: deniedList(), denials }
   } catch (err) {
     const cancelled = externalSignal?.aborted === true
     const timedOut = !cancelled && abortController.signal.aborted
@@ -181,7 +202,7 @@ export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string):
       : timedOut
         ? `Agentic execution timed out after ${timeoutSeconds}s`
         : `Agentic execution failed: ${err instanceof Error ? err.message : String(err)}`
-    return { status: 'failed', confidence: 0, summary: message, result: {}, errorMessage: message, toolsUsed: Array.from(toolsUsed), toolsDenied: Array.from(toolsDenied), timedOut: timedOut || undefined }
+    return { status: 'failed', confidence: 0, summary: message, result: {}, errorMessage: message, toolsUsed: Array.from(toolsUsed), toolsDenied: deniedList(), denials, timedOut: timedOut || undefined }
   } finally {
     clearTimeout(timer)
     externalSignal?.removeEventListener('abort', onExternalAbort)

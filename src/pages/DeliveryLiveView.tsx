@@ -762,7 +762,7 @@ export default function DeliveryLiveView() {
 
   const handleClearWorkspace = async () => {
     const wsPath = localWorkspacePath ?? delivery?.workspacePath
-    if (!wsPath) return
+    if (!wsPath || !delivery) return
     if (displayStatus === 'Running' || displayStatus === 'Paused') {
       toast.error('Stop the delivery before clearing its workspace')
       return
@@ -772,7 +772,7 @@ export default function DeliveryLiveView() {
     )) return
     setIsClearingWorkspace(true)
     try {
-      const res = await window.axon.workspace.clear(wsPath)
+      const res = await window.axon.delivery.clearWorkspace(delivery.id)
       if (!res.success) {
         toast.error(res.error ? `Failed to clear workspace: ${res.error}` : 'Failed to clear workspace')
         return

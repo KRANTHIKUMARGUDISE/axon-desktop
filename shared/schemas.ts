@@ -145,6 +145,8 @@ export const AgentOutputSchema = z.object({
   recoverable: z.boolean().optional(),
   toolsUsed: z.array(z.string()).optional(),
   toolsDenied: z.array(z.string()).optional(),
+  // Human-readable reason per denied tool call (policy hook), e.g. "Write: path outside the delivery worktree".
+  denials: z.array(z.string()).optional(),
   timedOut: z.boolean().optional(),
   // DS1 — set by the engine when `result` is stored in {userData}/runs/{deliveryId}/.
   isTruncated: z.boolean().optional(),
@@ -276,3 +278,38 @@ export const SettingsSchema = z.object({
 })
 export type Settings = z.infer<typeof SettingsSchema>
 export type SettingsKey = keyof Settings
+
+// Renderer-writable settings: one validator per key (no generic "set anything" path).
+// gitTokenSuffix is deliberately absent — main derives it from the token itself.
+const AbsolutePath = z
+  .string()
+  .min(3)
+  .max(1024)
+  .refine((p) => /^([A-Za-z]:[\\/]|\/)/.test(p), 'must be an absolute path')
+  .refine((p) => !/^[\\/]{2}/.test(p), 'UNC/device paths are not allowed')
+  .refine((p) => !p.split(/[\\/]/).includes('..'), 'must not contain ..')
+  .refine((p) => !/^([A-Za-z]:)?[\\/]?$/.test(p), 'must not be a filesystem root')
+export const SETTING_VALIDATORS = {
+  workspaceRoot: z.union([z.literal(''), AbsolutePath]),
+  gitProvider: z.enum(['github', 'azure', 'azuredevops']),
+  theme: z.enum(['dark', 'light', 'system']),
+  setupComplete: z.boolean(),
+  userEmail: z.union([z.literal(''), z.string().max(254).email()]),
+  userName: z.string().max(100),
+  maxContextSnapshotSizeKb: z.number().int().min(1).max(10240),
+} as const
+export type WritableSettingKey = keyof typeof SETTING_VALIDATORS
+
+/** https-only URL whose host is on the allow-list (or any host when `hosts` is omitted). */
+export function parseHttpsUrl(value: unknown, hosts?: readonly string[]): URL | null {
+  if (typeof value !== 'string' || value.length > 2048) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'https:' || url.username || url.password) return null
+  if (hosts && !hosts.some((h) => url.hostname === h || url.hostname.endsWith(`.${h}`))) return null
+  return url
+}
