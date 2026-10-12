@@ -63,3 +63,4 @@ Ships? legend:
 _(each step appends below)_
 
 - **Step 1** — baseline recorded (this document).
+- **Step 2** — `npm audit fix` (no `--force`): `npm audit --omit=dev` 26 → **9** (2 critical, 7 high); full audit 47 → **28**. Remaining prod findings: `simple-git`/`@simple-git/argv-parser` (step 3) and the `shadcn` chain (`shadcn`, `@shadcn/registry`, `ts-morph`, `@ts-morph/common`, `fast-glob`, `micromatch`, `braces`; step 6). Checks: typecheck, 107 tests, build, `npm run build:win`, and `node scripts/smoke-packaged.js release/win-unpacked/AXON.exe` (packaged prod path: file:// load, prod CSP meta, no Node globals, IPC works, traversal/bad setting/`file:` openExternal rejected, `window.open` null, navigation to https blocked, no remote font requests, Claude binary unpacked).
