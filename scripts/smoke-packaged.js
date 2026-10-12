@@ -62,6 +62,8 @@ function ownerPid() {
     // Navigation guard: try to leave the app; the page must still be ours afterwards.
     await ev(`setTimeout(() => { location.href = 'https://example.com/' }, 0)`)
     await sleep(2500)
+    results.notificationPermission = await ev(`Notification.requestPermission().then(p => p)`)
+    results.geolocation = await ev(`new Promise((res) => navigator.geolocation.getCurrentPosition(() => res('GRANTED'), (e) => res('denied:' + e.code), { timeout: 3000 }))`)
     results.afterNavigate = await ev('location.protocol')
     results.fontReq = await ev(`JSON.stringify(performance.getEntriesByType('resource').map(r => r.name).filter(n => /googleapis|gstatic|^http/.test(n)))`)
     results.consoleProblems = consoleMsgs.filter((m) => /Content Security Policy|Refused|violat/i.test(m)).slice(0, 3)

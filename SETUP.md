@@ -6,11 +6,13 @@ Install these before anything else.
 
 | Tool | Version | Download |
 |------|---------|----------|
-| Node.js | 20 or 22 (NOT 24 — see note) | https://nodejs.org |
+| Node.js | 22.12+ (22 LTS or 24) | https://nodejs.org |
 | npm | comes with Node | — |
 | Git | any recent | https://git-scm.com |
 
-> **Node 24 note:** Electron 31 has a known binary download issue when installed via npm on Node 24. Use Node 20 LTS or Node 22 LTS to avoid it.
+> **Node note:** Electron 44's npm package needs Node ≥ 22.12 (Node 20 no longer works). Node 24 is fine — the old Electron 31 / Node 24 download problem is gone.
+>
+> **Install-script gate:** `package.json` → `allowScripts` is keyed by exact version (`electron@44.7.0`). When you bump Electron, update that key too, otherwise npm skips Electron's postinstall and the binary silently isn't downloaded (run `node node_modules/electron/install.js` to fix).
 
 ---
 
@@ -36,7 +38,7 @@ This installs all packages. The Electron binary (~105 MB) downloads automaticall
 ```bash
 # Download the binary zip
 curl -L -o electron-win32.zip \
-  https://github.com/electron/electron/releases/download/v31.7.7/electron-v31.7.7-win32-x64.zip
+  https://github.com/electron/electron/releases/download/v44.7.0/electron-v44.7.0-win32-x64.zip
 
 # Extract and register it (run in project root)
 node -e "

@@ -142,7 +142,7 @@ window.axon.window.setTitle(title)
 
 - **`electron-store` is pinned to `8.1.0`** — v8.2+ is ESM-only and breaks CommonJS Electron main. Do not upgrade.
 - **`electron-keytar` is not used** — it was removed from npm. Auth uses Electron's built-in `safeStorage` API instead.
-- **Node 20 or 22 only** — Electron 31's binary postinstall script silently fails on Node 24. The binary must be manually extracted if it fails (see SETUP.md).
+- **Node ≥ 22.12 (22 or 24)** — required by Electron 44's npm package. `package.json` `allowScripts` is keyed by exact Electron version (`electron@44.7.0`): bump it together with Electron or the binary postinstall is skipped silently (fix: `node node_modules/electron/install.js`; see SETUP.md).
 - **CSP is relaxed in dev** (`unsafe-inline`, `unsafe-eval`) — this is intentional for Vite HMR. Production uses a strict policy.
 - **`index.html` has a React refresh preamble script** — required by `@vitejs/plugin-react` when loading from Electron (not a browser). Do not remove it.
 
