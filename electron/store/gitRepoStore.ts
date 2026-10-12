@@ -48,7 +48,9 @@ export class GitRepoStore implements Store {
       const doc = await this.local.getLocal(kind, id)
       if (!doc || doc.scope !== 'Personal' || (doc as Block).immutable) return []
       // Pre-registry documents have no owner yet; the registry copy always carries it.
-      const owned = { ...doc, owner: doc.owner || this.deps.getEmail() }
+      // Personal docs are always owned by the current verified identity in the registry copy (also restamps docs
+      // created under an earlier, unverified identity).
+      const owned = { ...doc, owner: this.deps.getEmail() }
       return kind === 'block' ? blockOps(root, owned as Block) : pipelineOps(root, owned as Pipeline)
     })
   }
@@ -76,7 +78,7 @@ export class GitRepoStore implements Store {
       for (const doc of docs) {
         if (doc.scope !== 'Personal' || (doc as Block).immutable || (doc as Block).sourceType === 'Axon') continue
         for (const v of await this.local.localPublishedVersions(kind, doc.id)) {
-          if (v.version !== doc.version) await this.mirrorDoc(kind, { ...v, owner: v.owner || email })
+          if (v.version !== doc.version) await this.mirrorDoc(kind, { ...v, owner: email })
         }
         await this.mirrorCurrent(kind, doc.id)
         n++

@@ -19,6 +19,15 @@ export interface IdentityInfo {
   machineName: string
 }
 
+export interface JiraStatusInfo {
+  configured: boolean
+  site: string
+  email: string
+  displayName: string
+  verifiedAt: string | null
+  hasToken: boolean
+}
+
 export interface ConnectionTest {
   ok: boolean
   canRead: boolean
@@ -58,6 +67,15 @@ export interface AxonBridge {
     verifyJira(site: string, email: string, token: string): Promise<{ ok: boolean; email?: string; displayName?: string; error?: string }>
     verifyGithub(token: string): Promise<{ ok: boolean; login?: string; error?: string }>
     complete(input: { registryUrl: string; registryBranch: string; team: string; activityConsent: boolean }): Promise<{ success: boolean }>
+  }
+  jira: {
+    status(): Promise<JiraStatusInfo>
+    replaceToken(token: string): Promise<{ ok: boolean; error?: string }>
+    test(): Promise<{ ok: boolean; error?: string; verifiedAt?: string }>
+    /** Verifies a new account/site and holds it in main; nothing is saved until commitChange(). */
+    stageChange(site: string, email: string, token: string): Promise<{ ok: boolean; error?: string; email?: string; displayName?: string; site?: string; identityChanges?: boolean }>
+    commitChange(): Promise<{ success: boolean; identityChanged: boolean; email: string }>
+    cancelChange(): Promise<void>
   }
   registry: {
     status(): Promise<RegistryStatus>

@@ -27,6 +27,7 @@ const store = new Store<StoredSettings>({
     registryBranch: { type: 'string', default: '' },
     syncIntervalMinutes: { type: 'number', default: 5 },
     jiraSite: { type: 'string', default: '' },
+    jiraVerifiedAt: { type: 'string', default: '' },
     team: { type: 'string', default: '' },
     activityConsent: { type: 'boolean', default: false },
   },
@@ -59,11 +60,31 @@ export function getDS1ThresholdBytes(): number {
 }
 
 /** Main-side only: written by onboarding after the Jira identity check — never from the renderer. */
-export function setVerifiedIdentity(v: { userEmail: string; userName: string; jiraSite: string; setupComplete: boolean }): void {
+export function setVerifiedIdentity(v: { userEmail: string; userName: string; jiraSite: string; jiraVerifiedAt: string; setupComplete: boolean }): void {
   store.set('userEmail', v.userEmail.trim().toLowerCase())
   store.set('userName', v.userName.slice(0, 200))
   store.set('jiraSite', v.jiraSite)
+  store.set('jiraVerifiedAt', v.jiraVerifiedAt)
   store.set('setupComplete', v.setupComplete)
+}
+
+/**
+ * Onboarded = a Jira-verified identity (email + Jira site) was stored by `onboarding:complete`. Profiles left over from
+ * before S3 (setupComplete + a free-typed email, no Jira site) are therefore sent through onboarding again.
+ */
+export function isOnboarded(): boolean {
+  return store.get('setupComplete') === true && !!store.get('userEmail') && !!store.get('jiraSite')
+}
+
+export function setJiraVerifiedAt(iso: string): void {
+  store.set('jiraVerifiedAt', iso)
+}
+
+export function readJiraIdentity(): { email: string; displayName: string; site: string; verifiedAt: string } | null {
+  const email = store.get('userEmail') || ''
+  const site = store.get('jiraSite') || ''
+  if (!email || !site) return null
+  return { email, displayName: store.get('userName') || '', site, verifiedAt: store.get('jiraVerifiedAt') || '' }
 }
 
 export function readIdentitySettings(): { userEmail: string; userName: string; team: string } {
@@ -75,7 +96,7 @@ export function setGitTokenSuffix(suffix: string): void {
   store.set('gitTokenSuffix', suffix)
 }
 
-const READABLE = new Set<string>([...Object.keys(SETTING_VALIDATORS), 'gitTokenSuffix', 'setupComplete', 'userEmail', 'userName', 'jiraSite'])
+const READABLE = new Set<string>([...Object.keys(SETTING_VALIDATORS), 'gitTokenSuffix', 'setupComplete', 'userEmail', 'userName', 'jiraSite', 'jiraVerifiedAt'])
 
 // Typed per-key setter: dispatches to the key's own validator, so a value of the wrong
 // type/shape (e.g. a non-path workspaceRoot) is rejected here rather than persisted.

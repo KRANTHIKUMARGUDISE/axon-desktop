@@ -4,7 +4,7 @@ import fs from 'fs/promises'
 import { atomicWrite } from './store/atomic'
 import { pathToFileURL } from 'url'
 import { registerSecretHandlers, getGitToken, purgeLegacyAuthFiles } from './ipc/secrets'
-import { registerSettingsHandlers, getWorkspaceRoot, getDS1ThresholdBytes, store as settingsStore, readIdentitySettings } from './ipc/settings'
+import { registerSettingsHandlers, getWorkspaceRoot, getDS1ThresholdBytes, store as settingsStore, readIdentitySettings, isOnboarded } from './ipc/settings'
 import { registerWorkspaceHandlers, createGrants } from './ipc/workspace'
 import { registerShellHandlers } from './ipc/shell'
 import { configureTrustedSender, makeTrustedUrlCheck } from './ipc/guard'
@@ -158,7 +158,7 @@ app.whenReady().then(async () => {
     }, registryDefaults),
     getUser: () => {
       const id = identity.get()
-      return id && settingsStore.get('setupComplete') === true ? { email: id.email, name: id.displayName } : null
+      return id && isOnboarded() ? { email: id.email, name: id.displayName } : null
     },
     makeGit: gitFactory,
     validateUrl: validateRepoUrl,
@@ -242,7 +242,7 @@ app.whenReady().then(async () => {
     })().catch((err) => log.warn('[registry] backfill failed', err))
     sync.start()
   }
-  registerRegistryHandlers({ service, store, identity, defaults: registryDefaults, makeGit: gitFactory, onOnboarded: () => startRegistry(true) })
+  registerRegistryHandlers({ service, store, identity, defaults: registryDefaults, makeGit: gitFactory, onOnboarded: () => startRegistry(true), onIdentityChanged: () => startRegistry(true) })
   // A whitelisted run summary (never output/context) is queued for the registry when a delivery ends.
   bus.subscribe((event) => {
     if (event.type !== 'completed' && event.type !== 'failed' && event.type !== 'cancelled') return
@@ -250,7 +250,7 @@ app.whenReady().then(async () => {
       .then((d) => (d ? service.recordRun(d) : undefined))
       .catch((err) => log.warn('[registry] run summary failed', err))
   })
-  if (identity.get() && settingsStore.get('setupComplete') === true) startRegistry()
+  if (identity.get() && isOnboarded()) startRegistry()
   // A delivery left Running by a crash/kill has no active run — make it resumable.
   await engine.reconcileOnBoot()
 

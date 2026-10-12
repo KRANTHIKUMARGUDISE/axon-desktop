@@ -22,6 +22,14 @@ contextBridge.exposeInMainWorld('axon', {
     verifyGithub: (token: string) => ipcRenderer.invoke('onboarding:verifyGithub', token),
     complete: (input: unknown) => ipcRenderer.invoke('onboarding:complete', input),
   },
+  jira: {
+    status: () => ipcRenderer.invoke('jira:status'),
+    replaceToken: (token: string) => ipcRenderer.invoke('jira:replaceToken', token),
+    test: () => ipcRenderer.invoke('jira:test'),
+    stageChange: (site: string, email: string, token: string) => ipcRenderer.invoke('jira:stageChange', site, email, token),
+    commitChange: () => ipcRenderer.invoke('jira:commitChange'),
+    cancelChange: () => ipcRenderer.invoke('jira:cancelChange'),
+  },
   registry: {
     status: () => ipcRenderer.invoke('registry:status'),
     syncNow: () => ipcRenderer.invoke('registry:syncNow'),

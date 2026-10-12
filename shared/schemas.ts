@@ -315,6 +315,7 @@ export const SettingsSchema = z.object({
   registryBranch: z.string().default(''),
   syncIntervalMinutes: z.number().default(5),
   jiraSite: z.string().default(''),
+  jiraVerifiedAt: z.string().default(''),
   team: z.string().default(''),
   activityConsent: z.boolean().default(false),
 })

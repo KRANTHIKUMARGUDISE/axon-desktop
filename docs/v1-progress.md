@@ -107,6 +107,12 @@ Branch `chore/v1-s2b-dependency-hardening`, one commit per step. Full record in 
 - No manual click-through of the new React screens beyond the Welcome step; visual pass recommended (onboarding steps, Settings → Registry, VersionDialog, banner).
 - Nothing committed — the work is in the working tree for review.
 
+### Session 3 follow-up — Settings rework + Jira section (2026-10-13)
+- **Settings rebuilt with shadcn only** (Tabs, Card, Dialog, Alert, Select, Input, Label, Badge, Separator; new `ui/label|alert|separator`): tabs Accounts / Registry / Workspace / Preferences / About, one card per concern with a consistent header (title, description, status badge), labelled fields in a grid, and right-aligned footer actions (fixes the misaligned "Save registry settings"). Saves report through toasts. Azure DevOps removed from Git settings (GitHub only); the dead "Documentation/Feedback" links and the hard-coded "AXON 1.0.0" are gone (About reads `system:getInfo`).
+- **Settings → Jira**: read-only site + verified email + last verified; Replace API token (must resolve to the registered email, else rejected and old token kept); Test connection; Change Jira account or site (stage → explicit confirmation → commit; never edits the email in place; a different email = new identity/folder). Site validated as https + `*.atlassian.net`. Logic in `registry/jiraAccount.ts` (20 tests: token replace with matching email, mismatched email → rejected + old token kept, invalid sites rejected without calling Jira, change-account staging/commit/cancel).
+- **Onboarding gate fixed**: "onboarded" now requires a Jira-verified identity (email + Jira site + setup flag), so profiles left over from pre-S3 builds (free-typed `admin@axon.local`, no Jira) are sent through onboarding again. Registry copies of personal docs are always owned by the current verified email. Jira tokens are persisted only when onboarding completes / a change is confirmed.
+- **Incident (mine)**: while taking Settings screenshots I launched the app with a throw-away profile whose identity was `dev@example.com`, and the app pushed `users/dev@example.com/{profile.yaml,activity.log}` (commit 47fa32c) to the real registry using ambient git credentials. Needs removing (revert commit); future UI test runs must point `registryUrl` at something unreachable.
+
 ### Known issues for Session 4
 - The pipeline editor drops `blockVersion` pins when saving a Draft. Drafts must keep their pins, with an explicit "Update block versions" action instead of re-applying the pins at publish time.
 

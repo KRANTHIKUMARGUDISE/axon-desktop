@@ -1,9 +1,9 @@
 import { z } from 'zod'
-import { JiraSiteSchema, SETTING_VALIDATORS } from '../../shared'
+import { SETTING_VALIDATORS } from '../../shared'
 import type { RegistryStatus } from '../../shared'
 import { handle } from './guard'
-import { applySetting, setVerifiedIdentity, store as settingsStore } from './settings'
-import { writeSecure, SECRET_KEYS } from './secrets'
+import { applySetting, setVerifiedIdentity, setJiraVerifiedAt, readJiraIdentity, isOnboarded, store as settingsStore } from './settings'
+import { writeSecure, getJiraToken, SECRET_KEYS } from './secrets'
 import { setGitTokenSuffix } from './settings'
 import { registerSecret, log } from '../log'
 import type { IdentityProvider } from '../identity'
@@ -11,7 +11,8 @@ import type { RegistryService } from '../registry/service'
 import type { RegistryDefaults } from '../registry/config'
 import { testRegistryConnection } from '../registry/sync'
 import type { GitFactory } from '../registry/sync'
-import { verifyJiraIdentity, verifyGithubToken } from '../registry/onboarding'
+import { verifyGithubToken } from '../registry/onboarding'
+import { JiraAccount } from '../registry/jiraAccount'
 import type { Store } from '../store/types'
 import { validateRepoUrl } from '../security/gitAuth'
 
@@ -31,14 +32,26 @@ export interface RegistryIpcDeps {
   makeGit: GitFactory
   /** Starts the sync scheduler and records the launch once onboarding finishes. */
   onOnboarded: () => void
+  /** The verified Jira email changed (Settings → Jira → change account): re-point sync, profile and backfill at the new folder. */
+  onIdentityChanged: () => void
 }
 
 // Registry, identity, onboarding and versioning channels. Everything that proves identity (Jira
 // /myself) or writes secrets happens here in main; the renderer only sees ok/error results.
 export function registerRegistryHandlers(deps: RegistryIpcDeps): void {
   const { service, store, identity, defaults } = deps
-  // Set by a successful Jira check; consumed by onboarding:complete. Never leaves main.
-  let verified: { email: string; displayName: string; site: string } | null = null
+  // The Jira account is the AXON identity. All changes to it (token, account, site) go through JiraAccount: a new
+  // account is verified and held in memory, and only persisted (token + identity together) on commit.
+  const jira = new JiraAccount({
+    getIdentity: readJiraIdentity,
+    readToken: getJiraToken,
+    writeToken: async (token) => {
+      await writeSecure(SECRET_KEYS.jiraToken, token)
+      registerSecret(token)
+    },
+    saveIdentity: (r) => setVerifiedIdentity({ userEmail: r.email, userName: r.displayName, jiraSite: r.site, jiraVerifiedAt: r.verifiedAt, setupComplete: true }),
+    markVerified: setJiraVerifiedAt,
+  })
 
   const effective = () => ({
     url: (settingsStore.get('registryUrl') as string) || defaults.url,
@@ -49,7 +62,7 @@ export function registerRegistryHandlers(deps: RegistryIpcDeps): void {
   handle('identity:get', z.tuple([]), () => {
     const id = identity.get()
     return {
-      onboarded: !!id && settingsStore.get('setupComplete') === true,
+      onboarded: !!id && isOnboarded(),
       email: id?.email ?? '', displayName: id?.displayName ?? '', team: id?.team ?? '', machineName: id?.machineName ?? '',
     }
   })
@@ -61,13 +74,8 @@ export function registerRegistryHandlers(deps: RegistryIpcDeps): void {
     testRegistryConnection(deps.makeGit, url.trim() || effective().url, branch.trim() || effective().branch, validateRepoUrl))
 
   handle('onboarding:verifyJira', z.tuple([z.string().max(200), z.string().max(254), z.string().max(1024)]), async ([site, email, token]) => {
-    const res = await verifyJiraIdentity({ site, email, token })
-    if (!res.ok) return { ok: false, error: res.error }
-    await writeSecure(SECRET_KEYS.jiraToken, token.trim())
-    registerSecret(token.trim())
-    const host = JiraSiteSchema.parse(site.trim().toLowerCase().replace(/^https:\/\//, '').replace(/\/+$/, ''))
-    verified = { email: res.email as string, displayName: res.displayName ?? '', site: host }
-    return { ok: true, email: res.email, displayName: res.displayName }
+    const res = await jira.stage(site, email, token)
+    return res.ok ? { ok: true, email: res.email, displayName: res.displayName } : { ok: false, error: res.error }
   })
 
   handle('onboarding:verifyGithub', z.tuple([z.string().max(1024)]), async ([token]) => {
@@ -86,8 +94,7 @@ export function registerRegistryHandlers(deps: RegistryIpcDeps): void {
       team: z.string().max(60).default(''), activityConsent: z.boolean(),
     })]),
     async ([input]) => {
-      const current = identity.get()
-      if (!verified && !current) throw new Error('Verify your Jira account first')
+      if (!jira.hasStaged()) throw new Error('Verify your Jira account first')
       if (!input.activityConsent) throw new Error('Please accept the activity log notice to continue')
       // Validate through the same per-key validators the Settings screen uses.
       SETTING_VALIDATORS.registryUrl.parse(input.registryUrl)
@@ -97,18 +104,25 @@ export function registerRegistryHandlers(deps: RegistryIpcDeps): void {
       applySetting('registryBranch', input.registryBranch)
       applySetting('team', input.team)
       applySetting('activityConsent', true)
-      setVerifiedIdentity({
-        userEmail: verified?.email ?? current!.email,
-        userName: verified?.displayName ?? current!.displayName,
-        jiraSite: verified?.site ?? ((settingsStore.get('jiraSite') as string) || ''),
-        setupComplete: true,
-      })
-      verified = null
+      await jira.commit()
       log.info('[onboarding] complete')
       deps.onOnboarded()
       return { success: true }
     },
   )
+
+  // ---- Settings → Jira (read-only identity, token replacement, connection test, change account)
+  handle('jira:status', z.tuple([]), () => jira.status())
+  handle('jira:replaceToken', z.tuple([z.string().max(1024)]), ([token]) => jira.replaceToken(token))
+  handle('jira:test', z.tuple([]), () => jira.test())
+  handle('jira:stageChange', z.tuple([z.string().max(200), z.string().max(254), z.string().max(1024)]), ([site, email, token]) => jira.stage(site, email, token))
+  handle('jira:cancelChange', z.tuple([]), () => jira.cancel())
+  handle('jira:commitChange', z.tuple([]), async () => {
+    const res = await jira.commit()
+    log.info(`[jira] account changed (identityChanged=${res.identityChanged})`)
+    if (res.identityChanged) deps.onIdentityChanged()
+    return { success: true, identityChanged: res.identityChanged, email: res.email }
+  })
 
   // ---- sync
   handle('registry:status', z.tuple([]), (): RegistryStatus => service.status())
