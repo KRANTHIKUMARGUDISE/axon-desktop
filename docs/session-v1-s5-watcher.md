@@ -65,8 +65,12 @@ maturity questions (trigger, interventions, gates, failures).
     - Agent — an agent step failed, produced invalid output, or the output was rejected at a gate.
     - Platform — AXON/infrastructure error (git, network, crash).
     Shown in Live View, the Jira failure comment and the run summary.
-15. **Rerun link (Q9):** `rerunOf`, `rerunReason: RequirementUpdated | AgentUpdated |
-    PlatformRetry | Other`; manual reruns pick a reason in the UI.
+15. **Rerun link (Q9):** already built in Session 4b (Resume vs Rerun, Superseded, attempt
+    numbers, story chains). Session 5 only adds: a watcher-triggered rerun (ready label re-added)
+    uses the same Rerun path with reason `RequirementUpdated`.
+15b. **Automatic retry for Platform failures only:** git push/fetch, Jira/GitHub HTTP and
+    network errors are retried up to 2 times with backoff inside the same step before the step
+    fails. Agent and Requirement failures never auto-retry. Each retry is logged on the step.
 16. **Interventions (Q13), defined as:**
     - Not an intervention: the trigger (ready label or manual start of a watcher-eligible
       ticket is still recorded as `trigger`), and approving a gate unchanged.

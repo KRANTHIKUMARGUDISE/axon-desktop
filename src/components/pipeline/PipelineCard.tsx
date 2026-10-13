@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { toast } from 'sonner'
 import { getBlockTypeIcon } from '../../utils/blockTypeIcons'
+import { readGateConfig } from '@shared'
 import type { Pipeline, PipelineNode, BlockType } from '../../types'
 import { ScopeBadge, StatusBadge } from '../registry/ScopeBadge'
 
@@ -130,6 +131,30 @@ function MiniFlowPreview({ nodes, edges, blockMap }: { nodes: Pipeline['nodes'];
   )
 }
 
+// Lists the Human Gate nodes of a pipeline with the reason each one gives for needing a person.
+function HumanDecisions({ pipeline, blockTypeMap }: { pipeline: Pipeline; blockTypeMap?: Map<string, string> }) {
+  const gates = (pipeline.nodes ?? []).filter((n) => blockTypeMap?.get(n.blockId) === 'Control')
+  if (gates.length === 0) return null
+  return (
+    <details data-testid="human-decisions" style={{ fontSize: 11, color: 'var(--axon-t2)' }}>
+      <summary style={{ cursor: 'pointer', color: 'var(--axon-t3)', fontWeight: 600 }}>
+        Human decisions in this pipeline ({gates.length})
+      </summary>
+      <ul style={{ margin: '6px 0 0', paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {gates.map((n) => {
+          const cfg = readGateConfig(n.config)
+          return (
+            <li key={n.id}>
+              <strong>{n.label ?? n.name ?? n.id}</strong>
+              {cfg.mode === 'NotifyOnly' ? ' (notify only)' : ''}: {cfg.reason || <em style={{ color: '#f87171' }}>no reason given</em>}
+            </li>
+          )
+        })}
+      </ul>
+    </details>
+  )
+}
+
 function relativeDate(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
   const minutes = Math.floor(diff / 60000)
@@ -250,6 +275,9 @@ export default function PipelineCard({ pipeline, blockTypeMap, onRun, onEdit, on
 
       {/* Mini flow preview */}
       <MiniFlowPreview nodes={pipeline.nodes ?? []} edges={pipeline.edges ?? []} blockMap={blockTypeMap} />
+
+      {/* S5 (Q15): every place a person decides, and why */}
+      <HumanDecisions pipeline={pipeline} blockTypeMap={blockTypeMap} />
 
       {/* Stats */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>

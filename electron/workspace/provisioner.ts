@@ -108,7 +108,8 @@ export interface ProvisionInput {
   deliveryId: string
   ticketId: string
   username: string
-  repositories: { url: string; branch?: string }[]
+  /** `branch` = base branch (default: the repo's default branch). `checkout` (S5b) = an existing branch (e.g. a PR branch found by Find PRs) to work on instead of a new delivery branch. */
+  repositories: { url: string; branch?: string; checkout?: string }[]
 }
 
 export async function provisionWorkspace(deps: ProvisionDeps, input: ProvisionInput): Promise<{ workspacePath: string; provisionedRepos: ProvisionedRepo[] }> {
@@ -121,10 +122,17 @@ export async function provisionWorkspace(deps: ProvisionDeps, input: ProvisionIn
   const resolved = input.repositories.map((r) => {
     const hit = findCatalogRepo(deps.catalog, r.url)
     if (!hit) throw new Error(`Repository ${r.url} is not in the catalog (catalog/repositories.yaml)`)
-    return { repo: hit, branch: r.branch }
+    return { repo: hit, branch: r.branch, checkout: r.checkout }
   })
-  const seen = new Set<string>()
-  const unique = resolved.filter((r) => (seen.has(r.repo.name) ? false : (seen.add(r.repo.name), true)))
+  const seen = new Map<string, string | undefined>()
+  const unique = resolved.filter((r) => {
+    if (seen.has(r.repo.name)) {
+      if (seen.get(r.repo.name) !== r.checkout) throw new Error(`Repository ${r.repo.name} is requested on two different branches (${seen.get(r.repo.name) ?? 'new branch'} and ${r.checkout ?? 'new branch'}); one delivery uses one branch per repository`)
+      return false
+    }
+    seen.set(r.repo.name, r.checkout)
+    return true
+  })
 
   const root = path.resolve(deps.workspaceRoot)
   const workspacePath = deliveryRoot(root, input.deliveryId)
@@ -133,8 +141,9 @@ export async function provisionWorkspace(deps: ProvisionDeps, input: ProvisionIn
 
   const branch = deliveryBranchName(input.deliveryId, input.ticketId, input.username)
   const out: ProvisionedRepo[] = []
-  for (const { repo, branch: wanted } of unique) {
+  for (const { repo, branch: wanted, checkout } of unique) {
     const { mirrorPath, defaultBranch } = await ensureMirror(deps, repo)
+    const workBranch = checkout ?? branch
     const baseBranch = wanted || defaultBranch
     const worktreePath = path.join(workspacePath, safeSegment(repo.name))
     // git itself refuses a git dir longer than PATH_MAX-40 on Windows, even with core.longpaths.
@@ -144,22 +153,32 @@ export async function provisionWorkspace(deps: ProvisionDeps, input: ProvisionIn
     if (!(await exists(path.join(worktreePath, '.git')))) {
       await mirrorLocks.run(mirrorPath, async () => {
         const mirror = await deps.makeGit(mirrorPath)
-        const hasBranch = (await mirror.raw(['branch', '--list', branch])).trim().length > 0
+        const hasBranch = (await mirror.raw(['branch', '--list', workBranch])).trim().length > 0
         const base = `refs/remotes/origin/${baseBranch}`
         try {
-          await mirror.raw(['rev-parse', '--verify', '--quiet', base])
+          await mirror.raw(['rev-parse', '--verify', `${base}^{commit}`])
         } catch {
           throw new Error(`Branch "${baseBranch}" does not exist in ${repo.name}`)
         }
+        // An existing branch (Find PRs) starts from its remote tip; a delivery branch starts from the base.
+        let start = base
+        if (checkout) {
+          start = `refs/remotes/origin/${checkout}`
+          try {
+            await mirror.raw(['rev-parse', '--verify', `${start}^{commit}`])
+          } catch {
+            throw new Error(`Branch "${checkout}" does not exist in ${repo.name}`)
+          }
+        }
         await mirror.raw([
           ...LONGPATHS, 'worktree', 'add',
-          ...(hasBranch ? [worktreePath, branch] : ['-b', branch, worktreePath, base]),
+          ...(hasBranch ? [worktreePath, workBranch] : ['-b', workBranch, worktreePath, start]),
         ])
       })
       const wt = await deps.makeGit(worktreePath)
       await wt.raw(['config', 'core.longpaths', 'true'])
     }
-    out.push({ name: repo.name, url: repo.url, branch, baseBranch, worktreePath })
+    out.push({ name: repo.name, url: repo.url, branch: workBranch, baseBranch, worktreePath })
   }
   return { workspacePath, provisionedRepos: out }
 }

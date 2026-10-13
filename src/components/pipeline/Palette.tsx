@@ -10,8 +10,12 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip'
+import { ACTION_ARTIFACTS } from '@shared'
 
-const TYPE_ORDER: BlockType[] = ['IO', 'Decision', 'Execution', 'Knowledge', 'Control', 'Utility']
+// S5b: the native action blocks (Jira Update, PR Update, Find PRs) get their own "Actions" group; they are IO blocks otherwise.
+const ACTIONS = 'Actions'
+const TYPE_ORDER: string[] = [ACTIONS, 'IO', 'Decision', 'Execution', 'Knowledge', 'Control', 'Utility']
+const isAction = (b: BuildingBlock) => ACTION_ARTIFACTS.includes(b.artifactName ?? '')
 
 interface Props {
   blocks: BuildingBlock[]
@@ -57,6 +61,8 @@ function BlockDetailsPopover({ block }: { block: BuildingBlock }) {
 
 export default function Palette({ blocks }: Props) {
   const [search, setSearch] = useState('')
+  // Which blocks to list: everything, only the ones shipped with AXON, or only the engineer's own (Local / Marketplace / CDF).
+  const [source, setSource] = useState<'all' | 'axon' | 'custom'>('all')
   const [expandedTypes, setExpandedTypes] = useState<Record<string, boolean>>(() => {
     const initial: Record<string, boolean> = {}
     TYPE_ORDER.forEach(t => { initial[t] = true })
@@ -68,11 +74,14 @@ export default function Palette({ blocks }: Props) {
   }
 
   const filtered = blocks.filter(b =>
-    !search || b.name.toLowerCase().includes(search.toLowerCase())
+    (!search || b.name.toLowerCase().includes(search.toLowerCase()))
+    && (source === 'all' || (source === 'axon' ? b.sourceType === 'Axon' : b.sourceType !== 'Axon'))
   )
 
+  const showFlow = (source === 'all' || source === 'axon') && (!search || 'foreach flow'.includes(search.toLowerCase()))
+
   const grouped = TYPE_ORDER.reduce<Record<string, BuildingBlock[]>>((acc, t) => {
-    const items = filtered.filter(b => b.role === t)
+    const items = filtered.filter(b => (t === ACTIONS ? isAction(b) : b.role === t && !isAction(b)))
     if (items.length) acc[t] = items
     return acc
   }, {})
@@ -86,12 +95,26 @@ export default function Palette({ blocks }: Props) {
           placeholder="Search blocks…"
           className="w-full px-2 py-1 text-xs bg-slate-800 border border-slate-700 rounded text-slate-200 placeholder-slate-500 outline-none"
         />
+        <div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-slate-800 p-0.5" role="tablist" aria-label="Block source" data-testid="block-source-filter">
+          {([['all', 'All'], ['axon', 'AXON'], ['custom', 'Mine']] as const).map(([value, label]) => (
+            <button
+              key={value}
+              role="tab"
+              aria-selected={source === value}
+              onClick={() => setSource(value)}
+              title={value === 'axon' ? 'Blocks that ship with AXON' : value === 'custom' ? 'Blocks you or your team created' : 'All blocks'}
+              className={`rounded px-2 py-1 text-xs transition-colors ${source === value ? 'bg-slate-600 text-slate-100' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        {/* Flow: structural pipeline nodes, deliberately not Building Blocks (D14) */}
-        <div className="px-3 pt-2 pb-1 text-xs font-bold uppercase tracking-wider text-slate-500">Flow</div>
-        <div
+        {/* Flow: structural pipeline nodes (D14). They ship with AXON, so they follow the AXON / Mine filter and the search. */}
+        {showFlow && <div className="px-3 pt-2 pb-1 text-xs font-bold uppercase tracking-wider text-slate-500">Flow</div>}
+        {showFlow && <div
           draggable
           onDragStart={e => {
             e.dataTransfer.setData('flowType', 'forEach')
@@ -105,19 +128,14 @@ export default function Palette({ blocks }: Props) {
             <div className="text-xs font-semibold text-slate-200">ForEach</div>
             <div className="text-xs text-slate-500 truncate">Run its blocks once per work item</div>
           </div>
-        </div>
+        </div>}
         {Object.entries(grouped).map(([type, items]) => (
           <div key={type}>
             {/* Type header */}
             <button
               onClick={() => toggleTypeExpanded(type)}
-              className="w-full flex items-center gap-2 px-3 py-2 border-none bg-transparent cursor-pointer font-inherit hover:bg-slate-800 transition-colors"
+              className="w-full flex items-center gap-2 px-3 py-1.5 border-none bg-transparent cursor-pointer font-inherit hover:bg-slate-800 transition-colors"
             >
-              <img
-                src={getBlockTypeIcon(type as BlockType)}
-                alt={type}
-                className="size-4 rounded flex-shrink-0"
-              />
               <span className="text-xs font-bold uppercase tracking-wider text-slate-500 flex-1 text-left">
                 {type}
               </span>
@@ -142,17 +160,20 @@ export default function Palette({ blocks }: Props) {
                   }}
                   className="flex items-stretch gap-2 px-3 py-2 ml-6 cursor-grab rounded hover:bg-slate-800 transition-colors"
                 >
-                  {/* Runtime icon — spans both lines */}
+                  {/* Same look as the node on the canvas: the role icon, with the runtime as a small badge in the corner */}
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <img
-                        src={getRuntimeIcon(blockRuntime)}
-                        alt={RUNTIME_LABELS[blockRuntime]}
-                        className="w-8 h-8 rounded flex-shrink-0"
-                      />
+                      <span className="relative h-8 w-8 flex-shrink-0">
+                        <img src={getBlockTypeIcon(block.role as BlockType)} alt={block.role} className="h-8 w-8 rounded" />
+                        <img
+                          src={getRuntimeIcon(blockRuntime)}
+                          alt={RUNTIME_LABELS[blockRuntime]}
+                          className="absolute -right-1 -top-1 size-3.5 rounded-sm ring-1 ring-slate-900"
+                        />
+                      </span>
                     </TooltipTrigger>
                     <TooltipContent side="right" className="text-xs bg-slate-950 border border-slate-700 text-slate-100">
-                      {RUNTIME_LABELS[blockRuntime]}
+                      {block.role} block · runs on {RUNTIME_LABELS[blockRuntime]}
                     </TooltipContent>
                   </Tooltip>
 

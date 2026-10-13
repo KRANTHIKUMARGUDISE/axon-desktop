@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { SCHEMA_VERSION, ScopeSchema, DeliveryStatusSchema } from './schemas'
+import { SCHEMA_VERSION, ScopeSchema, DeliveryStatusSchema, TriggerSchema, FailureCategorySchema } from './schemas'
 
 // File schemas for the axon-registry repo (D9). Every document carries id, schemaVersion, scope
 // and owner so a later DB import is a straight folder -> collection load.
@@ -27,8 +27,42 @@ export const ProfileSchema = z.object({
   displayName: z.string().max(200).default(''),
   team: z.string().max(60).default(''),
   machines: z.array(MachineSchema).default([]),
+  // D10: the one machine whose watcher polls Jira. Heartbeat rides the registry sync; takeover is manual.
+  activeMachine: z.object({ id: z.string().min(1), heartbeatAt: z.string() }).optional(),
+  // S5b: master switch. Paused = no rule polls on any machine; separate from which machine is active.
+  pausedAll: z.boolean().default(false),
+  pausedAt: z.string().optional(),
 })
 export type Profile = z.infer<typeof ProfileSchema>
+
+// users/{email}/rules/{id}.yaml — a Jira watcher rule (S5).
+export const DeliveryRuleSchema = z.object({
+  id: z.string().min(1),
+  schemaVersion: z.number().int().default(SCHEMA_VERSION),
+  scope: ScopeSchema.default('Personal'),
+  owner: z.string().min(1),
+  name: z.string().min(1).max(100),
+  // S5b: what starts the rule. Only 'jira' exists in v1; a future GitHub PR source is additive.
+  source: z.literal('jira').default('jira'),
+  enabled: z.boolean().default(false),
+  jiraProjectKey: z.string().regex(/^[A-Z][A-Z0-9_]+$/, 'Jira project key, e.g. ABC'),
+  // Ready signal: a label (default) or a status name. When readyStatus is set it wins.
+  readyLabel: z.string().regex(/^[^\s]+$/, 'labels cannot contain spaces').max(255).default('axon-ready'),
+  readyStatus: z.string().max(100).optional(),
+  pipelineId: z.string().min(1),
+  pipelineVersion: z.number().int().min(1),
+  // D18: optional default Workspace path; must be inside the Workspace Root (checked in main).
+  defaultWorkspacePath: z.string().max(1024).optional(),
+  pollIntervalMinutes: z.number().int().min(2).max(1440).default(5),
+  // S5b: one comment per outcome (completed / failed / cancelled) with links.
+  postOutcomeComment: z.boolean().default(true),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+})
+export type DeliveryRule = z.infer<typeof DeliveryRuleSchema>
+export const SaveRuleInputSchema = DeliveryRuleSchema.omit({ schemaVersion: true, scope: true, owner: true, createdAt: true, updatedAt: true, id: true })
+  .extend({ id: z.string().optional() })
+export type SaveRuleInput = z.infer<typeof SaveRuleInputSchema>
 
 // users/{email}/activity.log — one JSON object per line. Contains email + machine name only
 // (consent is collected in onboarding).
@@ -93,6 +127,16 @@ export const RunSummarySchema = z.strictObject({
   inputTokens: z.number().optional(),
   outputTokens: z.number().optional(),
   costUsd: z.number().optional(),
+  // S5 (maturity Q7/Q9/Q11/Q13): counts and enums only — never free text from agents.
+  trigger: TriggerSchema.optional(),
+  ruleId: z.string().max(100).optional(),
+  gateCount: z.number().int().optional(),
+  gatesPaused: z.number().int().optional(),
+  interventions: z.number().int().optional(),
+  aiSteps: z.number().int().optional(),
+  builtInSteps: z.number().int().optional(),
+  failureCategory: FailureCategorySchema.optional(),
+  totalTokens: z.number().optional(),
 })
 export type RunSummary = z.infer<typeof RunSummarySchema>
 

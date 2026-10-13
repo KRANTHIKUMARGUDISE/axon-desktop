@@ -35,6 +35,14 @@
     --color-input: var(--input);
     --color-border: var(--border);
     --color-destructive: var(--destructive);
+    /* status */
+    --color-success: var(--success);
+    --color-warning: var(--warning);
+    --color-info: var(--info);
+    /* domain entities (chips): Jira project, trigger, pipeline */
+    --color-project: var(--entity-project);
+    --color-trigger: var(--entity-trigger);
+    --color-pipeline: var(--entity-pipeline);
     --color-accent-foreground: var(--accent-foreground);
     --color-accent: var(--accent);
     --color-muted-foreground: var(--muted-foreground);
@@ -110,6 +118,13 @@
     --accent: oklch(0.97 0 0);
     --accent-foreground: oklch(0.205 0 0);
     --destructive: oklch(0.577 0.245 27.325);
+    /* Semantic palette (light): deeper tones so text keeps 4.5:1 contrast on white */
+    --success: #047857;
+    --warning: #b45309;
+    --info: #0369a1;
+    --entity-project: #475569;
+    --entity-trigger: #0369a1;
+    --entity-pipeline: #6d28d9;
     --border: oklch(0.922 0 0);
     --input: oklch(0.922 0 0);
     --ring: oklch(0.708 0 0);
@@ -144,7 +159,15 @@
     --muted-foreground: #64748b;
     --accent: #111520;
     --accent-foreground: #f1f5f9;
-    --destructive: #ef4444;
+    --destructive: #f87171;
+    /* Semantic palette (dark): 400-level hues tuned for #0c0f1a surfaces and the #6f5fe8 brand violet.
+       Use as text-success, bg-success/15, border-l-warning ... never hard-code a hue in a component. */
+    --success: #34d399;
+    --warning: #fbbf24;
+    --info: #38bdf8;
+    --entity-project: #94a3b8;
+    --entity-trigger: #38bdf8;
+    --entity-pipeline: #a78bfa;
     --border: rgba(255,255,255,0.055);
     --input: rgba(255,255,255,0.09);
     --ring: #6f5fe8;

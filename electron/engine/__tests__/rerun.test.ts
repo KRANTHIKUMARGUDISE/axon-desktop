@@ -44,7 +44,7 @@ async function twoStep(over: { gate?: boolean } = {}) {
   const b = await h.mkBlock({ name: 'b' })
   const nodes: PipelineNode[] = [
     { id: 'a', label: 'a', blockId: a.id, position: pos },
-    over.gate ? { id: 'b', label: 'gate1', blockId: HUMAN_GATE_BLOCK_ID, position: pos } : { id: 'b', label: 'b', blockId: b.id, position: pos },
+    over.gate ? { id: 'b', label: 'gate1', blockId: HUMAN_GATE_BLOCK_ID, position: pos, config: { reason: 'A human decides here' } } : { id: 'b', label: 'b', blockId: b.id, position: pos },
   ]
   const p = await h.store.createPipeline({ name: 'P', description: '', nodes, edges: [e('a', 'b')] })
   const mk = (extra: Record<string, unknown> = {}) =>

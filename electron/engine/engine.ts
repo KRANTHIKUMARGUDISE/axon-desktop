@@ -2,8 +2,10 @@ import type { Block, Delivery, DeliveryStep, AgentOutput, ActionResult, ResumePr
 import {
   LOCAL_USER, DS1_DEFAULT_THRESHOLD_BYTES, findStartNode, nextNode, resolvePipelineProgress, forEachBody,
   validatePipeline, outputFieldNames, contextKey, isOptionalContext, parseWorkItemList, validateWorkItemList, workItemListFields, forEachPredecessors, capSummary, buildRepoCatalogText, isStoppedStep,
+  readGateConfig, classifyFailure, isPlatformErrorMessage, PLATFORM_RETRY_LIMIT,
+  ACTION_ARTIFACTS, JIRA_UPDATE_ARTIFACT, PR_UPDATE_ARTIFACT, readJiraUpdateConfig, readPrUpdateConfig, templateRefs,
 } from '../../shared'
-import type { PipelineNode, WorkItemEntry, AgentCatalogRepo } from '../../shared'
+import type { PipelineNode, WorkItemEntry, AgentCatalogRepo, FailureCategory } from '../../shared'
 import type { Store } from '../store/types'
 import { applyStep } from '../store/types'
 import type { Runner } from '../runners/types'
@@ -52,6 +54,18 @@ export interface EngineDeps {
   snapshots?: SnapshotService
   /** Source of the opt-in `repoCatalog` context field (entries + the registry commit they came from). */
   getRepoCatalog?: () => Promise<{ entries: AgentCatalogRepo[]; version?: string }>
+  /** Backoff before automatic retry n (1-based) of a Platform failure. Defaults to 2s, 4s; tests pass 0. */
+  retryDelayMs?: (attempt: number) => number
+  /**
+   * S5b pre-flight, run at start before anything else happens (no workspace, no agent, no tokens): validates every configured
+   * Jira/GitHub action. Returns the problem to show, or null. A throw is reported the same way.
+   */
+  preflight?: (delivery: Delivery, blocks: Map<string, Block>) => Promise<string | null>
+  /**
+   * S5b "On failure" actions: run once after a delivery failed (or was cancelled, if the pipeline says so), after the failure is
+   * recorded and before the workspace is released. Returns a plain-words result; it can never change the delivery's status.
+   */
+  onTerminal?: (delivery: Delivery, event: 'failed' | 'cancelled', failureReason: string) => Promise<string>
 }
 
 interface ActiveRun {
@@ -74,10 +88,21 @@ export interface Engine {
   /** Resolves when the delivery's run loop (if any) has fully unwound. */
   whenIdle(deliveryId: string): Promise<void>
   isActive(deliveryId: string): boolean
+  /** Number of run loops currently executing (the concurrency scheduler's input). */
+  activeCount(): number
   /** Delete the delivery's snapshot refs (user discarded it). */
   discardSnapshots(deliveryId: string): Promise<void>
   /** Delete snapshot refs of Failed (and Superseded) deliveries that ended more than `days` ago (default 14). Returns how many were cleaned. */
   cleanupFailedSnapshots(days?: number): Promise<number>
+}
+
+/** Context fields an action block's templates reference ({{output.<field>}}) plus prUrls (PR links). */
+function actionTemplateKeys(block: Block, config: Record<string, unknown> | undefined): string[] {
+  if (!block.artifactName || !ACTION_ARTIFACTS.includes(block.artifactName)) return []
+  const text = block.artifactName === JIRA_UPDATE_ARTIFACT ? readJiraUpdateConfig(config).comment
+    : block.artifactName === PR_UPDATE_ARTIFACT ? readPrUpdateConfig(config).comment : undefined
+  const refs = templateRefs(text)
+  return [...new Set([...refs.outputs, ...(text?.includes('{{prUrls}}') ? ['prUrls'] : [])])]
 }
 
 type Pools = { stepResults: Record<string, unknown>; flatResults: Record<string, unknown> }
@@ -95,8 +120,8 @@ interface RunCtx {
 }
 
 type NodeOutcome =
-  | { kind: 'ok'; output: AgentOutput; isGate: boolean }
-  | { kind: 'failed'; message: string }
+  | { kind: 'ok'; output: AgentOutput; isGate: boolean; /** Notify-only gate: recorded, the delivery does not pause. */ notified?: { reason: string } }
+  | { kind: 'failed'; message: string; category: FailureCategory }
   | { kind: 'stopped' }
 
 export function createEngine(deps: EngineDeps): Engine {
@@ -158,14 +183,41 @@ export function createEngine(deps: EngineDeps): Engine {
     }
   }
 
-  async function failDelivery(id: string, run: ActiveRun | null, message: string, nodeId?: string) {
+  // The pipeline's "On failure" actions (S5b). Best effort and recorded on the delivery; never throws, never changes the status.
+  async function runOnTerminal(id: string, event: 'failed' | 'cancelled', reason: string): Promise<void> {
+    if (!deps.onTerminal) return
+    try {
+      const d = await store.getDelivery(id)
+      if (!d) return
+      if (event === 'cancelled' ? !d.pipelineSnapshot.onFailureOnCancel : false) return
+      if (!d.pipelineSnapshot.onFailure?.length) return
+      let ok = true
+      let message: string
+      try {
+        message = await deps.onTerminal(d, event, reason)
+      } catch (err) {
+        ok = false
+        message = `On-failure actions failed: ${errMsg(err)}`
+        log.warn(`[engine] on-failure actions for ${id} failed`, err)
+      }
+      await store.updateDelivery(id, (x) => {
+        x.onFailureResults = [...(x.onFailureResults ?? []), { at: iso(), event, ok, message: message.slice(0, 1000) }]
+      })
+    } catch (err) {
+      log.warn(`[engine] could not record on-failure result for ${id}`, err)
+    }
+  }
+
+  async function failDelivery(id: string, run: ActiveRun | null, message: string, nodeId: string | undefined, category: FailureCategory) {
     if (run?.stopped) return
     await setStatus(id, run, 'Failed', (d) => {
       d.errorMessage = message
+      d.failureCategory = category
       d.completedAt = iso()
       if (nodeId) d.currentNodeId = nodeId
     })
-    emit(id, { type: 'failed', message, nodeId })
+    emit(id, { type: 'failed', message, nodeId, failureCategory: category })
+    await runOnTerminal(id, 'failed', message)
     await releaseWorkspace(id)
   }
 
@@ -204,6 +256,17 @@ export function createEngine(deps: EngineDeps): Engine {
     return { stepResults, flatResults }
   }
 
+  // The first attempt of a story (follows retriedFromDeliveryId). Action idempotency markers use it, so a Rerun never re-applies.
+  async function rootOf(d: Delivery): Promise<string> {
+    let cur = d
+    for (let i = 0; i < 25 && cur.retriedFromDeliveryId; i++) {
+      const prev = await store.getDelivery(cur.retriedFromDeliveryId)
+      if (!prev) break
+      cur = prev
+    }
+    return cur.id
+  }
+
   // ------------------------------------------------------------------ one node
 
   // Runs one block node: persists the Running/final step (keyed by nodeId + itemKey), calls the runner,
@@ -215,7 +278,8 @@ export function createEngine(deps: EngineDeps): Engine {
   ): Promise<NodeOutcome> {
     const { id, run, d0 } = rc
     const label = node.label ?? node.name ?? node.id
-    const stepBase = { nodeId: node.id, itemKey: o.itemKey, blockId: node.blockId, blockName: label }
+    const block = rc.blocks.get(node.blockId)
+    const stepBase = { nodeId: node.id, itemKey: o.itemKey, blockId: node.blockId, blockName: label, agentRuntime: block?.agentRuntime }
     const itemKeyEv = o.itemKey ? { itemKey: o.itemKey } : {}
     // The resolved working folder is recorded on the step as soon as it is known.
     let stepCwd: string | undefined
@@ -232,7 +296,7 @@ export function createEngine(deps: EngineDeps): Engine {
     let contextResult: StoredOutput | undefined
     let contextAvailability: ReturnType<typeof computeContextAvailability> | undefined
     let catalogStats: DeliveryStep['catalogStats']
-    const block = rc.blocks.get(node.blockId)
+    const retries: NonNullable<DeliveryStep['retries']> = []
 
     // Rule 9: the step's repo is snapshotted before an agent runs. A failed attempt is left in the folder (for debugging)
     // with its snapshot ref kept; a retry/resume of the step restores the pre-step state before running again.
@@ -242,13 +306,21 @@ export function createEngine(deps: EngineDeps): Engine {
       if (run.stopped) return { kind: 'stopped' }
       await guarded(id, run, (d) => {
         applyStep(d, {
-          ...stepBase, ...cwdField(), status: 'Failed', startedAt, completedAt: iso(), ...extra,
+          ...stepBase, ...cwdField(), status: 'Failed', startedAt, completedAt: iso(), ...(retries.length ? { retries } : {}), ...extra,
           output: { status: 'failed', summary: message, result: {}, errorMessage: message },
         })
       })
       emit(id, { type: 'step_failed', nodeId: node.id, blockName: label, message, ...itemKeyEv })
-      return { kind: 'failed', message }
+      // Thrown inside the step (workspace/git/cwd/store/runner crash, bad block setup): AXON-side, never an agent verdict.
+      return { kind: 'failed', message, category: classifyFailure({ thrown: true, message, blockTags: block?.tags }) }
     }
+
+    // Platform failures (git push/fetch, HTTP, network) of built-in steps retry inside the step; agent and requirement
+    // failures never do. Each retry is logged on the step.
+    const retryable = (message: string | undefined, code?: string): boolean =>
+      !run.stopped && !!block && block.agentRuntime === 'Axon' && !isGateBlock(block)
+      && retries.length < PLATFORM_RETRY_LIMIT && isPlatformErrorMessage(message, code)
+    const delay = (attempt: number) => new Promise<void>((r) => setTimeout(r, (deps.retryDelayMs ?? ((n) => 2000 * n))(attempt)))
 
     try {
       if (!block) throw new Error(`Block ${node.blockId} not found`)
@@ -289,8 +361,11 @@ export function createEngine(deps: EngineDeps): Engine {
       // A block receives only what it declares (Selective, the default) — native blocks too; Full is an explicit opt-in.
       // The recorded snapshot and the availability chips describe exactly this view, not the whole pool.
       const inputs = { ...(d0.inputs ?? {}), ...(d0.repositories?.length ? { repositories: d0.repositories } : {}), ...extra }
+      // S5b: an action block's templates ({{output.<field>}}) reference fields the block does not declare statically; those
+      // exact fields (and nothing else) become visible to it.
+      const templateKeys = actionTemplateKeys(block, node.config)
       const visible = (src: Record<string, unknown>): Record<string, unknown> =>
-        block.contextMode === 'Full' ? src : Object.fromEntries((block.contextRequirements ?? []).map(contextKey).filter((k) => k in src).map((k) => [k, src[k]]))
+        block.contextMode === 'Full' ? src : Object.fromEntries([...(block.contextRequirements ?? []).map(contextKey), ...templateKeys].filter((k) => k in src).map((k) => [k, src[k]]))
       const deliveryContext: DeliveryContext = {
         ticketId: d0.ticketId,
         ticketTitle: d0.title,
@@ -305,7 +380,12 @@ export function createEngine(deps: EngineDeps): Engine {
         })
       }
 
-      output = await runner({
+      const rootDeliveryId = block.agentRuntime === 'Axon' ? await rootOf(d0) : undefined
+      const callRunner = () => runner({
+        nodeId: node.id,
+        itemKey: o.itemKey,
+        nodeConfig: node.config,
+        rootDeliveryId,
         deliveryId: id,
         pipelineName: d0.pipelineSnapshot.name,
         block,
@@ -317,6 +397,28 @@ export function createEngine(deps: EngineDeps): Engine {
         timeoutSeconds: node.timeoutSeconds ?? block.defaultTimeoutSeconds ?? 120,
         signal: run.abort.signal,
       })
+      for (;;) {
+        let res: AgentOutput | undefined
+        let message: string
+        let code: string | undefined
+        try {
+          res = await callRunner()
+          if (res.status !== 'failed') { output = res; break }
+          message = res.errorMessage ?? res.summary
+          code = res.errorCode
+        } catch (err) {
+          if (!retryable(errMsg(err))) throw err
+          message = errMsg(err)
+        }
+        if (!retryable(message, code)) {
+          if (res) { output = res; break }
+          throw new Error(message)
+        }
+        retries.push({ attempt: retries.length + 1, at: iso(), message: message.slice(0, 300) })
+        log.warn(`[engine] platform failure in "${label}", retry ${retries.length}/${PLATFORM_RETRY_LIMIT}: ${message}`)
+        await guarded(id, run, (d) => applyStep(d, { ...stepBase, cwd, status: 'Running', startedAt, retries: [...retries] }))
+        await delay(retries.length)
+      }
       // Rules 2-3: every declared outputSchema field must be present (and of its declared type), whichever runner produced it.
       if (!isGateBlock(block)) output = validateAgentResult(output, block.outputSchema)
     } catch (err) {
@@ -342,13 +444,17 @@ export function createEngine(deps: EngineDeps): Engine {
     }
 
     const isGate = isGateBlock(block)
-    const status: DeliveryStep['status'] = isGate ? 'AwaitingApproval' : output.status === 'failed' ? 'Failed' : 'Completed'
+    // S5: the gate's reason/checklist/mode live in the node config (pinned with the pipeline version).
+    const gateCfg = isGate ? readGateConfig(node.config) : undefined
+    const notifyOnly = isGate && gateCfg?.mode === 'NotifyOnly'
+    const status: DeliveryStep['status'] = isGate ? (notifyOnly ? 'Completed' : 'AwaitingApproval') : output.status === 'failed' ? 'Failed' : 'Completed'
     const persisted: DeliveryStep = {
       ...stepBase,
       ...cwdField(),
+      ...(retries.length ? { retries } : {}),
       status,
       startedAt,
-      completedAt: isGate ? undefined : iso(),
+      completedAt: isGate && !notifyOnly ? undefined : iso(),
       contextSnapshot: contextResult?.value,
       isContextTruncated: contextResult?.isTruncated ?? false,
       contextFileRef: contextResult?.fileRef,
@@ -361,7 +467,9 @@ export function createEngine(deps: EngineDeps): Engine {
         result: outputResult.value,
         isTruncated: outputResult.isTruncated,
         outputFileRef: outputResult.fileRef,
-        ...(isGate ? { humanGateReason: output.summary } : {}),
+        ...(isGate && gateCfg
+          ? { humanGateReason: gateCfg.reason || output.summary, gateChecklist: gateCfg.checklist, gateMode: gateCfg.mode }
+          : {}),
       },
     }
     await guarded(id, run, (d) => applyStep(d, persisted))
@@ -369,8 +477,14 @@ export function createEngine(deps: EngineDeps): Engine {
     if (output.status === 'failed') {
       const message = output.errorMessage ?? output.summary
       emit(id, { type: 'step_failed', nodeId: node.id, blockName: label, message, output, ...itemKeyEv })
-      return { kind: 'failed', message }
+      return {
+        kind: 'failed', message,
+        category: classifyFailure({
+          message, errorCode: output.errorCode, blockTags: block?.tags, result: output.result, runtime: block?.agentRuntime,
+        }),
+      }
     }
+    if (notifyOnly && gateCfg) return { kind: 'ok', output, isGate: false, notified: { reason: gateCfg.reason } }
     return { kind: 'ok', output, isGate }
   }
 
@@ -426,11 +540,11 @@ export function createEngine(deps: EngineDeps): Engine {
 
   // ------------------------------------------------------------------ ForEach
 
-  async function runForEach(rc: RunCtx, fe: PipelineNode, pools: Pools): Promise<{ ok: true } | { ok: false; message: string } | { ok: 'stopped' }> {
+  async function runForEach(rc: RunCtx, fe: PipelineNode, pools: Pools): Promise<{ ok: true } | { ok: false; message: string; category: FailureCategory } | { ok: 'stopped' }> {
     const { id, run } = rc
     const label = fe.label ?? fe.name ?? fe.id
     const pre = predecessorList(rc, fe, pools)
-    if (!pre.field) return { ok: false, message: `ForEach "${label}": connect a block that returns a work-item list.` }
+    if (!pre.field) return { ok: false, message: `ForEach "${label}": connect a block that returns a work-item list.`, category: 'Platform' }
     const parsed = parseWorkItemList(pre.value, { maxItems: fe.maxItems ?? 10, onEmpty: fe.onEmpty ?? 'fail' })
     if (!parsed.ok) {
       const message = `Cannot iterate "${label}": ${parsed.error}`
@@ -444,7 +558,7 @@ export function createEngine(deps: EngineDeps): Engine {
         }
       })
       emit(id, { type: 'step_failed', nodeId: producer.id, blockName: producer.label ?? producer.id, message })
-      return { ok: false, message }
+      return { ok: false, message, category: 'Agent' }
     }
 
     // Freeze the plan (item keys in list order) the first time this ForEach runs; resume reuses it.
@@ -456,7 +570,7 @@ export function createEngine(deps: EngineDeps): Engine {
       entries = []
       for (const p of planned.items) {
         const e = byKey.get(p.key)
-        if (!e) return { ok: false, message: `Work item "${p.key}" from the original plan is no longer in the list` }
+        if (!e) return { ok: false, message: `Work item "${p.key}" from the original plan is no longer in the list`, category: 'Platform' }
         entries.push(e)
       }
     } else {
@@ -466,7 +580,7 @@ export function createEngine(deps: EngineDeps): Engine {
     }
 
     const body = forEachBody(fe.id, rc.nodes, rc.edges)
-    if (body.length === 0) return { ok: false, message: `ForEach "${label}" has no nodes inside it` }
+    if (body.length === 0) return { ok: false, message: `ForEach "${label}" has no nodes inside it`, category: 'Platform' }
 
     emit(id, { type: 'step_started', nodeId: fe.id, blockName: label })
     const startedAt = iso()
@@ -526,7 +640,7 @@ export function createEngine(deps: EngineDeps): Engine {
             const s = d.steps.find((x) => x.nodeId === fe.id && !x.itemKey)
             if (s) { s.status = 'Failed'; s.completedAt = iso() }
           })
-          return { ok: false, message }
+          return { ok: false, message, category: outcome.category }
         }
         itemPool = { ...itemPool, ...outcome.output.result }
         lastOutput = { summary: outcome.output.summary ?? '', result: outcome.output.result }
@@ -562,12 +676,12 @@ export function createEngine(deps: EngineDeps): Engine {
     const { nodes, edges } = d0.pipelineSnapshot
     const { blocks, missing } = await loadBlocks(nodes, d0.pipelineSnapshot.blockVersions)
     if (missing.length) {
-      await failDelivery(id, run, `Missing blocks: ${missing.join(', ')}`)
+      await failDelivery(id, run, `Missing blocks: ${missing.join(', ')}`, undefined, 'Platform')
       return
     }
     const deliveryFolder = d0.deliveryFolder ?? d0.workspacePath
     if (!deliveryFolder) {
-      await failDelivery(id, run, 'Delivery has no workspace folder')
+      await failDelivery(id, run, 'Delivery has no workspace folder', undefined, 'Platform')
       return
     }
     const rc: RunCtx = { id, run, d0, nodes, edges, blocks, deliveryFolder }
@@ -584,7 +698,7 @@ export function createEngine(deps: EngineDeps): Engine {
         const res = await runForEach(rc, current, pools)
         if (res.ok === 'stopped') return
         if (!res.ok) {
-          await failDelivery(id, run, res.message, current.id)
+          await failDelivery(id, run, res.message, current.id, res.category)
           return
         }
         await guarded(id, run, (d) => { d.currentNodeId = current.id })
@@ -600,7 +714,7 @@ export function createEngine(deps: EngineDeps): Engine {
       })
       if (outcome.kind === 'stopped') return
       if (outcome.kind === 'failed') {
-        await failDelivery(id, run, outcome.message, current.id)
+        await failDelivery(id, run, outcome.message, current.id, outcome.category)
         return
       }
       const { output, isGate } = outcome
@@ -609,16 +723,18 @@ export function createEngine(deps: EngineDeps): Engine {
       await applyNativeEffects(rc, block, output)
       const listError = await checkProducedLists(rc, current, block, output)
       if (listError) {
-        await failDelivery(id, run, listError, current.id)
+        await failDelivery(id, run, listError, current.id, 'Agent')
         return
       }
 
       if (isGate) {
-        await setStatus(id, run, 'Paused', (d) => { d.currentNodeId = current.id })
+        const hashes = await gateTreeHashes(await store.getDelivery(id), rc.deliveryFolder)
+        await setStatus(id, run, 'Paused', (d) => { d.currentNodeId = current.id; d.gateTreeHashes = hashes })
         emit(id, { type: 'gate_reached', nodeId: current.id, blockName: label, output })
         return
       }
 
+      if (outcome.notified) emit(id, { type: 'gate_notified', nodeId: current.id, blockName: label, reason: outcome.notified.reason })
       emit(id, { type: 'step_completed', nodeId: current.id, blockName: label, output })
       await guarded(id, run, (d) => { d.currentNodeId = current.id })
       node = nextNode(current.id, nodes, edges)
@@ -643,7 +759,7 @@ export function createEngine(deps: EngineDeps): Engine {
     active.set(id, run)
     run.done = runLoop(id, run, startNodeId)
       .catch(async (err) => {
-        await failDelivery(id, run, errMsg(err)).catch((e) => log.warn('[engine] failDelivery failed', e))
+        await failDelivery(id, run, errMsg(err), undefined, 'Platform').catch((e) => log.warn('[engine] failDelivery failed', e))
       })
       .finally(() => {
         active.delete(id)
@@ -681,6 +797,17 @@ export function createEngine(deps: EngineDeps): Engine {
       }
       const startNode = findStartNode(nodes, edges)
       if (!startNode) return { success: false, error: 'No start node found in pipeline' }
+
+      // S5b pre-flight: every configured Jira/GitHub action is checked before anything runs, so a problem costs no tokens.
+      if (deps.preflight) {
+        let problem: string | null
+        try {
+          problem = await deps.preflight(d, blocks)
+        } catch (err) {
+          problem = `Pre-flight check failed: ${errMsg(err)}`
+        }
+        if (problem) return { success: false, error: problem }
+      }
 
       emit(id, { type: 'workspace_provisioning' })
       let prepared: Awaited<ReturnType<WorkspacePort['prepare']>>
@@ -739,7 +866,7 @@ export function createEngine(deps: EngineDeps): Engine {
       return { success: false, error: `Workspace setup failed: ${errMsg(err)}` }
     }
 
-    await store.updateDelivery(id, (x) => { x.status = 'Running'; x.errorMessage = undefined; x.completedAt = undefined; x.workspaceNotice = undefined })
+    await store.updateDelivery(id, (x) => { x.status = 'Running'; x.errorMessage = undefined; x.failureCategory = undefined; x.completedAt = undefined; x.workspaceNotice = undefined })
     emit(id, { type: 'status_changed', status: 'Running' })
     launch(id, resumeNode.id)
     return { success: true }
@@ -747,6 +874,27 @@ export function createEngine(deps: EngineDeps): Engine {
 
   function resume(id: string): Promise<ActionResult> {
     return withClaim(id, () => resumeClaimed(id))
+  }
+
+  // Distinct repo folders this delivery's steps ran in (the Delivery Folder itself is not a repo).
+  const stepRepoCwds = (d: Delivery, deliveryFolder?: string): string[] =>
+    [...new Set(d.steps.map((x) => x.cwd).filter((c): c is string => !!c && c !== (deliveryFolder ?? d.deliveryFolder)))]
+
+  async function gateTreeHashes(d: Delivery | null, deliveryFolder?: string): Promise<Record<string, string> | undefined> {
+    if (!d || !deps.snapshots?.treeHash) return undefined
+    const out: Record<string, string> = {}
+    for (const cwd of stepRepoCwds(d, deliveryFolder)) {
+      const h = await deps.snapshots.treeHash(cwd).catch(() => null)
+      if (h) out[cwd] = h
+    }
+    return out
+  }
+
+  async function editedSinceGate(d: Delivery): Promise<boolean> {
+    const before = d.gateTreeHashes
+    if (!before || !deps.snapshots?.treeHash) return false
+    const current = await gateTreeHashes(d)
+    return Object.entries(before).some(([cwd, h]) => current?.[cwd] !== undefined && current[cwd] !== h)
   }
 
   function findAwaitingGate(d: Delivery): DeliveryStep | undefined {
@@ -761,9 +909,13 @@ export function createEngine(deps: EngineDeps): Engine {
       if (d.status !== 'Paused' || !gate) return { success: false, error: 'Delivery is not awaiting approval' }
 
       const trimmed = comment?.trim() || undefined
+      // Q13: a manual edit in the workspace between the gate and the approval is an intervention (tree hash changed).
+      const edited = await editedSinceGate(d)
       await store.updateDelivery(id, (x) => {
         const step = findAwaitingGate(x)
         if (!step || !step.output) return
+        if (edited) x.interventions = [...(x.interventions ?? []), { kind: 'EditBeforeApproval', at: iso(), nodeId: step.nodeId }]
+        x.gateTreeHashes = undefined
         step.status = 'Completed'
         step.completedAt = iso()
         step.output = { ...step.output, approvedBy: actor(), approvedAt: iso(), reviewComment: trimmed }
@@ -792,11 +944,15 @@ export function createEngine(deps: EngineDeps): Engine {
         }
         x.status = 'Failed'
         x.errorMessage = message
+        x.failureCategory = 'Agent'
+        x.gateTreeHashes = undefined
+        x.interventions = [...(x.interventions ?? []), { kind: 'GateRejected', at: iso(), nodeId: gate.nodeId }]
         x.completedAt = iso()
       })
       emit(id, { type: 'gate_rejected', nodeId: gate.nodeId, rejectedBy: actor(), comment: trimmed })
       emit(id, { type: 'status_changed', status: 'Failed' })
-      emit(id, { type: 'failed', message, nodeId: gate.nodeId })
+      emit(id, { type: 'failed', message, nodeId: gate.nodeId, failureCategory: 'Agent' })
+      await runOnTerminal(id, 'failed', message)
       await releaseWorkspace(id)
       return { success: true }
     })
@@ -825,6 +981,7 @@ export function createEngine(deps: EngineDeps): Engine {
     }
     emit(id, { type: 'status_changed', status: 'Cancelled' })
     emit(id, { type: 'cancelled' })
+    await runOnTerminal(id, 'cancelled', 'The delivery was cancelled.')
     await releaseWorkspace(id, { dropRefs: true })
     return { success: true }
   }
@@ -942,5 +1099,6 @@ export function createEngine(deps: EngineDeps): Engine {
     start, resume, cancel, approveGate, rejectGate, previewResume, reconcileOnBoot, shutdown,
     whenIdle: (id) => active.get(id)?.done ?? Promise.resolve(),
     isActive: (id) => active.has(id),
+    activeCount: () => active.size,
   }
 }

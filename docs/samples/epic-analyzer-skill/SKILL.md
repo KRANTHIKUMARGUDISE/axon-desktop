@@ -1,6 +1,11 @@
 ---
 name: epic-analyzer
 description: Turns an epic into story work items for a ForEach, no repositories involved (demo sample)
+axon:
+  inputs: [ticket]
+  outputs:
+    workItems: { list: true }
+    summary: text
 ---
 
 Read the epic in the delivery context and split it into stories. Return only:

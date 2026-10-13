@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { HashRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TooltipProvider } from './components/ui/tooltip'
 import { Toaster } from './components/ui/sonner'
@@ -12,6 +12,7 @@ import PipelineCreator from './pages/PipelineCreator'
 import Pipelines from './pages/Pipelines'
 import BuildingBlocks from './pages/BuildingBlocks'
 import Intelligence from './pages/Intelligence'
+import Rules from './pages/Rules'
 import About from './pages/About'
 import Setup from './pages/Setup'
 import { useFeatures } from './hooks/useFeatures'
@@ -31,6 +32,10 @@ const queryClient = new QueryClient({
 function AppRoutes() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null)
   const { features, loaded: featuresLoaded } = useFeatures()
+  const navigate = useNavigate()
+
+  // Clicking an OS notification (gate reached / completed / failed) opens that delivery's Live View.
+  useEffect(() => window.axon.events.onOpenDelivery((deliveryId) => navigate(`/deliveries/${deliveryId}`)), [navigate])
 
   useEffect(() => {
     // Onboarded = a Jira-verified identity exists (set in main by the onboarding flow).
@@ -70,6 +75,7 @@ function AppRoutes() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/deliveries" element={<Deliveries />} />
         <Route path="/deliveries/:id" element={<DeliveryLiveView />} />
+        <Route path="/rules" element={<Rules />} />
         <Route path="/pipelines" element={<Pipelines />} />
         <Route path="/pipelines/new" element={<PipelineCreator />} />
         <Route path="/pipelines/:id/edit" element={<PipelineCreator />} />

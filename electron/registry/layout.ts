@@ -50,7 +50,9 @@ export const runPath = (email: string, yyyymm: string, deliveryId: string) => {
   return `${userRoot(email)}/runs/${yyyymm}/${assertId(deliveryId)}.json`
 }
 
-export const pipelineDraftPath = (root: string, id: string) => `${root}/pipelines/${assertId(id)}/draft.yaml`
+export const rulePath = (email: string, id: string) => `${userRoot(email)}/rules/${assertId(id)}.yaml`
+
+export const pipelineDraftPath =(root: string, id: string) => `${root}/pipelines/${assertId(id)}/draft.yaml`
 export const pipelineVersionPath = (root: string, id: string, version: number) =>
   `${root}/pipelines/${assertId(id)}/v${Math.trunc(version)}.yaml`
 export const blockDir = (root: string, id: string, which: 'draft' | number) =>

@@ -13,8 +13,8 @@ const input = (artifactName: string, pool: Record<string, unknown> = {}): Runner
 })
 
 describe('native block registry', () => {
-  it('registers human-gate, workspace-provisioner and pr-creator', () => {
-    expect(Object.keys(NATIVE_BLOCKS).sort()).toEqual(['human-gate', 'pr-creator', 'workspace-provisioner'])
+  it('registers the S4 blocks and the S5b action blocks', () => {
+    expect(Object.keys(NATIVE_BLOCKS).sort()).toEqual(['find-prs', 'human-gate', 'jira-update', 'pr-creator', 'pr-update', 'ticket-fetcher', 'workspace-provisioner'])
   })
   it('human-gate returns a valid output without services', async () => {
     expect(await runNativeBlock(input('human-gate'), undefined)).toMatchObject({ status: 'success', summary: 'Awaiting human review' })
@@ -28,8 +28,10 @@ describe('native block registry', () => {
     const services = { getCatalog: async () => [], getWorkspaceRoot: () => '/w', username: () => 'u', makeGit: async () => { throw new Error('unused') } } as never
     await expect(runNativeBlock(input('workspace-provisioner', {}), services)).rejects.toThrow(/needs a work-item list/)
   })
-  it('unknown native blocks and the stubs without handlers are errors', async () => {
-    await expect(runNativeBlock(input('ticket-fetcher'), undefined)).rejects.toThrow(/No native handler/)
+  it('unknown native blocks are errors; Jira blocks fail clearly without a Jira connection', async () => {
+    await expect(runNativeBlock(input('no-such-block'), undefined)).rejects.toThrow(/No native handler/)
+    await expect(runNativeBlock(input('ticket-fetcher'), { jira: async () => null } as never)).rejects.toThrow(/Jira is not connected/)
+    await expect(runNativeBlock(input('jira-update'), { jira: async () => null } as never)).rejects.toThrow(/Jira is not connected/)
   })
   it('createRunner routes Axon-runtime blocks through the registry', async () => {
     const run = createRunner(() => '')

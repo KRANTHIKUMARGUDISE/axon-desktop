@@ -1,21 +1,42 @@
-import { useState, useRef, useEffect } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { toast } from 'sonner'
-import { createBlock, updateBlock } from '../../services/blocksService'
+import { FileText, Lock, Plus, Trash2, X } from 'lucide-react'
+import { createBlock, getBlocks, updateBlock } from '../../services/blocksService'
 import { getBlockTypeIcon } from '../../utils/blockTypeIcons'
 import { getRuntimeIcon, RUNTIME_LABELS } from '../../utils/runtimeIcons'
 import ArtifactPopup from './ArtifactPopup'
+import { ChipInput } from './ChipInput'
 import type { BuildingBlock, BlockType, SourceType, AgentRuntime, ArtifactFormat, ExecutionType, BuildingBlockVisibility } from '../../types'
 import { AGENTIC_TOOL_OPTIONS } from '../../types'
 import type { CachedFile } from '../../utils/fileHandler'
-import type { OutputSchemaEntry } from '@shared'
-import { AGENT_STANDARD_SHORT, decisionToolWarning } from '@shared'
+import {
+  AGENT_STANDARD_SHORT, decisionToolWarning, contextKey, contractSummary, contractToFields, entryFileContent, fieldsToContract, parseAxonContract,
+} from '@shared'
+import type { ContractOutput } from '@shared'
+import { Alert, AlertDescription } from '../ui/alert'
+import { Button } from '../ui/button'
+import { Checkbox } from '../ui/checkbox'
+import { Input } from '../ui/input'
+import { Label } from '../ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
+import { Separator } from '../ui/separator'
+import { Textarea } from '../ui/textarea'
+
+// Create / Edit Block (View is BlockDetailPanel). The block's contract (what it needs and what it returns) is declared once, in
+// the artifact's frontmatter (`axon:`, D19). When the artifact declares it the form only shows it; otherwise two small editors.
 
 const BLOCK_TYPES: BlockType[] = ['Decision', 'Execution', 'Knowledge', 'Control', 'Utility', 'IO']
-const SOURCE_TYPES: SourceType[] = ['Axon', 'Local', 'Marketplace', 'CDF']
-// Only Claude and Codex are user-selectable; Axon is set by backend only
-const RUNTIME_OPTIONS: AgentRuntime[] = ['Claude'] // Codex hidden in v1 (D4)
-const EXECUTION_TYPES: ExecutionType[] = ['Prompt', 'Agentic']
 const VISIBILITY_OPTIONS: BuildingBlockVisibility[] = ['Personal', 'Team', 'Organisation']
+
+const ROLE_HINT: Record<BlockType, string> = {
+  Decision: 'Judges or classifies',
+  Execution: 'Does the work (writes code, files)',
+  Knowledge: 'Looks things up',
+  Control: 'Reserved for AXON system blocks',
+  Utility: 'Helper steps',
+  IO: 'Reads from or writes to outside systems',
+}
 
 const AGREEMENT_CLAUSES: Record<(typeof AGENTIC_TOOL_OPTIONS)[number], string> = {
   Read: 'may read files in the repository',
@@ -26,152 +47,29 @@ const AGREEMENT_CLAUSES: Record<(typeof AGENTIC_TOOL_OPTIONS)[number], string> =
   Bash: 'may execute shell commands in the workspace',
 }
 
-const CTX_CHIPS = [
-  { key: 'ticket', desc: 'Jira ticket details' },
-  { key: 'spec', desc: 'Generated specification' },
-  { key: 'domainDocs', desc: 'MINERVA domain documents' },
-  { key: 'repoStructure', desc: 'Repository file structure' },
-  { key: 'repoPath', desc: 'Workspace repository path' },
-  { key: 'changedFiles', desc: 'List of modified files' },
-  { key: 'testResults', desc: 'Test run output' },
-  { key: 'testConfig', desc: 'Test configuration' },
-  { key: 'prUrl', desc: 'Created PR link' },
-  { key: 'summary', desc: 'Running delivery summary' },
-  { key: 'repoCatalog', desc: 'Governed repo list (name, description, tags — no URLs)' },
-]
+/** Fields AXON itself can hand to a block. `item.<field>` = a field every incoming work item must have. */
+const AXON_PROVIDED = ['ticket', 'task', 'shared', 'item', 'item.repo', 'itemKey', 'completedItems', 'repoCatalog']
 
-const OUT_CHIPS = [
-  { key: 'score', desc: 'Numeric score (e.g. RRA score)' },
-  { key: 'readinessLevel', desc: 'Ready / NeedsInfo / OutOfScope' },
-  { key: 'missingFields', desc: 'List of missing items' },
-  { key: 'changedFiles', desc: 'Files modified' },
-  { key: 'testResults', desc: 'Test pass/fail breakdown' },
-  { key: 'coverage', desc: 'Test coverage percentage' },
-  { key: 'prUrl', desc: 'Created PR URL' },
-  { key: 'prNumber', desc: 'PR number' },
-  { key: 'decision', desc: 'Pass / Fail decision' },
-  { key: 'summary', desc: 'Text summary' },
-]
-
-const inp: React.CSSProperties = {
-  width: '100%',
-  padding: '10px 10px',
-  borderRadius: 6,
-  fontSize: 13,
-  background: 'var(--axon-bg4)',
-  border: '1px solid var(--axon-border2)',
-  color: 'var(--axon-t1)',
-  outline: 'none',
-  boxSizing: 'border-box',
-  lineHeight: 1.6,
-}
-
-
-const lbl: React.CSSProperties = {
-  fontSize: 11.5,
-  color: 'var(--axon-t2)',
-  marginBottom: 5,
-  display: 'block',
-  fontWeight: 500,
-}
-
-const secHdr: React.CSSProperties = {
-  fontSize: 10.5,
-  fontWeight: 700,
-  color: 'var(--axon-t2)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.08em',
-  marginBottom: 10,
-}
-
-const helper: React.CSSProperties = {
-  fontSize: 11,
-  color: 'var(--axon-t2)',
-  marginTop: 4,
-  display: 'block',
-  lineHeight: 1.5,
-}
-
-const divider: React.CSSProperties = {
-  borderTop: '1px solid var(--axon-border)',
-  margin: '14px 0',
-}
-
-function ChipPicker({
-  predefined,
-  selected,
-  onToggle,
-  customInput,
-  onCustomChange,
-  onAddCustom,
-}: {
-  predefined: { key: string; desc: string }[]
-  selected: string[]
-  onToggle: (k: string) => void
-  customInput: string
-  onCustomChange: (v: string) => void
-  onAddCustom: () => void
-}) {
-  const extras = selected.filter((s) => !predefined.find((p) => p.key === s))
-  const all = [...predefined, ...extras.map((e) => ({ key: e, desc: 'custom' }))]
+function Field({ label, required, hint, error, children }: { label: string; required?: boolean; hint?: ReactNode; error?: string; children: ReactNode }) {
   return (
-    <div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-        {all.map((c) => {
-          const on = selected.includes(c.key)
-          return (
-            <button
-              key={c.key}
-              type="button"
-              title={c.desc}
-              onClick={() => onToggle(c.key)}
-              style={{
-                padding: '3px 9px',
-                borderRadius: 12,
-                fontSize: 11.5,
-                cursor: 'pointer',
-                border: `1px solid ${on ? '#22d3b8' : 'var(--axon-border2)'}`,
-                background: on ? 'rgba(34,211,184,0.15)' : 'var(--axon-bg4)',
-                color: on ? '#22d3b8' : 'var(--axon-t3)',
-                fontWeight: on ? 600 : 400,
-                transition: 'all 0.12s',
-              }}
-            >
-              {c.key}
-            </button>
-          )
-        })}
-      </div>
-      <div style={{ display: 'flex', gap: 6 }}>
-        <input
-          style={{ ...inp, flex: 1 }}
-          placeholder="Custom field…"
-          value={customInput}
-          onChange={(e) => onCustomChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault()
-              onAddCustom()
-            }
-          }}
-        />
-        <button
-          type="button"
-          onClick={onAddCustom}
-          style={{
-            padding: '7px 10px',
-            borderRadius: 6,
-            border: '1px solid var(--axon-border2)',
-            background: 'var(--axon-bg4)',
-            color: 'var(--axon-t2)',
-            fontSize: 12,
-            cursor: 'pointer',
-          }}
-        >
-          Add
-        </button>
-      </div>
+    <div className="flex flex-col gap-1.5">
+      <Label>{label}{required && <span className="text-destructive"> *</span>}</Label>
+      {children}
+      {hint && !error && <p className="text-xs text-muted-foreground">{hint}</p>}
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
+  )
+}
+
+function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-3">
+      <div>
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{title}</h3>
+        {hint && <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p>}
+      </div>
+      {children}
+    </section>
   )
 }
 
@@ -195,75 +93,66 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
   const [sourceType, setSourceType] = useState<SourceType>(existingBlock?.sourceType ?? 'Local')
   const [artifactData, setArtifactData] = useState<{ cachedFiles: CachedFile[]; entryPointPath: string; artifactName: string; skillMeta?: { name?: string; description?: string } } | null>(
     existingBlock?.entryPointPath
-      ? {
-          cachedFiles: cachedFileEntries(existingBlock.cachedFiles),
-          entryPointPath: existingBlock.entryPointPath,
-          artifactName: existingBlock.artifactName ?? '',
-        }
-      : null
+      ? { cachedFiles: cachedFileEntries(existingBlock.cachedFiles), entryPointPath: existingBlock.entryPointPath, artifactName: existingBlock.artifactName ?? '' }
+      : null,
   )
-  // Tracks whether the artifact was actively re-attached during this edit session (real
-  // content read from disk) vs just carried over for display from the existing block —
-  // we must never PUT empty/placeholder content over a block's real cached files.
+  // Whether the artifact was actively re-attached in this session (real content) vs carried over for display: placeholder
+  // content must never be sent over a block's real cached files.
   const [artifactReattached, setArtifactReattached] = useState(false)
-  const [tagInput, setTagInput] = useState('')
   const [tags, setTags] = useState<string[]>(existingBlock?.tags ?? [])
-  const [ctxSelected, setCtxSelected] = useState<string[]>(existingBlock?.contextRequirements ?? [])
-  const [ctxCustom, setCtxCustom] = useState('')
-  const [outSelected, setOutSelected] = useState<string[]>(existingBlock?.outputSchema ?? [])
-  const [outCustom, setOutCustom] = useState('')
-  // Output fields typed WorkItemList feed a ForEach node (D16); every other typed entry is carried over unchanged.
-  const [workItemFields, setWorkItemFields] = useState<string[]>(
-    (existingBlock?.outputSchemaTyped ?? []).flatMap((e) => (typeof e !== 'string' && e.type === 'WorkItemList' ? [e.name] : [])),
-  )
-  // Handoff contract: extra per-item fields the WorkItemList provides / the consumed list must provide (comma separated).
-  const csv = (v: string): string[] => [...new Set(v.split(',').map((x) => x.trim()).filter(Boolean))]
-  const [itemFieldsText, setItemFieldsText] = useState(
-    ((existingBlock?.outputSchemaTyped ?? []).find((e) => typeof e !== 'string' && e.type === 'WorkItemList') as { itemFields?: string[] } | undefined)?.itemFields?.join(', ') ?? '',
-  )
-  const [requiredItemFieldsText, setRequiredItemFieldsText] = useState(existingBlock?.requiredItemFields?.join(', ') ?? '')
-  const [catalogTagsText, setCatalogTagsText] = useState(existingBlock?.catalogTags?.join(', ') ?? '')
-  const [contextMode, setContextMode] = useState<'Selective' | 'Full'>(existingBlock?.contextMode ?? 'Selective')
   const [visibility, setVisibility] = useState<BuildingBlockVisibility>(existingBlock?.visibility ?? 'Personal')
   const [executionType, setExecutionType] = useState<ExecutionType>(existingBlock?.executionType ?? 'Prompt')
   const [allowedTools, setAllowedTools] = useState<string[]>(existingBlock?.allowedTools ?? [])
   const [defaultTimeoutSeconds, setDefaultTimeoutSeconds] = useState(existingBlock?.defaultTimeoutSeconds ?? 120)
   const [agreementAccepted, setAgreementAccepted] = useState(!!existingBlock?.executionAgreementAcceptedAt)
+  const [contextMode, setContextMode] = useState<'Selective' | 'Full'>(existingBlock?.contextMode ?? 'Selective')
+  const [catalogTags, setCatalogTags] = useState<string[]>(existingBlock?.catalogTags ?? [])
+
+  // The contract as the form edits it when the artifact does not declare it.
+  const initial = useMemo(
+    () => fieldsToContract({ contextRequirements: existingBlock?.contextRequirements, outputSchema: existingBlock?.outputSchemaTyped, requiredItemFields: existingBlock?.requiredItemFields }),
+    [existingBlock],
+  )
+  const [needs, setNeeds] = useState<string[]>(initial.inputs)
+  const [returns, setReturns] = useState<ContractOutput[]>(initial.outputs)
+
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState(false)
   const [showArtifactPopup, setShowArtifactPopup] = useState(false)
-  const [nameFromSkill, setNameFromSkill] = useState(false)
-  const [descriptionFromArtifact, setDescriptionFromArtifact] = useState(false)
-  const [descriptionEditable, setDescriptionEditable] = useState(isEditing)
+  const [suggestions, setSuggestions] = useState<string[]>(AXON_PROVIDED)
 
   const nameRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { nameRef.current?.focus() }, [])
+  // Autocomplete: what AXON provides plus what other blocks return.
   useEffect(() => {
-    nameRef.current?.focus()
+    getBlocks().then((all) => {
+      const returned = all.flatMap((b) => b.outputSchema ?? [])
+      setSuggestions([...new Set([...AXON_PROVIDED, ...returned])])
+    }).catch(() => {})
   }, [])
 
-  const addTag = () => {
-    const v = tagInput.trim()
-    if (v && !tags.includes(v)) setTags((t) => [...t, v])
-    setTagInput('')
-  }
+  // Where the contract comes from: a freshly attached artifact, or the stored block's artifact when it is not re-attached.
+  const freshContract = useMemo(() => (artifactReattached || !isEditing ? parseAxonContract(entryFileContent(artifactData ?? {}) ?? '') : null), [artifactData, artifactReattached, isEditing])
+  const declaredByStoredArtifact = isEditing && !artifactReattached && existingBlock?.contractSource === 'artifact'
+  const declared = freshContract?.declared ? freshContract : null
+  const contractInvalid = !!declared && declared.errors.length > 0
+  const fromArtifact = !!declared || declaredByStoredArtifact
+  const shown = declared && !contractInvalid ? declared.contract : fromArtifact ? fieldsToContract({ contextRequirements: existingBlock?.contextRequirements, outputSchema: existingBlock?.outputSchemaTyped, requiredItemFields: existingBlock?.requiredItemFields }) : { inputs: needs, outputs: returns }
+  const needsCatalog = shown.inputs.some((i) => contextKey(i) === 'repoCatalog')
+  const contractFile = artifactData?.entryPointPath ?? existingBlock?.contractFile ?? 'SKILL.md'
 
-  const toggleCtx = (k: string) => setCtxSelected((p) => (p.includes(k) ? p.filter((x) => x !== k) : [...p, k]))
-  const addCtxCustom = () => {
-    const v = ctxCustom.trim()
-    if (v && !ctxSelected.includes(v)) setCtxSelected((p) => [...p, v])
-    setCtxCustom('')
-  }
-  const toggleOut = (k: string) => setOutSelected((p) => (p.includes(k) ? p.filter((x) => x !== k) : [...p, k]))
-  const addOutCustom = () => {
-    const v = outCustom.trim()
-    if (v && !outSelected.includes(v)) setOutSelected((p) => [...p, v])
-    setOutCustom('')
+  const handleArtifactAttach = (data: { skillMeta?: { name?: string; description?: string }; cachedFiles: CachedFile[]; entryPointPath: string; artifactName: string }) => {
+    setArtifactData(data)
+    setArtifactReattached(true)
+    setShowArtifactPopup(false)
+    if (data.skillMeta?.name && !name.trim()) setName(data.skillMeta.name)
+    if (data.skillMeta?.description) setDescription(data.skillMeta.description)
   }
 
   const toggleTool = (tool: string) => {
     setAllowedTools((prev) => {
       const isOn = prev.includes(tool)
-      // Edit/Write without Read access has no realistic path to succeed — don't allow that combination.
+      // Edit/Write without Read access has no realistic path to succeed.
       if (isOn) {
         if (tool === 'Read' && (prev.includes('Write') || prev.includes('Edit'))) return prev
         return prev.filter((t) => t !== tool)
@@ -275,57 +164,33 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
     setAgreementAccepted(false)
   }
 
-  const handleArtifactAttach = (data: { skillMeta?: { name?: string; description?: string }; cachedFiles: CachedFile[]; entryPointPath: string; artifactName: string }) => {
-    setArtifactData(data)
-    setArtifactReattached(true)
-    setShowArtifactPopup(false)
+  const updateRow = (i: number, patch: Partial<ContractOutput>) => setReturns((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))
+  const hasList = returns.some((r) => r.list)
 
-    // Name: prefill only if empty (user-authored)
-    if (data.skillMeta?.name && !name.trim()) {
-      setName(data.skillMeta.name)
-      setNameFromSkill(true)
-    }
-
-    // Description: always populate from artifact (artifact-owned), overwriting previous value
-    if (data.skillMeta?.description) {
-      setDescription(data.skillMeta.description)
-      setDescriptionFromArtifact(true)
-      setDescriptionEditable(true)
-    } else {
-      setDescription('')
-      setDescriptionFromArtifact(false)
-      setDescriptionEditable(true)
-    }
-  }
+  const isAgentic = sourceType === 'Local' && executionType === 'Agentic'
+  const decisionWarning = decisionToolWarning(role, sourceType === 'Local' ? executionType : undefined, allowedTools)
+  const canSave = !!(
+    name.trim() && role && runtime && sourceType && (sourceType !== 'Local' || artifactData) && sourceType !== 'Marketplace' && sourceType !== 'CDF'
+    && !contractInvalid && (!isAgentic || (allowedTools.length > 0 && agreementAccepted))
+  )
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const errs: Record<string, string> = {}
     if (!name.trim()) errs.name = 'Name is required'
-    if (!runtime) errs.runtime = 'Runtime is required'
-    if (!sourceType) errs.sourceType = 'Source Type is required'
-    if (sourceType === 'Local' && !artifactData) errs.artifact = 'Artifact is required for Local blocks'
-    if (sourceType === 'Local' && executionType === 'Agentic') {
+    if (sourceType === 'Local' && !artifactData) errs.artifact = 'An artifact is required for Local blocks'
+    if (isAgentic) {
       if (allowedTools.length === 0) errs.allowedTools = 'Select at least one tool for an Agentic block'
-      if (!agreementAccepted) errs.agreement = 'Execution agreement must be accepted'
+      if (!agreementAccepted) errs.agreement = 'The execution agreement must be accepted'
     }
-    if (sourceType === 'Marketplace' || sourceType === 'CDF') {
-      errs.sourceType = 'Coming soon'
-      setErrors(errs)
-      return
-    }
-    if (Object.keys(errs).length) {
-      setErrors(errs)
-      return
-    }
+    if (sourceType === 'Marketplace' || sourceType === 'CDF') errs.sourceType = 'Coming soon'
+    if (Object.keys(errs).length) { setErrors(errs); return }
     setErrors({})
     setSubmitting(true)
     try {
-      const isAgentic = sourceType === 'Local' && executionType === 'Agentic'
-      // In edit mode, only send artifact fields if the author actively re-attached during
-      // this session — sending the display-only placeholder would overwrite real cached
-      // file content with blanks.
       const sendArtifact = !isEditing || artifactReattached
+      // The artifact's declaration wins; the store re-derives it from the file as well.
+      const fields = contractToFields(declared && !contractInvalid ? declared.contract : { inputs: needs, outputs: returns })
       const payload = {
         name: name.trim(),
         role,
@@ -337,14 +202,8 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
         cachedFiles: sendArtifact ? artifactData?.cachedFiles : undefined,
         entryPointPath: sendArtifact ? artifactData?.entryPointPath : undefined,
         tags,
-        contextRequirements: ctxSelected,
-        outputSchema: outSelected.map((n): OutputSchemaEntry => {
-          if (workItemFields.includes(n)) return { name: n, type: 'WorkItemList', ...(csv(itemFieldsText).length ? { itemFields: csv(itemFieldsText) } : {}) }
-          const prev = (existingBlock?.outputSchemaTyped ?? []).find((e) => typeof e !== 'string' && e.name === n)
-          return prev ?? n
-        }),
-        requiredItemFields: csv(requiredItemFieldsText).length ? csv(requiredItemFieldsText) : undefined,
-        catalogTags: ctxSelected.includes('repoCatalog') && csv(catalogTagsText).length ? csv(catalogTagsText) : undefined,
+        ...(declaredByStoredArtifact ? {} : { contextRequirements: fields.contextRequirements, outputSchema: fields.outputSchema, requiredItemFields: fields.requiredItemFields.length ? fields.requiredItemFields : undefined }),
+        catalogTags: needsCatalog && catalogTags.length ? catalogTags : undefined,
         contextMode,
         visibility: sourceType === 'Local' ? visibility : undefined,
         executionType: sourceType === 'Local' ? executionType : undefined,
@@ -352,696 +211,279 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
         defaultTimeoutSeconds,
         executionAgreementAccepted: isAgentic ? agreementAccepted : undefined,
       }
-      const savedBlock = isEditing
-        ? await updateBlock(existingBlock!.id, payload)
-        : await createBlock(payload)
+      const saved = isEditing ? await updateBlock(existingBlock!.id, payload) : await createBlock(payload)
       toast.success(isEditing ? 'Block updated' : 'Block created')
-      onCreated(savedBlock)
+      onCreated(saved)
       onClose()
     } catch (err) {
       console.error('Block save error:', err)
-      toast.error(isEditing ? 'Failed to update block' : 'Failed to create block')
+      toast.error(err instanceof Error && err.message ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : isEditing ? 'Failed to update block' : 'Failed to create block')
     } finally {
       setSubmitting(false)
     }
   }
 
-  const decisionWarning = decisionToolWarning(role, sourceType === 'Local' ? executionType : undefined, allowedTools)
-
-  const canCreate = !!(
-    name.trim() &&
-    role &&
-    runtime &&
-    sourceType &&
-    (sourceType !== 'Local' || artifactData) &&
-    sourceType !== 'Marketplace' &&
-    sourceType !== 'CDF' &&
-    (sourceType !== 'Local' || executionType !== 'Agentic' || (allowedTools.length > 0 && agreementAccepted))
-  )
-
-  const runtimeIsAxon = sourceType === 'Axon'
+  const summary = contractSummary(shown)
 
   return (
     <>
-      <div
-        style={{
-          width: 420,
-          flexShrink: 0,
-          background: 'var(--axon-bg3)',
-          border: '1px solid var(--axon-border)',
-          borderRadius: 10,
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            padding: '14px 16px 12px',
-            borderBottom: '1px solid var(--axon-border)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexShrink: 0,
-          }}
-        >
-          <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--axon-t1)' }}>{isEditing ? 'Edit Block' : 'Create Block'}</span>
-          <button
-            type="button"
-            onClick={onClose}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--axon-t3)',
-              cursor: 'pointer',
-              fontSize: 18,
-              lineHeight: 1,
-              padding: 2,
-            }}
-          >
-            ×
-          </button>
+      <div className="flex w-[440px] shrink-0 flex-col overflow-hidden rounded-xl border bg-card text-card-foreground">
+        <div className="flex shrink-0 items-center justify-between border-b px-4 py-3">
+          <h2 className="text-sm font-semibold">{isEditing ? 'Edit block' : 'Create block'}</h2>
+          <Button type="button" variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close"><X /></Button>
         </div>
 
-        {/* Scrollable body */}
-        <form onSubmit={handleSubmit} style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 0 }}>
-          {/* ── Name & Description (no section header) ──────────────── */}
-          <div style={{ marginBottom: 12 }}>
-            <label style={lbl}>
-              Name <span style={{ color: '#ef4444' }}>*</span>
-            </label>
-            <input
-              ref={nameRef}
-              style={{ ...inp, ...(errors.name ? { border: '1px solid #ef4444' } : {}) }}
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value)
-                if (nameFromSkill) setNameFromSkill(false)
-              }}
-              placeholder="e.g. ADC Integration Checker"
-            />
-            {errors.name && <span style={{ ...helper, color: '#ef4444' }}>{errors.name}</span>}
-            {nameFromSkill && <span style={{ fontSize: 9, color: 'var(--axon-t4)', marginTop: 2, display: 'block' }}>from SKILL.md</span>}
-          </div>
+        <form onSubmit={handleSubmit} className="flex flex-1 flex-col gap-6 overflow-y-auto p-4">
+          {/* ------------------------------------------------ basics */}
+          <Section title="Basics">
+            <Field label="Name" required error={errors.name}>
+              <Input ref={nameRef} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Demo Planner" aria-invalid={!!errors.name} />
+            </Field>
+            <Field label="Role" required hint={ROLE_HINT[role]}>
+              <Select value={role} onValueChange={(v) => setRole(v as BlockType)}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper" side="bottom">
+                  {BLOCK_TYPES.map((t) => (
+                    <SelectItem key={t} value={t} disabled={t === 'Control'}>
+                      <span className="flex items-center gap-2"><img src={getBlockTypeIcon(t)} alt="" className="size-5 rounded" />{t}{t === 'Control' && <Lock className="size-3 text-muted-foreground" />}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="Description" hint={artifactData ? 'Taken from the artifact when it has one; you can edit it.' : 'Loads from your skill file when you add it.'}>
+              <Textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What does this block do?" />
+            </Field>
+          </Section>
 
-          <div style={divider} />
+          <Separator />
 
-          {/* ── Role ─────────────────────────────────────────────────── */}
-          <div style={{ marginBottom: 12 }}>
-            <label style={lbl}>
-              Role <span style={{ color: '#ef4444' }}>*</span>
-            </label>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-              {BLOCK_TYPES.map((t) => {
-                const roleIsReserved = t === 'Control'
-                return (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setRole(t)}
-                  disabled={roleIsReserved}
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: 12,
-                    borderRadius: 8,
-                    border: role === t ? '2px solid var(--axon-nexus)' : '1px solid var(--axon-border)',
-                    background: role === t ? 'rgba(111,95,232,0.15)' : 'var(--axon-bg4)',
-                    cursor: roleIsReserved ? 'not-allowed' : 'pointer',
-                    opacity: roleIsReserved ? 0.5 : 1,
-                    transition: 'all 0.12s',
-                  }}
-                  title={roleIsReserved ? 'Reserved for Axon system blocks' : t}
-                >
-                  <img src={getBlockTypeIcon(t)} alt={t} style={{ width: 40, height: 40, borderRadius: 4 }} />
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: role === t ? 'var(--axon-nexus2)' : 'var(--axon-t3)',
-                    }}
-                  >
-                    {t}
-                  </span>
-                </button>
-                )
-              })}
+          {/* ------------------------------------------------ artifact */}
+          <Section title="Source">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Source" required error={errors.sourceType} hint={isEditing ? 'Cannot be changed after creation.' : undefined}>
+                <Select value={sourceType} disabled={isEditing} onValueChange={(v) => {
+                  setSourceType(v as SourceType)
+                  if (v !== 'Local') { setDescription(''); setArtifactData(null); setExecutionType('Prompt'); setAllowedTools([]); setAgreementAccepted(false) }
+                }}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent position="popper" side="bottom">
+                    <SelectItem value="Local">Local</SelectItem>
+                    <SelectItem value="Marketplace" disabled>Marketplace (soon)</SelectItem>
+                    <SelectItem value="CDF" disabled>CDF (soon)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="Runtime" required>
+                <Select value={runtime} onValueChange={(v) => setRuntime(v as AgentRuntime)}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue>
+                      <span className="flex items-center gap-2"><img src={getRuntimeIcon(runtime)} alt="" className="size-4 rounded" />{RUNTIME_LABELS[runtime]}</span>
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent position="popper" side="bottom">
+                    <SelectItem value="Claude">Claude</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
             </div>
-          </div>
 
-          {/* ── Runtime ──────────────────────────────────────────────── */}
-          <div style={{ marginBottom: 12 }}>
-            <label style={lbl}>
-              Runtime <span style={{ color: '#ef4444' }}>*</span>
-            </label>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
-              {RUNTIME_OPTIONS.map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  onClick={() => setRuntime(r)}
-                  disabled={runtimeIsAxon}
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: 10,
-                    borderRadius: 8,
-                    border: runtime === r ? '2px solid var(--axon-nexus)' : '1px solid var(--axon-border)',
-                    background: runtime === r ? 'rgba(111,95,232,0.15)' : 'var(--axon-bg4)',
-                    cursor: runtimeIsAxon ? 'not-allowed' : 'pointer',
-                    transition: 'all 0.12s',
-                    opacity: runtimeIsAxon ? 0.5 : 1,
-                  }}
-                  title={r === 'Codex' && sourceType === 'Local' ? 'Limited support' : undefined}
-                >
-                  <img
-                    src={getRuntimeIcon(r)}
-                    alt={r}
-                    style={{ width: 28, height: 28, borderRadius: 4 }}
-                  />
-                  <span
-                    style={{
-                      fontSize: 10,
-                      fontWeight: 600,
-                      color: runtime === r ? 'var(--axon-nexus2)' : 'var(--axon-t3)',
-                      textAlign: 'center',
-                    }}
-                  >
-                    {RUNTIME_LABELS[r]}
-                  </span>
-                </button>
-              ))}
-            </div>
-            {runtimeIsAxon && <span style={helper}>Fixed to Axon for system blocks</span>}
-          </div>
-
-          <div style={divider} />
-
-          {/* ── Source Type ──────────────────────────────────────────── */}
-          <div style={{ marginBottom: 12 }}>
-            <label style={lbl}>
-              Source Type <span style={{ color: '#ef4444' }}>*</span>
-            </label>
-            <select
-              value={sourceType}
-              disabled={isEditing}
-              onChange={(e) => {
-                const newSourceType = e.target.value as SourceType
-                setSourceType(newSourceType)
-                // Reset description when changing source type
-                if (newSourceType !== 'Local') {
-                  setDescription('')
-                  setDescriptionEditable(false)
-                  setDescriptionFromArtifact(false)
-                  setArtifactData(null)
-                  setExecutionType('Prompt')
-                  setAllowedTools([])
-                  setAgreementAccepted(false)
-                }
-              }}
-              style={{ ...inp, ...(isEditing ? { opacity: 0.6, cursor: 'not-allowed' } : {}) }}
-            >
-              {SOURCE_TYPES.filter(s => s !== 'Axon').map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-            {errors.sourceType && <span style={{ ...helper, color: '#ef4444' }}>{errors.sourceType}</span>}
-            {isEditing && <span style={helper}>Source Type can't be changed after creation</span>}
-          </div>
-
-          {/* ── Artifact ──────────────────────────────────────────────── */}
-          {sourceType === 'Local' && (
-            <div style={{ marginBottom: 12 }}>
-              <label style={lbl}>Artifact (Skill)</label>
-              {artifactData ? (
-                <div
-                  style={{
-                    padding: '10px 12px',
-                    background: 'rgba(34,211,184,0.08)',
-                    border: '1px solid rgba(34,211,184,0.2)',
-                    borderRadius: 6,
-                    fontSize: 12,
-                    color: 'var(--axon-t1)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                  }}
-                >
-                  <div>
-                    <div style={{ fontWeight: 500, marginBottom: 2 }}>{artifactData.artifactName}</div>
-                    <div style={{ fontSize: 10, color: 'var(--axon-t3)' }}>
-                      {artifactData.entryPointPath} + {artifactData.cachedFiles.length - 1} files
-                    </div>
+            {sourceType === 'Local' && (
+              <Field label="Artifact (skill)" required error={errors.artifact}>
+                <div className="flex items-center justify-between gap-3 rounded-lg border bg-background/40 p-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <FileText className="size-4 shrink-0 text-muted-foreground" />
+                    {artifactData ? (
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{artifactData.artifactName}</p>
+                        <p className="truncate text-xs text-muted-foreground">{artifactData.entryPointPath} · {Math.max(0, artifactData.cachedFiles.length - 1)} more files</p>
+                      </div>
+                    ) : <p className="text-sm text-muted-foreground">No artifact yet</p>}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowArtifactPopup(true)}
-                    style={{
-                      padding: '4px 8px',
-                      borderRadius: 4,
-                      border: '1px solid rgba(34,211,184,0.3)',
-                      background: 'transparent',
-                      color: 'var(--axon-teal)',
-                      fontSize: 11,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Edit
-                  </button>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setShowArtifactPopup(true)}>{artifactData ? 'Replace' : 'Add artifact'}</Button>
                 </div>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setShowArtifactPopup(true)}
-                    style={{
-                      width: '100%',
-                      padding: '10px 12px',
-                      borderRadius: 6,
-                      border: '1px solid var(--axon-border2)',
-                      background: 'var(--axon-bg4)',
-                      color: 'var(--axon-t1)',
-                      fontSize: 13,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    + Add Artifact
-                  </button>
-                  {errors.artifact && <span style={{ ...helper, color: '#ef4444' }}>{errors.artifact}</span>}
-                </>
-              )}
-            </div>
-          )}
+              </Field>
+            )}
+            {(sourceType === 'Marketplace' || sourceType === 'CDF') && (
+              <Alert><AlertDescription>Browsing and attaching from {sourceType} is coming in a future release.</AlertDescription></Alert>
+            )}
+            {sourceType === 'Local' && (
+              <details className="rounded-lg border px-3 py-2 text-xs text-muted-foreground" data-testid="agent-standard">
+                <summary className="cursor-pointer text-sm font-medium text-foreground">AXON Agent Standard</summary>
+                <p className="mt-2 leading-relaxed">{AGENT_STANDARD_SHORT}</p>
+              </details>
+            )}
+          </Section>
 
-          {sourceType === 'Local' && (
-            <div data-testid="agent-standard" style={{ ...helper, marginTop: -4, marginBottom: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--axon-border2)', background: 'var(--axon-bg4)' }}>
-              <strong>AXON Agent Standard.</strong> {AGENT_STANDARD_SHORT}
-            </div>
-          )}
+          <Separator />
 
-          {(sourceType === 'Marketplace' || sourceType === 'CDF') && (
-            <div style={{ marginBottom: 12, padding: '12px', borderRadius: 6, background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.2)' }}>
-              <div style={{ fontSize: 12, color: 'var(--axon-amber)', fontWeight: 500 }}>Coming soon</div>
-              <div style={{ fontSize: 11, color: 'var(--axon-t3)', marginTop: 4 }}>
-                Browse and attach from {sourceType} coming in a future release
+          {/* ------------------------------------------------ contract */}
+          <Section title="What it needs and returns" hint="The contract between this block and the blocks around it.">
+            {contractInvalid && (
+              <Alert variant="destructive" data-testid="contract-errors">
+                <AlertDescription>
+                  The `axon:` block in {contractFile} has problems, so the block cannot be saved yet:
+                  <ul className="mt-1 list-disc pl-4">{declared!.errors.map((e) => <li key={e}>{e}</li>)}</ul>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {fromArtifact && !contractInvalid ? (
+              <div className="flex flex-col gap-3 rounded-lg border bg-background/40 p-3 text-sm" data-testid="contract-readonly">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground"><Lock className="size-3.5" /> Defined in <span className="font-mono text-foreground">{contractFile}</span> (frontmatter, <span className="font-mono">axon:</span>)</div>
+                <div><span className="font-medium">Needs: </span><span className="text-muted-foreground">{summary.needs}</span></div>
+                <div><span className="font-medium">Returns: </span><span className="text-muted-foreground">{summary.returns}</span></div>
+                <p className="text-xs text-muted-foreground">To change it, edit the frontmatter in the file and add the artifact again.</p>
               </div>
-            </div>
-          )}
+            ) : !contractInvalid && (
+              <>
+                <Field label="Needs" hint={<>Fields this block receives. <span className="font-mono">item.repo</span> = every incoming work item must have a <span className="font-mono">repo</span>; a trailing <span className="font-mono">?</span> makes a field optional.</>}>
+                  <ChipInput
+                    value={needs}
+                    onChange={setNeeds}
+                    suggestions={suggestions}
+                    placeholder="Type a field and press Enter"
+                    ariaLabel="Needs"
+                    validate={(v) => (/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)?\??$/.test(v) && (!v.includes('.') || v.startsWith('item.')) ? null : 'Use letters and digits, or item.<field>')}
+                  />
+                </Field>
 
+                <div className="flex flex-col gap-2">
+                  <Label>Returns</Label>
+                  {returns.length === 0 && <p className="text-xs text-muted-foreground">Nothing yet. List the fields the agent puts in its result.</p>}
+                  {returns.map((r, i) => (
+                    <div key={i} className="flex flex-col gap-2 rounded-lg border bg-background/40 p-2.5" data-testid="return-row">
+                      <div className="flex items-center gap-2">
+                        <Input value={r.name} onChange={(e) => updateRow(i, { name: e.target.value.replace(/\s+/g, '') })} placeholder="field name" className="font-mono text-xs" aria-label="Output field name" list="axon-return-suggestions" />
+                        <Button type="button" variant="ghost" size="icon-sm" onClick={() => setReturns((rows) => rows.filter((_, j) => j !== i))} aria-label="Remove field"><Trash2 /></Button>
+                      </div>
+                      <label className={`flex items-center gap-2 text-xs ${!r.list && hasList ? 'opacity-50' : ''}`} title={!r.list && hasList ? 'A block can return only one work list' : undefined}>
+                        <Checkbox
+                          checked={!!r.list}
+                          disabled={!r.list && hasList}
+                          onCheckedChange={(v) => updateRow(i, v === true ? { list: true, kind: 'array', itemFields: r.itemFields ?? [] } : { list: false, kind: 'text', itemFields: undefined })}
+                        />
+                        Work list (feeds a ForEach)
+                      </label>
+                      {r.list && (
+                        <div className="flex flex-col gap-1.5 border-l-2 border-primary/50 pl-3">
+                          <span className="text-xs text-muted-foreground">Each item has <span className="font-mono">key</span> and <span className="font-mono">task</span>, and also:</span>
+                          <ChipInput
+                            value={r.itemFields ?? []}
+                            onChange={(v) => updateRow(i, { itemFields: v })}
+                            placeholder="e.g. repo"
+                            ariaLabel="Item fields"
+                            validate={(v) => (/^[A-Za-z][A-Za-z0-9_]*$/.test(v) ? null : 'Letters and digits only')}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  <datalist id="axon-return-suggestions">{suggestions.filter((s) => !s.includes('.')).map((s) => <option key={s} value={s} />)}</datalist>
+                  <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => setReturns((rows) => [...rows, { name: '', kind: 'text' }])}><Plus /> Add field</Button>
+                </div>
+              </>
+            )}
+
+            {needsCatalog && (
+              <Field label="Catalog tags (optional)" hint="Only repositories with one of these tags are shown to the agent. Empty = the whole catalog.">
+                <ChipInput value={catalogTags} onChange={setCatalogTags} placeholder="e.g. backend" ariaLabel="Catalog tags" />
+              </Field>
+            )}
+          </Section>
+
+          {/* ------------------------------------------------ execution */}
           {sourceType === 'Local' && (
             <>
-              <div style={divider} />
-
-              {/* ── Execution Profile ──────────────────────────────────── */}
-              <div style={secHdr}>Execution Profile</div>
-              <div style={{ marginBottom: 12 }}>
-                <label style={lbl}>Visibility</label>
-                <select value={visibility} onChange={(e) => setVisibility(e.target.value as BuildingBlockVisibility)} style={inp}>
-                  {VISIBILITY_OPTIONS.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-                <span style={helper}>
-                  {visibility === 'Personal'
-                    ? 'Only you can see and run this block.'
-                    : visibility === 'Team'
-                      ? 'Visible to your team.'
-                      : 'Visible to everyone in the organisation.'}
-                </span>
-              </div>
-
-              <div style={{ marginBottom: 12 }}>
-                <label style={lbl}>Execution Type</label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 10 }}>
-                  {EXECUTION_TYPES.map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => {
-                        setExecutionType(t)
-                        if (t === 'Prompt') {
-                          setAllowedTools([])
-                          setAgreementAccepted(false)
-                        }
-                      }}
-                      style={{
-                        padding: '8px 0',
-                        borderRadius: 7,
-                        border: executionType === t ? '2px solid var(--axon-nexus)' : '1px solid var(--axon-border)',
-                        background: executionType === t ? 'rgba(111,95,232,0.15)' : 'var(--axon-bg4)',
-                        color: executionType === t ? 'var(--axon-nexus2)' : 'var(--axon-t3)',
-                        fontSize: 12.5,
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {t}
-                    </button>
-                  ))}
-                </div>
-                <span style={helper}>
-                  {executionType === 'Prompt'
-                    ? 'A single text-only completion call — no file or system access.'
-                    : 'Runs via the Claude Agent SDK with the tools selected below.'}
-                </span>
-              </div>
-
-              {executionType === 'Agentic' && (
-                <div style={{ marginBottom: 12 }}>
-                  <label style={lbl}>
-                    Allowed Tools <span style={{ color: '#ef4444' }}>*</span>
-                  </label>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    {AGENTIC_TOOL_OPTIONS.map((tool) => {
-                      const on = allowedTools.includes(tool)
-                      const lockedOn = tool === 'Read' && (allowedTools.includes('Write') || allowedTools.includes('Edit'))
-                      return (
-                        <button
-                          key={tool}
-                          type="button"
-                          onClick={() => toggleTool(tool)}
-                          title={lockedOn ? 'Required because Write/Edit is selected' : undefined}
-                          style={{
-                            padding: '5px 11px',
-                            borderRadius: 12,
-                            fontSize: 12,
-                            cursor: 'pointer',
-                            border: `1px solid ${on ? '#22d3b8' : 'var(--axon-border2)'}`,
-                            background: on ? 'rgba(34,211,184,0.15)' : 'var(--axon-bg4)',
-                            color: on ? '#22d3b8' : 'var(--axon-t3)',
-                            fontWeight: on ? 600 : 400,
-                          }}
-                        >
-                          {tool}
-                          {lockedOn ? ' 🔒' : ''}
-                        </button>
-                      )
-                    })}
+              <Separator />
+              <Section title="How it runs">
+                <Field label="Execution type" hint={executionType === 'Prompt' ? 'One text-only call to Claude: no file or system access.' : 'Runs through the Claude Agent SDK with the tools you allow below.'}>
+                  <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Execution type">
+                    {(['Prompt', 'Agentic'] as ExecutionType[]).map((t) => (
+                      <Button
+                        key={t}
+                        type="button"
+                        role="radio"
+                        aria-checked={executionType === t}
+                        variant={executionType === t ? 'default' : 'outline'}
+                        onClick={() => { setExecutionType(t); if (t === 'Prompt') { setAllowedTools([]); setAgreementAccepted(false) } }}
+                      >
+                        {t}
+                      </Button>
+                    ))}
                   </div>
-                  {errors.allowedTools && <span style={{ ...helper, color: '#ef4444' }}>{errors.allowedTools}</span>}
-                  {decisionWarning && <span data-testid="decision-tools-warning" style={{ ...helper, color: '#f59e0b', display: 'block', marginTop: 6 }}>⚠ {decisionWarning}</span>}
-                </div>
-              )}
+                </Field>
 
-              <div style={{ marginBottom: 12 }}>
-                <label style={lbl}>Default Timeout (seconds)</label>
-                <input
-                  type="number"
-                  min={1}
-                  style={inp}
-                  value={defaultTimeoutSeconds}
-                  onChange={(e) => setDefaultTimeoutSeconds(Number(e.target.value) || 0)}
-                />
-                <span style={helper}>Prefills the node timeout when this block is dragged onto a pipeline canvas.</span>
-              </div>
-
-              {executionType === 'Agentic' && (
-                <>
-                  <div style={divider} />
-                  <div style={secHdr}>Execution Agreement</div>
-                  <div
-                    style={{
-                      marginBottom: 12,
-                      padding: '10px 12px',
-                      borderRadius: 6,
-                      background: 'rgba(245,158,11,0.08)',
-                      border: '1px solid rgba(245,158,11,0.2)',
-                    }}
-                  >
-                    <div style={{ fontSize: 12, color: 'var(--axon-t1)', marginBottom: 6, fontWeight: 500 }}>
-                      This block will run autonomously with the following capabilities:
+                {executionType === 'Agentic' && (
+                  <>
+                    <Field label="Allowed tools" required error={errors.allowedTools}>
+                      <div className="flex flex-wrap gap-1.5">
+                        {AGENTIC_TOOL_OPTIONS.map((tool) => {
+                          const on = allowedTools.includes(tool)
+                          const lockedOn = tool === 'Read' && (allowedTools.includes('Write') || allowedTools.includes('Edit'))
+                          return (
+                            <Button key={tool} type="button" size="sm" variant={on ? 'default' : 'outline'} onClick={() => toggleTool(tool)} title={lockedOn ? 'Required because Write or Edit is selected' : undefined}>
+                              {tool}{lockedOn && <Lock className="size-3" />}
+                            </Button>
+                          )
+                        })}
+                      </div>
+                    </Field>
+                    {decisionWarning && <Alert data-testid="decision-tools-warning"><AlertDescription>{decisionWarning}</AlertDescription></Alert>}
+                    <div className="flex flex-col gap-2 rounded-lg border border-warning/40 bg-warning/5 p-3">
+                      <p className="text-sm font-medium">This block runs on its own and:</p>
+                      <ul className="list-disc pl-5 text-xs text-muted-foreground">
+                        {allowedTools.length === 0 && <li>has no tools selected yet</li>}
+                        {allowedTools.map((tool) => <li key={tool}>{AGREEMENT_CLAUSES[tool as keyof typeof AGREEMENT_CLAUSES] ?? tool}</li>)}
+                      </ul>
+                      <label className="flex items-start gap-2 text-xs">
+                        <Checkbox checked={agreementAccepted} onCheckedChange={(v) => setAgreementAccepted(v === true)} className="mt-0.5" />
+                        I understand and accept that this block can act on the repository as described.
+                      </label>
+                      {errors.agreement && <p className="text-xs text-destructive">{errors.agreement}</p>}
                     </div>
-                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: 'var(--axon-t2)', lineHeight: 1.6 }}>
-                      {allowedTools.length === 0 && <li>No tools selected yet</li>}
-                      {allowedTools.map((tool) => (
-                        <li key={tool}>{AGREEMENT_CLAUSES[tool as keyof typeof AGREEMENT_CLAUSES] ?? tool}</li>
-                      ))}
-                    </ul>
-                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 10, fontSize: 12, color: 'var(--axon-t1)', cursor: 'pointer' }}>
-                      <input
-                        type="checkbox"
-                        checked={agreementAccepted}
-                        onChange={(e) => setAgreementAccepted(e.target.checked)}
-                        style={{ marginTop: 2 }}
-                      />
-                      I understand and accept that this block can act on the repository as described above.
-                    </label>
-                    {errors.agreement && <span style={{ ...helper, color: '#ef4444' }}>{errors.agreement}</span>}
-                  </div>
-                </>
-              )}
+                  </>
+                )}
+              </Section>
             </>
           )}
 
-          <div style={divider} />
-
-          {/* ── Description (artifact-owned) ──────────────────────────── */}
-          <div style={{ marginBottom: 12 }}>
-            <label style={lbl}>Description</label>
-            <textarea
-              rows={3}
-              disabled={!descriptionEditable}
-              style={{
-                ...inp,
-                resize: 'vertical',
-                opacity: descriptionEditable ? 1 : 0.6,
-                cursor: descriptionEditable ? 'text' : 'not-allowed',
-                backgroundColor: descriptionEditable ? 'var(--axon-bg4)' : 'var(--axon-bg5)',
-              }}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder={
-                !artifactData
-                  ? "Description loads from your skill's SKILL.md"
-                  : descriptionFromArtifact
-                    ? 'Extend or modify the description...'
-                    : 'No description found in SKILL.md — add one here.'
-              }
-            />
-            {descriptionFromArtifact && (
-              <span style={{ fontSize: 9, color: 'rgba(34,211,184,0.7)', marginTop: 2, display: 'block' }}>
-                ✓ from SKILL.md
-              </span>
-            )}
-            {artifactData && !descriptionFromArtifact && description === '' && (
-              <span style={{ fontSize: 9, color: 'var(--axon-t4)', marginTop: 2, display: 'block' }}>
-                No description in artifact — you can add one
-              </span>
-            )}
-          </div>
-
-          <div style={divider} />
-
-          {/* ── Context Requirements ──────────────────────────────────── */}
-          <div style={secHdr}>Context Requirements</div>
-          <span style={{ ...helper, marginTop: 0, marginBottom: 10, display: 'block' }}>
-            What delivery context fields does this block need as input? AXON will inject only these fields — keeps token cost low.
-          </span>
-          <div style={{ marginBottom: 12 }}>
-            <ChipPicker
-              predefined={CTX_CHIPS}
-              selected={ctxSelected}
-              onToggle={toggleCtx}
-              customInput={ctxCustom}
-              onCustomChange={setCtxCustom}
-              onAddCustom={addCtxCustom}
-            />
-          </div>
-          {ctxSelected.includes('repoCatalog') && (
-            <label style={{ display: 'block', marginBottom: 12 }}>
-              <span style={lbl}>Catalog tags (optional)</span>
-              <input style={inp} value={catalogTagsText} onChange={(e) => setCatalogTagsText(e.target.value)} placeholder="backend, payments" />
-              <span style={helper}>Only repos with at least one of these tags are given to the agent. Empty = the whole catalog.</span>
-            </label>
-          )}
-          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 12, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={contextMode === 'Full'}
-              onChange={(e) => setContextMode(e.target.checked ? 'Full' : 'Selective')}
-              style={{ marginTop: 2 }}
-            />
-            <span style={helper}>
-              Send the <strong>whole</strong> delivery context (Full). Off by default (Selective): the block only sees the fields listed above.
-            </span>
-          </label>
-
-          <div style={divider} />
-
-          {/* ── Output Schema ─────────────────────────────────────────── */}
-          <div style={secHdr}>Output Schema</div>
-          <span style={{ ...helper, marginTop: 0, marginBottom: 10, display: 'block' }}>
-            What fields does this block return in its result? Used for branch conditions in Pipeline Creator.
-          </span>
-          <div style={{ marginBottom: 12 }}>
-            <ChipPicker
-              predefined={OUT_CHIPS}
-              selected={outSelected}
-              onToggle={toggleOut}
-              customInput={outCustom}
-              onCustomChange={setOutCustom}
-              onAddCustom={addOutCustom}
-            />
-          </div>
-          <span style={{ ...helper, display: 'block', marginBottom: 6 }}>
-            To feed a ForEach, return <code>{'{ items: [{ key, task, workspacePath? }], shared? }'}</code> and mark that field as the work item list below (one per block).
-          </span>
-          {outSelected.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
-              {outSelected.map((f) => (
-                <label key={f} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={workItemFields.includes(f)}
-                    onChange={(e) => setWorkItemFields(e.target.checked ? [f] : [])}
-                  />
-                  <span style={helper}><code>{f}</code> is a work item list (type WorkItemList)</span>
-                </label>
-              ))}
+          {/* ------------------------------------------------ advanced */}
+          <details className="rounded-lg border px-3 py-2" data-testid="advanced">
+            <summary className="cursor-pointer text-sm font-medium text-muted-foreground hover:text-foreground">Advanced</summary>
+            <div className="mt-3 flex flex-col gap-4">
+              {sourceType === 'Local' && (
+                <Field label="Visibility" hint={visibility === 'Personal' ? 'Only you can see and run this block.' : visibility === 'Team' ? 'Visible to your team.' : 'Visible to everyone in the organisation.'}>
+                  <Select value={visibility} onValueChange={(v) => setVisibility(v as BuildingBlockVisibility)}>
+                    <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent position="popper" side="bottom">{VISIBILITY_OPTIONS.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+              )}
+              <Field label="Default timeout (seconds)" hint="Prefills the node timeout when the block is added to a pipeline.">
+                <Input type="number" min={1} value={defaultTimeoutSeconds} onChange={(e) => setDefaultTimeoutSeconds(Number(e.target.value) || 0)} />
+              </Field>
+              <label className="flex items-start gap-2 text-sm">
+                <Checkbox checked={contextMode === 'Full'} onCheckedChange={(v) => setContextMode(v === true ? 'Full' : 'Selective')} className="mt-0.5" />
+                <span>
+                  Send the whole context
+                  <span className="block text-xs text-muted-foreground">Off by default: the block only receives the fields listed under Needs. Turning this on costs more tokens.</span>
+                </span>
+              </label>
+              <Field label="Tags">
+                <ChipInput value={tags} onChange={setTags} placeholder="e.g. assessment" ariaLabel="Tags" />
+              </Field>
             </div>
-          )}
-
-          {workItemFields.length > 0 && (
-            <label style={{ display: 'block', marginBottom: 12 }}>
-              <span style={lbl}>Item fields (beyond key, task, workspacePath)</span>
-              <input style={inp} value={itemFieldsText} onChange={(e) => setItemFieldsText(e.target.value)} placeholder="repo" />
-              <span style={helper}>Extra fields every item carries, e.g. <code>repo</code>. Blocks that consume this list can require them.</span>
-            </label>
-          )}
-          <label style={{ display: 'block', marginBottom: 12 }}>
-            <span style={lbl}>Required item fields (from the work-item list this block consumes)</span>
-            <input style={inp} value={requiredItemFieldsText} onChange={(e) => setRequiredItemFieldsText(e.target.value)} placeholder="repo" />
-            <span style={helper}>The pipeline is invalid unless the block before this one declares these item fields, and a missing one fails that step.</span>
-          </label>
-
-          <div style={divider} />
-
-          {/* ── Tags ──────────────────────────────────────────────────── */}
-          <div style={{ marginBottom: 12 }}>
-            <label style={lbl}>Tags</label>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 7 }}>
-              <input
-                style={{ ...inp, flex: 1 }}
-                value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    addTag()
-                  }
-                }}
-                placeholder="e.g. assessment, quality"
-              />
-              <button
-                type="button"
-                onClick={addTag}
-                style={{
-                  padding: '7px 10px',
-                  borderRadius: 6,
-                  border: '1px solid var(--axon-border2)',
-                  background: 'var(--axon-bg4)',
-                  color: 'var(--axon-t2)',
-                  fontSize: 12,
-                  cursor: 'pointer',
-                }}
-              >
-                Add
-              </button>
-            </div>
-            {tags.length > 0 && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                {tags.map((t) => (
-                  <span
-                    key={t}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 4,
-                      fontSize: 11,
-                      padding: '2px 8px',
-                      borderRadius: 10,
-                      background: 'var(--axon-bg5)',
-                      color: 'var(--axon-t3)',
-                      border: '1px solid var(--axon-border)',
-                    }}
-                  >
-                    {t}
-                    <button
-                      type="button"
-                      onClick={() => setTags((ts) => ts.filter((x) => x !== t))}
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: 'var(--axon-t3)',
-                        cursor: 'pointer',
-                        padding: 0,
-                        fontSize: 12,
-                        lineHeight: 1,
-                      }}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
+          </details>
         </form>
 
-        {/* Footer */}
-        <div
-          style={{
-            padding: '12px 16px',
-            borderTop: '1px solid var(--axon-border)',
-            display: 'flex',
-            gap: 8,
-            flexShrink: 0,
-          }}
-        >
-          <button
-            type="button"
-            onClick={onClose}
-            style={{
-              flex: 1,
-              padding: '8px 0',
-              borderRadius: 7,
-              border: '1px solid var(--axon-border2)',
-              background: 'none',
-              color: 'var(--axon-t2)',
-              fontSize: 13,
-              cursor: 'pointer',
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={!canCreate || submitting}
-            onClick={handleSubmit}
-            style={{
-              flex: 2,
-              padding: '8px 0',
-              borderRadius: 7,
-              border: 'none',
-              background: canCreate && !submitting ? 'var(--axon-nexus)' : 'var(--axon-bg5)',
-              color: canCreate && !submitting ? '#fff' : 'var(--axon-t3)',
-              fontWeight: 600,
-              fontSize: 13,
-              cursor: canCreate && !submitting ? 'pointer' : 'default',
-              transition: 'background 0.15s',
-            }}
-          >
-            {submitting ? (isEditing ? 'Saving…' : 'Creating…') : isEditing ? 'Save Changes' : 'Create Block'}
-          </button>
+        <div className="flex shrink-0 gap-2 border-t p-3">
+          <Button type="button" variant="outline" className="flex-1" onClick={onClose}>Cancel</Button>
+          <Button type="submit" className="flex-[2]" disabled={!canSave || submitting} onClick={handleSubmit}>
+            {submitting ? (isEditing ? 'Saving…' : 'Creating…') : isEditing ? 'Save changes' : 'Create block'}
+          </Button>
         </div>
       </div>
 

@@ -1,7 +1,14 @@
 {
   "schemaVersion": 2,
-  "bundleVersion": 14,
+  "bundleVersion": 19,
   "blocks": [
+    {
+      "id": "axon-find-prs",
+      "name": "Find PRs",
+      "version": 1,
+      "path": "blocks/find-prs",
+      "sha256": "ba8db27a930e447a52a85a8af2872fee3eee7b10daa7665d772b2f8d28ad6484"
+    },
     {
       "id": "axon-human-gate",
       "name": "Human Gate",
@@ -10,11 +17,25 @@
       "sha256": "71406d014226b3b94a541354cc699f57e0df99a9c4fafd048741cfcf7f481928"
     },
     {
+      "id": "axon-jira-update",
+      "name": "Jira Update",
+      "version": 1,
+      "path": "blocks/jira-update",
+      "sha256": "0dea100b106a9c99f631f33a8335f5470965c9390821ef10eb453b89eacc1975"
+    },
+    {
       "id": "axon-pr-creator",
       "name": "PR Creator",
       "version": 5,
       "path": "blocks/pr-creator",
       "sha256": "8780e56cd3fc78c929677455cf71ed4007924852953a867d82fb50f340ac1b50"
+    },
+    {
+      "id": "axon-pr-update",
+      "name": "PR Update",
+      "version": 1,
+      "path": "blocks/pr-update",
+      "sha256": "f0341ccc3b3930c262e5711b4d8695b5a79c4de659064215676ce3f3acbd44a0"
     },
     {
       "id": "axon-test-runner",
@@ -26,16 +47,16 @@
     {
       "id": "axon-ticket-fetcher",
       "name": "Ticket Fetcher",
-      "version": 1,
+      "version": 2,
       "path": "blocks/ticket-fetcher",
-      "sha256": "7eb499eb6792b8e0945720b3549cb0998af92b7d2b47bad78fbf61082c5ee746"
+      "sha256": "51cee93d28e7eb8996a1a28016a5e86693bf8d9708bbbef43cf3b7c1870bc44c"
     },
     {
       "id": "axon-workspace-provisioner",
       "name": "Workspace Provisioner",
-      "version": 6,
+      "version": 7,
       "path": "blocks/workspace-provisioner",
-      "sha256": "26bf16272a67a1e61c437fca59be80671e5907cd912b4e387f75b8893cc604cf"
+      "sha256": "a74da41c4a2ada0b39799a68431de826e94c5a3fc9c8f68eaad1d7a6032b20e5"
     }
   ]
 }

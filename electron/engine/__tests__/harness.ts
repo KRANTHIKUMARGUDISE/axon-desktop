@@ -65,6 +65,7 @@ export async function createHarness(opts: HarnessOptions = {}) {
       store, runner, workspace, bus, runsDir,
       ds1ThresholdBytes: () => opts.ds1ThresholdBytes ?? 50_000,
       identity: () => 'dev@example.com',
+      retryDelayMs: () => 0,
       snapshots: opts.snapshots,
       getRepoCatalog: opts.getRepoCatalog,
     })
@@ -87,6 +88,7 @@ export async function createHarness(opts: HarnessOptions = {}) {
       label,
       blockId: label.startsWith('gate') ? HUMAN_GATE_BLOCK_ID : generic.id,
       position: { x: i * 100, y: 0 },
+      ...(label.startsWith('gate') ? { config: { reason: 'A human decides here', checklist: [], mode: 'Pause' } } : {}),
     }))
     const edges = nodes.slice(1).map((n, i) => ({ id: `e${i + 1}`, sourceNodeId: nodes[i].id, targetNodeId: n.id }))
     const pipeline = await store.createPipeline({ name: 'P', description: '', nodes, edges })

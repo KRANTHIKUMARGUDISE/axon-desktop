@@ -1,4 +1,4 @@
-import type { AgentOutput } from '../../shared'
+import type { AgentOutput, ModelPrice } from '../../shared'
 import { createClaudePromptRunner } from './claudePrompt'
 import { runAgenticBlock } from './claudeAgentic'
 import { createAxonNativeRunner } from './axonNative'
@@ -6,8 +6,8 @@ import type { NativeServices } from './native/types'
 import { runCodex } from './codex'
 import type { Runner, RunnerInput } from './types'
 
-export function createRunner(getClaudeKey: () => string, native?: NativeServices): Runner {
-  const prompt = createClaudePromptRunner(getClaudeKey)
+export function createRunner(getClaudeKey: () => string, native?: NativeServices, getPrices?: () => Record<string, ModelPrice>): Runner {
+  const prompt = createClaudePromptRunner(getClaudeKey, { getPrices })
   const axon = createAxonNativeRunner(native)
   return async (input: RunnerInput): Promise<AgentOutput> => {
     switch (input.block.agentRuntime) {

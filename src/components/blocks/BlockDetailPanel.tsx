@@ -8,6 +8,7 @@ import { getBlock } from '../../services/blocksService'
 import { getBlockTypeIcon } from '../../utils/blockTypeIcons'
 import { getRuntimeIcon, RUNTIME_LABELS } from '../../utils/runtimeIcons'
 import type { BlockType, BuildingBlock } from '../../types'
+import { fieldsToContract } from '@shared'
 
 const TYPE_COLORS: Record<string, string> = {
   Decision: '#f472b6',
@@ -95,8 +96,9 @@ export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
   const color = TYPE_COLORS[blockType]
   const sourceType = block.sourceType || 'Local'
   const runtime = block.agentRuntime || 'Claude'
-  const contextRequirements = block.contextRequirements ?? []
-  const outputSchema = block.outputSchema ?? []
+  const contract = fieldsToContract({ contextRequirements: block.contextRequirements, outputSchema: block.outputSchemaTyped ?? block.outputSchema, requiredItemFields: block.requiredItemFields })
+  const needs = contract.inputs
+  const returns = contract.outputs
   const inputs = block.inputs ?? []
   const outputs = block.outputs ?? []
   const cachedFiles = block.cachedFiles ?? []
@@ -302,65 +304,47 @@ export default function BlockDetailPanel({ blockId, onClose, onEdit }: Props) {
 
             <div style={{ height: 1, background: 'var(--axon-border)' }} />
 
-            {/* Context Requirements */}
+            {/* Needs / Returns (the block's contract) */}
             <div>
-              <div
-                style={{
-                  fontSize: 10,
-                  fontWeight: 600,
-                  color: 'var(--axon-t3)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.06em',
-                  marginBottom: 4,
-                }}
-              >
-                Context Requirements
+              <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--axon-t3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+                Needs
               </div>
               <div style={{ fontSize: 11, color: 'var(--axon-t3)', marginBottom: 8 }}>
-                Delivery context injected before execution
+                {block.contextMode === 'Full' ? 'Everything earlier steps returned' : 'Only these fields are passed to the block'}
               </div>
-              {contextRequirements.length > 0 ? (
+              {block.contextMode === 'Full' ? (
+                <div style={{ fontSize: 11, color: '#f59e0b' }}>Full context (higher token cost)</div>
+              ) : needs.length > 0 ? (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  {contextRequirements.map((r) => (
-                    <span key={r} style={tealChip}>
-                      {r}
-                    </span>
+                  {needs.map((r) => (
+                    <span key={r} style={tealChip}>{r}</span>
                   ))}
                 </div>
               ) : (
-                <div style={{ fontSize: 11, color: '#f59e0b' }}>
-                  None declared — full context will be injected (higher token cost)
-                </div>
+                <div style={{ fontSize: 11, color: 'var(--axon-t3)' }}>Nothing from earlier steps</div>
               )}
             </div>
 
-            {/* Output Schema */}
             <div>
-              <div
-                style={{
-                  fontSize: 10,
-                  fontWeight: 600,
-                  color: 'var(--axon-t3)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.06em',
-                  marginBottom: 4,
-                }}
-              >
-                Output Schema
+              <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--axon-t3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+                Returns
               </div>
-              <div style={{ fontSize: 11, color: 'var(--axon-t3)', marginBottom: 8 }}>
-                Fields returned — enables branch conditions
-              </div>
-              {outputSchema.length > 0 ? (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  {outputSchema.map((f) => (
-                    <span key={f} style={purpleChip}>
-                      {f}
-                    </span>
+              <div style={{ fontSize: 11, color: 'var(--axon-t3)', marginBottom: 8 }}>Fields in the block's result</div>
+              {returns.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {returns.map((o) => (
+                    <div key={o.name} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+                      <span style={purpleChip}>{o.name}</span>
+                      {o.list && (
+                        <span style={{ fontSize: 11, color: 'var(--axon-t3)' }}>
+                          work list{o.itemFields?.length ? ` · each item has ${o.itemFields.join(', ')}` : ' · key, task'}
+                        </span>
+                      )}
+                    </div>
                   ))}
                 </div>
               ) : (
-                <div style={{ fontSize: 11, color: 'var(--axon-t3)' }}>None declared — branch conditions unavailable</div>
+                <div style={{ fontSize: 11, color: 'var(--axon-t3)' }}>Nothing declared</div>
               )}
             </div>
 

@@ -11,6 +11,7 @@ import { JiraSettings } from '../components/settings/JiraSettings'
 import { GithubSettings } from '../components/settings/GithubSettings'
 import { ClaudeSettings } from '../components/settings/ClaudeSettings'
 import { RegistrySettings } from '../components/registry/RegistrySettings'
+import { ModelPrices } from '../components/settings/ModelPrices'
 import { Field, FieldRow, Info, SettingsCard, cleanError } from '../components/settings/parts'
 
 type Theme = 'dark' | 'light' | 'system'
@@ -44,7 +45,7 @@ export default function Settings() {
 
         <TabsContent value="registry"><RegistrySettings /></TabsContent>
         <TabsContent value="workspace"><WorkspaceSettings /></TabsContent>
-        <TabsContent value="preferences"><PreferenceSettings /></TabsContent>
+        <TabsContent value="preferences" className="flex flex-col gap-6"><PreferenceSettings /><ModelPrices /></TabsContent>
         <TabsContent value="about"><AboutSettings /></TabsContent>
       </Tabs>
     </div>
@@ -102,20 +103,25 @@ function WorkspaceSettings() {
 function PreferenceSettings() {
   const [theme, setTheme] = useState<Theme>('dark')
   const [snapshotKb, setSnapshotKb] = useState('50')
+  const [maxConcurrent, setMaxConcurrent] = useState('1')
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     window.axon.settings.getAll().then((all) => {
       setTheme(((all.theme as string) || 'dark') as Theme)
       setSnapshotKb(String((all.maxContextSnapshotSizeKb as number) || 50))
+      setMaxConcurrent(String((all.maxConcurrentDeliveries as number) || 1))
     }).catch(() => {})
   }, [])
 
   async function save() {
     const kb = Math.round(Number(snapshotKb))
     if (!Number.isFinite(kb) || kb < 1) { toast.error('Snapshot size must be at least 1 KB'); return }
+    const cap = Math.round(Number(maxConcurrent))
+    if (!Number.isFinite(cap) || cap < 1 || cap > 10) { toast.error('Concurrent deliveries must be between 1 and 10'); return }
     setSaving(true)
     try {
+      await window.axon.settings.set('maxConcurrentDeliveries', cap)
       await window.axon.settings.set('theme', theme)
       await window.axon.settings.set('maxContextSnapshotSizeKb', kb)
       toast.success('Preferences saved')
@@ -145,6 +151,9 @@ function PreferenceSettings() {
         </Field>
         <Field label="Max inline snapshot size (KB)" htmlFor="pref-snapshot" hint="Step input/output above this size is written to a file instead of being stored inline.">
           <Input id="pref-snapshot" type="number" min={1} value={snapshotKb} onChange={(e) => setSnapshotKb(e.target.value)} />
+        </Field>
+        <Field label="Deliveries running at once" htmlFor="pref-concurrent" hint="Extra deliveries wait as Pending and start when a running one finishes or pauses at a gate. Default 1.">
+          <Input id="pref-concurrent" type="number" min={1} max={10} value={maxConcurrent} onChange={(e) => setMaxConcurrent(e.target.value)} />
         </Field>
       </FieldRow>
     </SettingsCard>

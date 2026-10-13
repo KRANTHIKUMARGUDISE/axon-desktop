@@ -13,7 +13,7 @@ import { log } from '../log'
 
 export type GitRun = (cwd: string, args: string[], env?: Record<string, string>) => Promise<string>
 
-const defaultGit: GitRun = (cwd, args, env) =>
+export const defaultGit: GitRun =(cwd, args, env) =>
   new Promise((resolve, reject) => {
     execFile(
       'git', args,
@@ -35,6 +35,8 @@ export interface SnapshotService {
   has(cwd: string, deliveryId: string, stepId: string): Promise<boolean>
   /** Put the working tree back to the step's snapshot. */
   restore(cwd: string, deliveryId: string, stepId: string): Promise<boolean>
+  /** Hash of the repo's current working tree (tracked + untracked, non-ignored); null for a non-git folder. Edit detection at gates. */
+  treeHash?(cwd: string): Promise<string | null>
   /** Delete every refs/axon/<deliveryId>/… in the repos behind these folders. */
   dropAll(deliveryId: string, cwds: string[]): Promise<void>
 }
@@ -120,6 +122,15 @@ export function createSnapshotService(deps: { git?: GitRun } = {}): SnapshotServ
       if (!commit) return false
       await restoreFrom(top, commit)
       return true
+    },
+
+    async treeHash(cwd) {
+      const top = await topLevel(cwd)
+      if (!top) return null
+      return withIndex(async (env) => {
+        await git(top, ['add', '-A'], env)
+        return (await git(top, ['write-tree'], env)).trim() || null
+      })
     },
 
     async dropAll(deliveryId, cwds) {

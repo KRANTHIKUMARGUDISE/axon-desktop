@@ -1,6 +1,7 @@
 import type { z } from 'zod'
 import type { GitFactory, CatalogRepo } from '../../workspace/provisioner'
 import type { RunnerInput } from '../types'
+import type { JiraClient } from '../../jira/client'
 
 // Services native (Axon-runtime) blocks may use. Injected by main.ts; tests pass fakes/local-repo git.
 export interface NativeServices {
@@ -18,6 +19,10 @@ export interface NativeServices {
   username(): string
   committer?(): { name: string; email: string } | undefined
   redact?(s: string): string
+  /** S5b: the engineer's own Jira client (null when Jira is not connected). Never exposed to agents. */
+  jira?(): Promise<JiraClient | null>
+  /** S5b: a link to the delivery for comment templates ({{deliveryLink}}). */
+  deliveryLink?(deliveryId: string): string
 }
 
 export interface NativeContext {

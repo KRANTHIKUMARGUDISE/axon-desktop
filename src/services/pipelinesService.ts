@@ -11,6 +11,9 @@ export interface CreatePipelineRequest {
   description: string
   nodes: unknown[]
   edges: unknown[]
+  /** S5b: actions that run only when a delivery fails (and, if ticked, is cancelled). */
+  onFailure?: unknown[]
+  onFailureOnCancel?: boolean
 }
 
 function toPipeline(p: StoredPipeline): Pipeline {
@@ -25,6 +28,12 @@ export const getPipelines = async (filter?: PipelineFilter): Promise<Pipeline[]>
   }
   if (filter?.isActive !== undefined) all = all.filter((p) => (p.isActive ?? true) === filter.isActive)
   return all.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).map(toPipeline)
+}
+
+export const getPipelineVersion = async (id: string, version: number): Promise<Pipeline> => {
+  const p = (await window.axon.pipelines.getVersion(id, version)) as StoredPipeline | null
+  if (!p) throw new Error(`Version ${version} of this pipeline was not found`)
+  return toPipeline(p)
 }
 
 export const getPipeline = async (id: string): Promise<Pipeline> => {

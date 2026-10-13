@@ -70,10 +70,48 @@ export function JiraSettings() {
           <Info label="API token" hint="Stored encrypted on this machine; never shown.">{jira?.hasToken ? "••••••••••••" : ""}</Info>
         </FieldRow>
         {testResult && <Notice ok={testResult.ok}>{testResult.text}</Notice>}
+        <PermissionCheck disabled={!jira?.configured || !jira?.hasToken} />
       </SettingsCard>
 
       <ReplaceTokenDialog open={tokenOpen} onOpenChange={setTokenOpen} email={jira?.email ?? ''} onDone={() => { refresh(); setTestResult(null) }} />
       <ChangeAccountDialog open={changeOpen} onOpenChange={setChangeOpen} current={jira ?? null} onDone={refresh} />
+    </>
+  )
+}
+
+// The Jira watcher needs three things on a project: read it, edit labels, add comments. One clear message per missing one.
+function PermissionCheck({ disabled }: { disabled: boolean }) {
+  const [project, setProject] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null)
+  const key = project.trim().toUpperCase()
+  const valid = /^[A-Z][A-Z0-9_]+$/.test(key)
+
+  async function check() {
+    setBusy(true)
+    setResult(null)
+    try {
+      const r = await window.axon.jira.checkPermissions(key)
+      setResult(r.ok
+        ? { ok: true, text: `Your account can read ${key}, edit labels and add comments — the watcher can use this project.` }
+        : { ok: false, text: r.missing.join(' ') })
+    } catch (e) {
+      setResult({ ok: false, text: cleanError(e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <Separator />
+      <Field label="Check watcher permissions" htmlFor="jira-perm-project" hint="Project key, e.g. ABC. The watcher needs: Browse projects, Edit issues (labels) and Add comments.">
+        <div className="flex gap-2">
+          <Input id="jira-perm-project" value={project} onChange={(e) => { setProject(e.target.value); setResult(null) }} placeholder="ABC" spellCheck={false} className="font-mono" />
+          <Button variant="outline" onClick={check} disabled={disabled || busy || !valid}>{busy ? 'Checking…' : 'Check permissions'}</Button>
+        </div>
+      </Field>
+      {result && <Notice ok={result.ok}>{result.text}</Notice>}
     </>
   )
 }

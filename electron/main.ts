@@ -1,10 +1,18 @@
-import { app, BrowserWindow, session, dialog, shell } from 'electron'
+import { app, BrowserWindow, nativeImage, session, dialog, shell } from 'electron'
 import path from 'path'
 import fs from 'fs/promises'
+import { existsSync } from 'fs'
 import { atomicWrite } from './store/atomic'
 import { pathToFileURL } from 'url'
 import { registerSecretHandlers, getGitToken, purgeLegacyAuthFiles } from './ipc/secrets'
-import { registerSettingsHandlers, getWorkspaceRoot, getDS1ThresholdBytes, store as settingsStore, readIdentitySettings, isOnboarded } from './ipc/settings'
+import { registerSettingsHandlers, getWorkspaceRoot, getDS1ThresholdBytes, store as settingsStore, readIdentitySettings, isOnboarded, isWatcherHere, setWatcherHere, getMaxConcurrentDeliveries, getModelPrices } from './ipc/settings'
+import { createScheduler } from './engine/scheduler'
+import { RuleStore } from './rules/ruleStore'
+import { Watcher } from './watcher/watcher'
+import { makeJiraClient } from './jira/factory'
+import { createActionRuntime } from './actions/runtime'
+import { registerRulesHandlers } from './ipc/rules'
+import { startNotifications } from './notifications'
 import { registerWorkspaceHandlers, createGrants } from './ipc/workspace'
 import { registerShellHandlers } from './ipc/shell'
 import { configureTrustedSender, makeTrustedUrlCheck } from './ipc/guard'
@@ -51,6 +59,13 @@ if (!lock) {
 
 let mainWindow: BrowserWindow | null = null
 
+/** The window icon: the .ico on Windows (crisp at every taskbar size), the .png elsewhere. */
+function windowIcon(): string {
+  const dir = path.join(__dirname, '..', '..', 'build')
+  const ico = path.join(dir, 'icon.ico')
+  return process.platform === 'win32' && existsSync(ico) ? ico : path.join(dir, 'icon.png')
+}
+
 function createWindow() {
   const isWin = process.platform === 'win32'
 
@@ -60,7 +75,7 @@ function createWindow() {
     minWidth: 1280,
     minHeight: 800,
     autoHideMenuBar: true,
-    icon: path.join(__dirname, '..', '..', 'build', 'icon.png'),
+    icon: windowIcon(),
     ...(isWin
       ? {
           titleBarStyle: 'hidden' as const,
@@ -81,6 +96,16 @@ function createWindow() {
       webviewTag: false,
     },
   })
+
+  // Windows: with an explicit AppUserModelID (needed for notifications) the taskbar button no longer falls back to the window
+  // icon on its own and shows the generic Electron one. Say which icon it is.
+  if (isWin) {
+    const ico = path.join(__dirname, '..', '..', 'build', 'icon.ico')
+    if (existsSync(ico)) {
+      mainWindow.setIcon(nativeImage.createFromPath(ico))
+      try { mainWindow.setAppDetails({ appId: 'com.company.axon', appIconPath: ico, appIconIndex: 0 }) } catch (err) { log.warn('[window] could not set the taskbar icon details', err) }
+    }
+  }
 
   const wc = mainWindow.webContents
   // No child windows ever; https links go to the OS browser through the same allow-list.
@@ -123,10 +148,14 @@ app.on('second-instance', () => {
 
 let engine: Engine | null = null
 let registrySync: RegistrySync | null = null
+let watcher: Watcher | null = null
+let watcherHeartbeat: NodeJS.Timeout | null = null
 
 const REGISTRY_STATUS_CHANNEL = 'registry:status'
 
 app.whenReady().then(async () => {
+  // Windows toast notifications need the app's AppUserModelID (matches electron-builder's appId).
+  app.setAppUserModelId('com.company.axon')
   const userData = app.getPath('userData')
   initLogger({ dir: path.join(userData, 'logs'), level: isDev ? 'debug' : 'info', mirror: isDev })
   log.info(`AXON ${app.getVersion()} starting (electron ${process.versions.electron})`)
@@ -183,11 +212,21 @@ app.whenReady().then(async () => {
       sync.notify()
     },
   })
+  // S5: watcher rules live next to the engineer's other documents and ride the same write queue.
+  const rules = new RuleStore({
+    dir: path.join(userData, 'store', 'rules'),
+    getOwner: () => identity.get()?.email ?? '',
+    onSaved: (rule) => service.mirrorRule(rule),
+    onDeleted: (id) => service.mirrorRuleDelete(id),
+  })
   service = new RegistryService({
     sync, queue, reader, local, registryDir, identity, appVersion: app.getVersion(),
     consent: () => settingsStore.get('activityConsent') === true,
     getGitToken,
     isReserved: (id) => seedIds.has(id),
+    rules,
+    isWatcherHere,
+    onWatcherYield: () => { log.info('[watcher] another machine took over; this machine stops watching'); setWatcherHere(false) },
   })
   const runsDir = path.join(userData, 'runs')
   const bus = createBus()
@@ -208,14 +247,19 @@ app.whenReady().then(async () => {
     getDelivery: (id) => store.getDelivery(id),
   })
 
+  const actionRuntime = createActionRuntime({ store, makeJiraClient, gh: { getToken: getGitToken, redact } })
+
   engine = createEngine({
     store,
     bus,
     runsDir,
     identity: () => identity.actor(),
+    preflight: actionRuntime.preflight,
+    onTerminal: actionRuntime.onTerminal,
     runner: createRunner(getClaudeKey, {
       getWorkspaceRoot,
       getGitToken,
+      jira: makeJiraClient,
       getCatalog: () => readCatalog(registryDir),
       lastCatalogSyncAt: () => service.status().lastSyncAt,
       makeGit: gitFactory,
@@ -223,7 +267,7 @@ app.whenReady().then(async () => {
       username: () => os.userInfo().username,
       committer: () => ({ name: identity.displayName(), email: identity.actor() }),
       redact,
-    }),
+    }, getModelPrices),
     workspace: workspaceService.port,
     snapshots: createSnapshotService(),
     getRepoCatalog: async () => ({ entries: (await loadCatalog(registryDir)).entries, version: await registryHead(registryDir) }),
@@ -245,8 +289,27 @@ app.whenReady().then(async () => {
     void store.getDelivery(previousId)
       .then((d) => (d && d.status === 'Superseded' ? service.recordRun(d) : undefined))
       .catch((err) => log.warn('[registry] superseded run summary failed', err))
+  }, () => rules.list())
+  // Global cap on running deliveries (default 1): extra starts stay Pending and begin as slots free.
+  const scheduler = createScheduler({ engine, bus, getCap: getMaxConcurrentDeliveries })
+  registerDeliveryHandlers(engine, bus, { scheduler, store })
+  startNotifications({ bus, store, getWindow: () => mainWindow, createWindow })
+
+  // Jira watcher (S5): polls only when this is the active machine (D10) and a rule is enabled.
+  watcher = new Watcher({
+    store,
+    bus,
+    statePath: path.join(userData, 'watcher', 'state.json'),
+    listRules: () => rules.list(),
+    isActiveHere: async () => (await service.watcherStatus()).activeHere,
+    isPaused: () => service.isPaused(),
+    makeClient: makeJiraClient,
+    startDelivery: (id) => scheduler.start(id),
+    displayName: () => identity.displayName(),
   })
-  registerDeliveryHandlers(engine, bus)
+  registerRulesHandlers({
+    rules, watcher, store, service, makeClient: makeJiraClient, getWorkspaceRoot, isWatcherHere, setWatcherHere,
+  })
   const startRegistry = (firstLogin = false) => {
     void service.onLaunch()
     if (firstLogin) void service.logActivity('login')
@@ -275,6 +338,23 @@ app.whenReady().then(async () => {
   await engine.reconcileOnBoot()
   void engine.cleanupFailedSnapshots().catch((e) => log.warn('[main] snapshot cleanup failed', e))
 
+  if (identity.get() && isOnboarded()) {
+    void service.mirrorAllRules().catch((err) => log.warn('[rules] mirror failed', err))
+    // Watcher boot reconcile: finish interrupted claims, re-send lost write-backs, list orphans; then start any watcher
+    // delivery that was created but never started (the app died in between), and begin polling.
+    void (async () => {
+      await watcher?.reconcile().catch((err) => log.warn('[watcher] reconcile failed', err))
+      for (const d of await store.listDeliveries()) {
+        if (d.trigger === 'Watcher' && d.status === 'Pending') await scheduler.start(d.id).catch((err) => log.warn('[watcher] start failed', err))
+      }
+      watcher?.start()
+    })()
+    // D10: the active machine heartbeats into profile.yaml; the other machines show a stale warning when it stops.
+    watcherHeartbeat = setInterval(() => {
+      if (isWatcherHere()) void service.updateProfile().catch((err) => log.warn('[watcher] heartbeat failed', err))
+    }, 5 * 60_000)
+  }
+
   createWindow()
 })
 
@@ -285,6 +365,8 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   shuttingDown = true
   registrySync?.stop()
+  watcher?.stop()
+  if (watcherHeartbeat) clearInterval(watcherHeartbeat)
   engine.shutdown()
     .catch((err) => log.warn('shutdown failed', err))
     // Best-effort final push (bounded); anything unsent stays in the durable queue for next launch.

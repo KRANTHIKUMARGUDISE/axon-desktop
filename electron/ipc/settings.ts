@@ -4,13 +4,15 @@ import path from 'path'
 import os from 'os'
 import { z } from 'zod'
 import { SETTING_VALIDATORS } from '../../shared'
-import type { Settings, WritableSettingKey } from '../../shared'
+import type { Settings, WritableSettingKey, ModelPrice } from '../../shared'
 import { handle } from './guard'
 
 interface StoredSettings extends Settings {
   gitTokenSuffix: string
   // Feature flags (D6): main-only, default off. Env AXON_FEATURE_<NAME>=1 also enables them.
   featureIntelligence: boolean
+  // S5 D10: "Run watcher on this machine". Main-only; the profile.yaml heartbeat tells the other machines.
+  watcherActiveHere: boolean
 }
 
 const store = new Store<StoredSettings>({
@@ -26,6 +28,7 @@ const store = new Store<StoredSettings>({
     maxContextSnapshotSizeKb: { type: 'number', default: 50 },
     gitTokenSuffix: { type: 'string', default: '' },
     featureIntelligence: { type: 'boolean', default: false },
+    watcherActiveHere: { type: 'boolean', default: false },
     registryUrl: { type: 'string', default: '' },
     registryBranch: { type: 'string', default: '' },
     syncIntervalMinutes: { type: 'number', default: 5 },
@@ -33,6 +36,8 @@ const store = new Store<StoredSettings>({
     jiraVerifiedAt: { type: 'string', default: '' },
     team: { type: 'string', default: '' },
     activityConsent: { type: 'boolean', default: false },
+    maxConcurrentDeliveries: { type: 'number', default: 1 },
+    modelPrices: { type: 'object', default: {} },
   },
 })
 
@@ -93,6 +98,12 @@ export function readJiraIdentity(): { email: string; displayName: string; site: 
 export function readIdentitySettings(): { userEmail: string; userName: string; team: string } {
   return { userEmail: store.get('userEmail') || '', userName: store.get('userName') || '', team: store.get('team') || '' }
 }
+
+export const isWatcherHere = (): boolean => store.get('watcherActiveHere') === true
+export const setWatcherHere = (v: boolean): void => store.set('watcherActiveHere', v)
+export const getMaxConcurrentDeliveries = (): number => store.get('maxConcurrentDeliveries') || 1
+/** S5b: $ per million tokens by model id (Settings → Preferences); prices Prompt steps. */
+export const getModelPrices = (): Record<string, ModelPrice> => (store.get('modelPrices') as Record<string, ModelPrice> | undefined) ?? {}
 
 /** Main-side only (derived from the stored git token) — never writable from the renderer. */
 export function setGitTokenSuffix(suffix: string): void {

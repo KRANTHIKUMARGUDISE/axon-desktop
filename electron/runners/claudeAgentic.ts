@@ -5,6 +5,7 @@
 import type { query as QueryFn, HookJSONOutput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentOutput } from '../../shared'
 import { normalizeAgentOutput, buildUntrustedContext } from './output'
+import { declaredContractSection } from './claudePrompt'
 import { decideToolUse, buildAgentEnv, MANAGED_DENY_RULES } from '../security/agentPolicy'
 import { log } from '../log'
 import type { RunnerInput } from './types'
@@ -135,7 +136,7 @@ export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string):
       options: {
         cwd: workspacePath,
         settingSources: ['project'],
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: instructions },
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: `${instructions}${declaredContractSection(instructions)}` },
         permissionMode: 'bypassPermissions',
         tools: effectiveTools,
         // Hard deny regardless of bypassPermissions and regardless of what's in `tools` —
@@ -163,8 +164,12 @@ export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string):
 
     let resultText: string | undefined
     let resultError: string | undefined
+    let usage: AgentOutput['usage']
     for await (const message of q) {
       if (message.type === 'result') {
+        // Real numbers reported by the SDK (tokens and total cost of this step).
+        const m = message as { usage?: { input_tokens?: number; output_tokens?: number }; total_cost_usd?: number }
+        usage = { inputTokens: m.usage?.input_tokens, outputTokens: m.usage?.output_tokens, costUsd: m.total_cost_usd }
         if (message.subtype === 'success') {
           resultText = message.result
         } else {
@@ -174,7 +179,7 @@ export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string):
     }
 
     if (resultError) {
-      return { status: 'failed', confidence: 0, summary: resultError, result: {}, errorMessage: resultError, toolsUsed: Array.from(toolsUsed), toolsDenied: deniedList(), denials }
+      return { status: 'failed', confidence: 0, summary: resultError, result: {}, errorMessage: resultError, toolsUsed: Array.from(toolsUsed), toolsDenied: deniedList(), denials, usage }
     }
     if (resultText === undefined) {
       // When the timeout's (or an externally-relayed Stop's) AbortController fires
@@ -193,7 +198,7 @@ export async function runAgenticBlock(input: RunnerInput, claudeApiKey: string):
     }
 
     const normalized = normalizeAgentOutput(resultText, outputMapping, input.block.outputSchema)
-    return { ...normalized, toolsUsed: Array.from(toolsUsed), toolsDenied: deniedList(), denials }
+    return { ...normalized, toolsUsed: Array.from(toolsUsed), toolsDenied: deniedList(), denials, ...(usage ? { usage } : {}) }
   } catch (err) {
     const cancelled = externalSignal?.aborted === true
     const timedOut = !cancelled && abortController.signal.aborted

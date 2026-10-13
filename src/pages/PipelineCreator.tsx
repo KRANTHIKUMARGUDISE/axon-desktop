@@ -1,6 +1,9 @@
 import '@xyflow/react/dist/style.css'
 import { useState, useCallback, useMemo, useEffect } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { Alert, AlertDescription } from '../components/ui/alert'
+import { Button } from '../components/ui/button'
+import { History } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap,
@@ -9,10 +12,12 @@ import {
   type OnNodesDelete, type OnEdgesDelete,
 } from '@xyflow/react'
 import { toast } from 'sonner'
-import { validatePipeline, toPipelineNodes, parentsFirst, canvasNodeSize, forEachSourceLabel, FOREACH_DEFAULT_SIZE, describeHandoff, effectiveItemFields } from '@shared'
-import type { PipelineNode as SharedNode, PipelineEdge as SharedEdge, CanvasNode } from '@shared'
+import { contextKey, isOptionalContext, readGateConfig, validatePipeline, toPipelineNodes, parentsFirst, canvasNodeSize, forEachSourceLabel, FOREACH_DEFAULT_SIZE } from '@shared'
+import type { PipelineNode as SharedNode, PipelineEdge as SharedEdge, CanvasNode, OnFailureAction } from '@shared'
+import PropertiesPanel from '../components/pipeline/PropertiesPanel'
+import { useConfirm } from '../components/shared/ConfirmDialog'
 import { getBlocks } from '../services/blocksService'
-import { getPipeline, createPipeline, updatePipeline } from '../services/pipelinesService'
+import { getPipeline, getPipelineVersion, createPipeline, updatePipeline } from '../services/pipelinesService'
 import type { BlockType, PipelineNode, PipelineEdge, ValidationResult } from '../types'
 import Palette from '../components/pipeline/Palette'
 import DecisionNode from '../components/pipeline/nodes/DecisionNode'
@@ -90,11 +95,13 @@ interface FlowCanvasProps {
   onNodeDragStop: (e: unknown, n: Node, getAbs: (id: string) => { x: number; y: number } | undefined, intersecting: Node[]) => void
   onNodesDelete: OnNodesDelete
   onEdgesDelete: OnEdgesDelete
+  onNodeContextMenu: (e: React.MouseEvent, n: Node) => void
+  readOnly?: boolean
 }
 
 function FlowCanvas({
   nodes, edges, onNodesChange, onEdgesChange, onConnect, onReconnect,
-  isValidConnection, onNodeClick, onPaneClick, onNewNode, onNodeDragStop, onNodesDelete, onEdgesDelete,
+  isValidConnection, onNodeClick, onPaneClick, onNewNode, onNodeDragStop, onNodesDelete, onEdgesDelete, onNodeContextMenu, readOnly,
 }: FlowCanvasProps) {
   const { screenToFlowPosition, getIntersectingNodes, getInternalNode } = useReactFlow()
 
@@ -126,9 +133,13 @@ function FlowCanvas({
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onConnect={onConnect}
-      onDrop={onDrop}
+      onDrop={readOnly ? undefined : onDrop}
+      nodesDraggable={!readOnly}
+      nodesConnectable={!readOnly}
+      edgesReconnectable={!readOnly}
       onDragOver={onDragOver}
       onNodeClick={onNodeClick}
+      onNodeContextMenu={onNodeContextMenu}
       onNodeDragStop={(ev, n) => onNodeDragStop(
         ev, n,
         (id) => getInternalNode(id)?.internals.positionAbsolute,
@@ -141,7 +152,7 @@ function FlowCanvas({
       isValidConnection={isValidConnection}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
-      deleteKeyCode="Delete"
+      deleteKeyCode={readOnly ? null : 'Delete'}
       fitView
       fitViewOptions={{ maxZoom: 0.85, padding: 0.25 }}
       proOptions={{ hideAttribution: true }}
@@ -164,13 +175,33 @@ export default function PipelineCreator() {
   const queryClient = useQueryClient()
   const { id } = useParams<{ id: string }>()
   const isEditMode = Boolean(id)
+  // ?version=N opens an older published version for looking only (the version a delivery ran, or a rule is pinned to).
+  const [searchParams] = useSearchParams()
+  const versionParam = Number(searchParams.get('version')) || null
+  const [older, setOlder] = useState<{ viewing: number; latest: number } | null>(null)
+  const readOnly = older !== null
   const [pipelineName, setPipelineName] = useState('Untitled Pipeline')
   const [pipelineDescription, setPipelineDescription] = useState('')
+  // S5b: "On failure" actions (pipeline setting, pinned with the published version).
+  const [onFailure, setOnFailure] = useState<OnFailureAction[]>([])
+  const [onFailureOnCancel, setOnFailureOnCancel] = useState(false)
   const [blocks, setBlocks] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
+
+  // The latest document, or an older version of it (then the page is read-only and says so).
+  async function loadPipelineDoc(pid: string, version: number | null) {
+    const latest = await getPipeline(pid)
+    if (version && version !== Number(latest.version)) {
+      const doc = await getPipelineVersion(pid, version)
+      setOlder({ viewing: version, latest: Number(latest.version) })
+      return doc
+    }
+    setOlder(null)
+    return latest
+  }
 
   useEffect(() => {
     async function loadData() {
@@ -178,13 +209,15 @@ export default function PipelineCreator() {
       try {
         const [blocksData, pipelineData] = await Promise.all([
           getBlocks(),
-          isEditMode && id ? getPipeline(id) : Promise.resolve(null),
+          isEditMode && id ? loadPipelineDoc(id, versionParam) : Promise.resolve(null),
         ])
         setBlocks(blocksData)
 
         if (pipelineData) {
           setPipelineName(pipelineData.name)
           setPipelineDescription(pipelineData.description ?? '')
+          setOnFailure(((pipelineData as any).onFailure ?? []) as OnFailureAction[])
+          setOnFailureOnCancel((pipelineData as any).onFailureOnCancel === true)
 
           // Create a map of blockId -> block for quick lookup
           const blockMap = new Map<string, any>()
@@ -209,6 +242,9 @@ export default function PipelineCreator() {
               } as Node
             }
             if (nodeType === 'block') nodeType = undefined
+            // The block's current role wins over a type stored with an older pipeline version (e.g. a block that changed role).
+            const currentRole = blockMap.get(n.blockId)?.role
+            if (currentRole) nodeType = currentRole
             if (!nodeType && n.blockId) {
               nodeType = blockMap.get(n.blockId)?.role || blockMap.get(n.blockId)?.type || 'Execution'
             }
@@ -248,13 +284,13 @@ export default function PipelineCreator() {
           setEdges(rfEdges)
         }
       } catch (e) {
-        toast.error('Failed to load pipeline')
+        toast.error(`Failed to load pipeline: ${e instanceof Error ? e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : String(e)}`)
       } finally {
         setLoading(false)
       }
     }
     loadData()
-  }, [id, isEditMode]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [id, isEditMode, versionParam]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Update window title - show loaded name for edit mode, placeholder for new mode
   useEffect(() => {
@@ -378,7 +414,23 @@ export default function PipelineCreator() {
     setSelectedNodeId(node.id)
   }, [])
 
-  const onPaneClick = useCallback(() => setSelectedNodeId(null), [])
+  const onPaneClick = useCallback(() => { setSelectedNodeId(null); setMenu(null) }, [])
+
+  // Right-click a block: a small menu with Delete (asks first, like the button in the panel).
+  const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null)
+  const onNodeContextMenu = useCallback((e: React.MouseEvent, node: Node) => {
+    e.preventDefault()
+    setSelectedNodeId(node.id)
+    if (readOnly) return
+    setMenu({ x: e.clientX, y: e.clientY, id: node.id })
+  }, [])
+  useEffect(() => {
+    if (!menu) return
+    const close = () => setMenu(null)
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', close)
+    return () => { window.removeEventListener('click', close); window.removeEventListener('keydown', close) }
+  }, [menu])
 
   // Canvas-only decoration: each ForEach header says which block feeds it.
   const displayNodes = useMemo(() => {
@@ -391,6 +443,17 @@ export default function PipelineCreator() {
 
   const selectedNode = nodes.find(n => n.id === selectedNodeId) ?? null
   const selectedIsForEach = selectedNode?.type === 'forEachNode'
+  // S5 Part B: a Human Gate (Control block) carries its reason, checklist and mode in node.config.
+  const selectedIsGate = !selectedIsForEach && blocks.find(b => b.id === (selectedNode?.data as any)?.blockId)?.role === 'Control'
+  const gateCfg = readGateConfig(((selectedNode?.data as any)?.config ?? {}) as Record<string, unknown>)
+  // S5b: action blocks (Jira Update, PR Update, Find PRs) keep their settings in node.config too.
+  const selectedBlock = selectedIsForEach ? undefined : blocks.find(b => b.id === (selectedNode?.data as any)?.blockId)
+  const selectedArtifact = selectedIsForEach ? undefined : (blocks.find(b => b.id === (selectedNode?.data as any)?.blockId)?.artifactName as string | undefined)
+  function updateGateConfig(patch: Record<string, unknown>) {
+    setNodes(nds => nds.map(n => n.id === selectedNodeId
+      ? { ...n, data: { ...n.data, config: { ...(((n.data as any).config ?? {}) as Record<string, unknown>), ...patch } } }
+      : n))
+  }
 
   // Drafts keep their pins; this explicit action moves every pinned node to the block's current version.
   const outdatedPins = nodes.filter(n => {
@@ -408,22 +471,6 @@ export default function PipelineCreator() {
   }
   const outgoingEdges = edges.filter(e => e.source === selectedNodeId)
 
-  // Handoff contract of an edge, e.g. "Demo Planner → Workspace Provisioner: WorkItemList (key, task, repo)".
-  function handoffText(sourceId: string, targetId: string): string {
-    const nodeById = (id: string) => nodes.find(n => n.id === id)?.data as any
-    const src = nodeById(sourceId)
-    const dst = nodeById(targetId)
-    const srcBlock = blocks.find(b => b.id === src?.blockId)
-    const sharedNodes = toSharedNodes(nodes)
-    const srcNode = sharedNodes.find(n => n.id === sourceId)
-    const blockMap = new Map(blocks.map(b => [b.id, { id: b.id, role: b.role, artifactName: b.artifactName, outputSchema: b.outputSchemaTyped ?? b.outputSchema }]))
-    return describeHandoff(
-      { name: src?.label ?? sourceId, block: { outputSchema: srcBlock?.outputSchemaTyped } },
-      dst?.label ?? targetId,
-      srcNode ? effectiveItemFields(srcNode, sharedNodes, toSharedEdges(edges), blockMap as any) : undefined,
-    )
-  }
-
   function updateNodeData(key: string, value: unknown) {
     setNodes(nds => nds.map(n =>
       n.id === selectedNodeId ? { ...n, data: { ...n.data, [key]: value } } : n
@@ -437,11 +484,19 @@ export default function PipelineCreator() {
     }))
   }
 
-  function deleteSelectedNode() {
-    if (!selectedNodeId) return
-    setNodes(nds => nds.filter(n => n.id !== selectedNodeId))
-    setEdges(eds => eds.filter(e => e.source !== selectedNodeId && e.target !== selectedNodeId))
-    setSelectedNodeId(null)
+  const [confirm, confirmDialog] = useConfirm()
+  async function deleteNode(nodeId: string) {
+    const node = nodes.find(n => n.id === nodeId)
+    const name = node?.type === 'forEachNode' ? 'ForEach' : (blocks.find(b => b.id === (node?.data as any)?.blockId)?.name ?? String((node?.data as any)?.label ?? 'this block'))
+    const ok = await confirm({
+      title: `Remove "${name}" from this pipeline?`,
+      message: 'The block itself is not deleted; it is only taken out of this pipeline together with its connections. Nothing is saved until you press Save.',
+      confirmLabel: 'Remove', destructive: true,
+    })
+    if (!ok) return
+    setNodes(nds => nds.filter(n => n.id !== nodeId))
+    setEdges(eds => eds.filter(e => e.source !== nodeId && e.target !== nodeId))
+    setSelectedNodeId(cur => (cur === nodeId ? null : cur))
   }
 
   async function handleSave(asDraft: boolean = false) {
@@ -470,6 +525,8 @@ export default function PipelineCreator() {
         description: pipelineDescription,
         nodes: pipelineNodes,
         edges: pipelineEdges,
+        onFailure,
+        onFailureOnCancel,
       }
 
       if (isEditMode && id) {
@@ -530,11 +587,13 @@ export default function PipelineCreator() {
             )}
             <input
               value={pipelineName}
+              readOnly={readOnly}
               onChange={e => setPipelineName(e.target.value)}
               style={{ background: 'none', border: 'none', outline: 'none', color: '#e2e8f0', fontSize: 15, fontWeight: 700, padding: 0, width: '100%' }}
             />
             <input
               value={pipelineDescription}
+              readOnly={readOnly}
               onChange={e => setPipelineDescription(e.target.value)}
               placeholder="Description (optional)"
               style={{ background: 'none', border: 'none', outline: 'none', color: '#64748b', fontSize: 11, padding: 0, width: '100%' }}
@@ -559,21 +618,37 @@ export default function PipelineCreator() {
             )}
           </div>
 
-          <button
+          {!readOnly && <button
             onClick={() => handleSave(true)}
             disabled={saving || loading}
             style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', borderRadius: 6, padding: '4px 12px', fontSize: 12, cursor: saving || loading ? 'default' : 'pointer', opacity: saving || loading ? 0.5 : 1 }}
           >
             {saving ? 'Saving...' : 'Save Draft'}
-          </button>
-          <button
+          </button>}
+          {!readOnly && <button
             onClick={() => handleSave(false)}
             disabled={saving || loading}
             style={{ background: '#6f5fe8', border: 'none', color: '#fff', borderRadius: 6, padding: '4px 14px', fontSize: 12, cursor: saving || loading ? 'default' : 'pointer', fontWeight: 600, opacity: saving || loading ? 0.5 : 1 }}
           >
             {saving ? 'Saving...' : 'Save Pipeline'}
-          </button>
+          </button>}
         </div>
+
+        {older && (
+          <Alert className="rounded-none border-x-0 border-warning/40 bg-warning/10" data-testid="older-version-banner">
+            <History />
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3 text-foreground">
+              <span>
+                You are looking at <strong>version {older.viewing}</strong>, an older version of this pipeline. It is read-only: nothing here can be changed or saved.
+                The latest version is v{older.latest}.
+              </span>
+              <span className="flex gap-2">
+                <Button size="sm" onClick={() => navigate(`/pipelines/${id}/edit`, { replace: true })}>Open the latest (editable)</Button>
+                <Button size="sm" variant="outline" onClick={() => navigate(-1)}>Back</Button>
+              </span>
+            </AlertDescription>
+          </Alert>
+        )}
 
         {/* Body */}
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
@@ -581,7 +656,7 @@ export default function PipelineCreator() {
             <div style={{ width: 240, background: '#111827', borderRight: '1px solid #1e293b', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}>
               Loading blocks…
             </div>
-          ) : (
+          ) : readOnly ? null : (
             <Palette blocks={blocks} />
           )}
 
@@ -601,178 +676,63 @@ export default function PipelineCreator() {
                 onReconnect={onReconnect}
                 isValidConnection={isValidConnection}
                 onNodesDelete={onNodesDelete}
+                onNodeContextMenu={onNodeContextMenu}
                 onEdgesDelete={onEdgesDelete}
+                readOnly={readOnly}
               />
             </ReactFlowProvider>
           </div>
 
           {/* Right panel */}
-          <div style={{
-            width: 210, flexShrink: 0,
-            background: '#111827',
-            borderLeft: '1px solid #1e293b',
-            display: 'flex', flexDirection: 'column',
-            overflowY: 'auto', padding: 10,
-            gap: 12,
-          }}>
-            {selectedNode && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    Node Properties
-                  </div>
-                  <button
-                    onClick={deleteSelectedNode}
-                    title="Delete node"
-                    style={{
-                      background: '#7f1d1d44', border: '1px solid #991b1b66', color: '#f87171',
-                      borderRadius: 4, padding: '2px 7px', fontSize: 11, cursor: 'pointer',
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-
-                <label style={{ fontSize: 11, color: '#64748b' }}>
-                  Name
-                  <input
-                    value={(selectedNode.data as any).label}
-                    onChange={e => updateNodeData('label', e.target.value)}
-                    style={inputStyle}
-                  />
-                </label>
-
-                {selectedIsForEach && (
-                  <>
-                    <div style={{ fontSize: 10, color: '#94a3b8', lineHeight: 1.4 }}>
-                      {forEachSourceLabel(selectedNode.id, toSharedNodes(nodes), toSharedEdges(edges))
-                        ? `Runs once per item from ${forEachSourceLabel(selectedNode.id, toSharedNodes(nodes), toSharedEdges(edges))}.`
-                        : 'Connect a block that returns a work-item list.'}
-                    </div>
-                    <details>
-                      <summary style={{ fontSize: 11, color: '#94a3b8', cursor: 'pointer' }}>Advanced</summary>
-                      <label style={{ fontSize: 11, color: '#64748b', display: 'block', marginTop: 6 }}>
-                        Max items
-                        <input type="number" min={1} value={(selectedNode.data as any).maxItems ?? 10} onChange={e => updateNodeData('maxItems', Math.max(1, Number(e.target.value) || 1))} style={inputStyle} />
-                      </label>
-                      <label style={{ fontSize: 11, color: '#64748b', display: 'block', marginTop: 6 }}>
-                        If the list is empty
-                        <select value={(selectedNode.data as any).onEmpty ?? 'fail'} onChange={e => updateNodeData('onEmpty', e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
-                          <option value="fail">Fail the run</option>
-                          <option value="skip">Skip the ForEach</option>
-                        </select>
-                      </label>
-                    </details>
-                  </>
-                )}
-
-                {!selectedIsForEach && (<>
-                <label style={{ fontSize: 11, color: '#64748b' }}>
-                  Block ID
-                  <input
-                    value={(selectedNode.data as any).blockId}
-                    readOnly
-                    style={{ ...inputStyle, color: '#475569', cursor: 'default' }}
-                  />
-                </label>
-
-                <label style={{ fontSize: 11, color: '#64748b' }}>
-                  Timeout (s)
-                  <input
-                    type="number"
-                    value={(selectedNode.data as any).timeoutSeconds ?? 120}
-                    onChange={e => updateNodeData('timeoutSeconds', Number(e.target.value))}
-                    style={inputStyle}
-                  />
-                </label>
-                </>)}
-
-                {outgoingEdges.length > 0 && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 4 }}>
-                      Outgoing Edges
-                    </div>
-                    {outgoingEdges.map(edge => {
-                      const ed = (edge.data ?? {}) as any
-                      return (
-                        <div key={edge.id} style={{
-                          background: '#1a1f2e', border: '1px solid #1e293b',
-                          borderRadius: 6, padding: 8, display: 'flex', flexDirection: 'column', gap: 5,
-                        }}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                            <div data-testid="handoff-contract" style={{ fontSize: 10, color: '#64748b' }}>{handoffText(edge.source, edge.target)}</div>
-                            <button
-                              onClick={() => setEdges(eds => eds.filter(e => e.id !== edge.id))}
-                              style={{ background: 'none', border: 'none', color: '#475569', cursor: 'pointer', fontSize: 12, lineHeight: 1 }}
-                              title="Delete edge"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                          <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#94a3b8', cursor: 'pointer' }}>
-                            <input
-                              type="radio"
-                              name={`default-${selectedNodeId}`}
-                              checked={ed.isDefault === true}
-                              onChange={() => setDefaultEdge(edge.id)}
-                            />
-                            Default route
-                          </label>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Validation */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                Validation
-              </div>
-              <ValidationRow label="Start node" pass={!validationResult.errors.some(e => e.includes('start node'))} isError />
-              <ValidationRow label="Workspace before agents / PRs" pass={!validationResult.errors.some(e => e.includes('Workspace Provisioner'))} isError />
-              <ValidationRow label="ForEach is well-formed" pass={!validationResult.errors.some(e => e.includes('ForEach'))} isError />
-              <ValidationRow label="Branch nodes have default" pass={!validationResult.errors.some(e => e.includes('default route'))} isError />
-              {outdatedPins.length > 0 && (
-                <button
-                  onClick={updateBlockVersions}
-                  style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', borderRadius: 4, padding: '3px 8px', fontSize: 10, cursor: 'pointer', textAlign: 'left' }}
-                  title="Pins stay as saved until you choose to update them"
-                >
-                  Update block versions ({outdatedPins.length} newer)
-                </button>
-              )}
-              {validationResult.errors.map((err, i) => (
-                <div key={i} style={{ fontSize: 10, color: '#f87171', paddingLeft: 4 }}>{err}</div>
-              ))}
-              {validationResult.warnings.map((w, i) => (
-                <div key={i} style={{ fontSize: 10, color: '#fbbf24', paddingLeft: 4 }}>{w}</div>
-              ))}
-            </div>
-          </div>
+          <PropertiesPanel
+            node={selectedNode ? { id: selectedNode.id, data: selectedNode.data as Record<string, unknown> } : null}
+            title={selectedIsForEach ? 'ForEach' : (blocks.find(b => b.id === (selectedNode?.data as any)?.blockId)?.name ?? String((selectedNode?.data as any)?.label ?? ''))}
+            role={selectedIsForEach ? undefined : (blocks.find(b => b.id === (selectedNode?.data as any)?.blockId)?.role as string | undefined)}
+            description={selectedIsForEach ? undefined : (blocks.find(b => b.id === (selectedNode?.data as any)?.blockId)?.description as string | undefined)}
+            onClose={() => setSelectedNodeId(null)}
+            isForEach={selectedIsForEach}
+            isGate={selectedIsGate}
+            artifactName={selectedArtifact}
+            forEachSource={selectedNode && selectedIsForEach ? (forEachSourceLabel(selectedNode.id, toSharedNodes(nodes), toSharedEdges(edges)) ?? null) : null}
+            gate={{ checklist: gateCfg.checklist, mode: gateCfg.mode }}
+            onNodeData={updateNodeData}
+            onConfig={updateGateConfig}
+            onDeleteNode={() => selectedNodeId && void deleteNode(selectedNodeId)}
+            inputs={(selectedBlock?.contextRequirements ?? []).map((r: string) => ({ name: contextKey(r), optional: isOptionalContext(r) }))}
+            inputsFromAll={selectedBlock?.contextMode === 'Full'}
+            outputs={(selectedBlock?.outputSchemaTyped ?? selectedBlock?.outputSchema ?? []).map((e: any) => (typeof e === 'string' ? { name: e } : { name: e.name, type: e.type, itemFields: e.itemFields }))}
+            nodeCount={nodes.length}
+            readOnly={readOnly}
+            edges={outgoingEdges.map(e => ({ id: e.id, source: e.source, target: e.target, isDefault: ((e.data ?? {}) as any).isDefault === true }))}
+            onDefaultEdge={setDefaultEdge}
+            onFailure={onFailure}
+            onFailureChange={setOnFailure}
+            onFailureOnCancel={onFailureOnCancel}
+            onFailureOnCancelChange={setOnFailureOnCancel}
+            errors={validationResult.errors}
+            warnings={validationResult.warnings}
+            outdatedPins={outdatedPins.length}
+            onUpdatePins={updateBlockVersions}
+          />
         </div>
       </div>
+      {menu && (
+        <div
+          className="fixed z-50 min-w-40 rounded-lg bg-popover p-1 text-popover-foreground shadow-md ring-1 ring-foreground/10"
+          style={{ left: menu.x, top: menu.y }}
+          role="menu"
+          data-testid="node-context-menu"
+        >
+          <button
+            role="menuitem"
+            className="flex w-full items-center rounded-md px-2 py-1.5 text-left text-sm text-destructive hover:bg-destructive/10"
+            onClick={() => void deleteNode(menu.id)}
+          >
+            Remove from pipeline…
+          </button>
+        </div>
+      )}
+      {confirmDialog}
     </>
   )
-}
-
-function ValidationRow({ label, pass, isError }: { label: string; pass: boolean; isError: boolean }) {
-  const icon = pass ? '✅' : isError ? '✕' : '⚠️'
-  const color = pass ? '#22d3b8' : isError ? '#f87171' : '#fbbf24'
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color }}>
-      <span>{icon}</span>
-      <span style={{ color: '#94a3b8' }}>{label}</span>
-    </div>
-  )
-}
-
-const inputStyle: React.CSSProperties = {
-  display: 'block', width: '100%', marginTop: 2,
-  background: '#1a1f2e', border: '1px solid #334155',
-  borderRadius: 4, color: '#e2e8f0', fontSize: 11,
-  padding: '4px 7px', outline: 'none',
-  boxSizing: 'border-box',
 }

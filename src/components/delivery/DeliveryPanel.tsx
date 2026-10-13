@@ -1,295 +1,239 @@
-import { useState } from 'react'
-import { ALL_STATUS_KEYS, statusBgMap, statusColorMap } from '../../utils/statusColors'
+import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { FolderOpen, Code2, Copy, X } from 'lucide-react'
+import { Ban, CheckCircle2, Circle, Code2, ExternalLink, FolderOpen, Loader2, PauseCircle, Repeat, ShieldQuestion, X, XCircle } from 'lucide-react'
 import { useDelivery } from '@/hooks/useDeliveries'
-import { Button } from '@/components/ui/button'
+import { useJiraBase } from '@/hooks/useJiraBase'
+import { getBlocks } from '@/services/blocksService'
+import { getBlockTypeIcon } from '@/utils/blockTypeIcons'
 import { Badge } from '@/components/ui/badge'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import type { DeliveryStep } from '@/types'
+import { Button } from '@/components/ui/button'
+import { Separator } from '@/components/ui/separator'
+import { JiraTicketLink } from '@/components/shared/JiraTicketLink'
+import type { BlockType, DeliveryStep } from '@/types'
+
+// The right-hand summary of a delivery on the Deliveries screen: what it is, where it stands, what ran, where its files are.
+// shadcn components and theme tokens only.
 
 interface Props {
   deliveryId: string
   onClose: () => void
 }
 
+const STATUS_BADGE: Record<string, string> = {
+  Completed: 'border-success/30 bg-success/10 text-success',
+  Running: 'border-info/30 bg-info/10 text-info',
+  Failed: 'border-destructive/30 bg-destructive/10 text-destructive',
+  Paused: 'border-warning/30 bg-warning/10 text-warning',
+  Pending: 'border-border bg-muted text-muted-foreground',
+  Cancelled: 'border-border bg-muted text-muted-foreground',
+  Interrupted: 'border-warning/30 bg-warning/10 text-warning',
+  Superseded: 'border-border bg-muted text-muted-foreground',
+}
+
 function fmt(iso?: string) {
   if (!iso) return '—'
-  const d = new Date(iso)
-  return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
 function fmtDuration(startedAt?: string, completedAt?: string) {
   if (!startedAt) return '—'
   const end = completedAt ? new Date(completedAt) : new Date()
-  const secs = Math.floor((end.getTime() - new Date(startedAt).getTime()) / 1000)
-  const m = Math.floor(secs / 60)
-  const s = secs % 60
-  return m > 0 ? `${m}m ${s}s` : `${s}s`
+  const secs = Math.max(0, Math.floor((end.getTime() - new Date(startedAt).getTime()) / 1000))
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${secs % 60}s` : `${secs}s`
 }
 
-function StepRow({ step, index }: { step: DeliveryStep; index: number }) {
-  const iconStyle: React.CSSProperties = {
-    width: 18, height: 18, borderRadius: '50%',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: 10, fontWeight: 700, flexShrink: 0,
+function StepIcon({ status }: { status: DeliveryStep['status'] }) {
+  switch (status) {
+    case 'Completed': return <CheckCircle2 className="size-4 shrink-0 text-success" />
+    case 'Running': return <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+    case 'Failed': return <XCircle className="size-4 shrink-0 text-destructive" />
+    case 'AwaitingApproval': return <ShieldQuestion className="size-4 shrink-0 text-warning" />
+    case 'Cancelled': return <Ban className="size-4 shrink-0 text-muted-foreground" />
+    case 'Interrupted': return <PauseCircle className="size-4 shrink-0 text-muted-foreground" />
+    default: return <Circle className="size-4 shrink-0 text-muted-foreground/60" />
   }
+}
 
-  let icon: React.ReactNode
-  let statusLabel: React.ReactNode
+const STEP_LABEL: Partial<Record<DeliveryStep['status'], string>> = { AwaitingApproval: 'Awaiting approval', Completed: 'Done' }
 
-  if (step.status === 'Completed') {
-    icon = <div style={{ ...iconStyle, background: 'var(--axon-green-d)', color: 'var(--axon-green)', border: '1px solid rgba(16,185,129,0.3)' }}>✓</div>
-    statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-green)' }}>✓ Done</span>
-  } else if (step.status === 'Running') {
-    icon = (
-      <div style={{ ...iconStyle, background: 'var(--axon-nx-glow)', border: '1px solid rgba(111,95,232,0.3)' }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--axon-nexus2)', display: 'block', animation: 'pulse 1.5s infinite' }} />
-      </div>
-    )
-    statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-nexus2)' }}>Running</span>
-  } else if (step.status === 'Failed') {
-    icon = <div style={{ ...iconStyle, background: 'var(--axon-red-d)', color: 'var(--axon-red)', border: '1px solid rgba(239,68,68,0.3)' }}>✕</div>
-    statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-red)' }}>Failed</span>
-  } else if (step.status === 'Cancelled' || step.status === 'Interrupted') {
-    icon = <div style={{ ...iconStyle, background: 'var(--axon-bg4)', color: 'var(--axon-t2)', border: '1px solid var(--axon-border2)' }}>{step.status === 'Cancelled' ? '■' : '⏸'}</div>
-    statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-t2)' }}>{step.status}</span>
-  } else if (step.status === 'AwaitingApproval') {
-    icon = <div style={{ ...iconStyle, background: 'var(--axon-amber-d)', color: 'var(--axon-amber)', border: '1px solid rgba(245,158,11,0.3)', fontSize: 11 }}>🚦</div>
-    statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-amber)' }}>Awaiting approval</span>
-  } else {
-    icon = <div style={{ ...iconStyle, background: 'var(--axon-bg4)', color: 'var(--axon-t3)', border: '1px solid var(--axon-border2)' }}>{index + 1}</div>
-    statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-t3)' }}>Pending</span>
-  }
-
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0' }}>
-      {icon}
-      <span style={{ flex: 1, fontSize: 12, color: 'var(--axon-t1)', fontWeight: 500 }}>{step.name}</span>
-      {statusLabel}
+    <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] items-baseline gap-3 text-sm">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 break-words">{children}</dd>
     </div>
   )
 }
 
-const STATUS_COLORS: Record<string, string> = statusColorMap(ALL_STATUS_KEYS)
-
-const STATUS_BG: Record<string, string> = statusBgMap(ALL_STATUS_KEYS)
-
-
 export default function DeliveryPanel({ deliveryId, onClose }: Props) {
   const navigate = useNavigate()
+  const jiraBase = useJiraBase()
   const { data: delivery, isLoading } = useDelivery(deliveryId)
-  const [tab, setTab] = useState<'overview' | 'timeline' | 'logs'>('overview')
+  // Block roles give every step its icon (the same icons as the canvas and the block list).
+  const { data: blocks } = useQuery({ queryKey: ['blocks-all'], queryFn: () => getBlocks(), staleTime: 30_000 })
+  const roleOf = (blockId?: string) => (blockId ? blocks?.find((b) => b.id === blockId)?.role : undefined) as BlockType | undefined
 
-  const tabs = ['overview', 'timeline', 'logs'] as const
+  const { data: rules = [] } = useQuery({ queryKey: ['rules'], queryFn: () => window.axon.rules.list(), staleTime: 30_000 })
+  const ruleName = delivery?.ruleId ? rules.find((r) => r.id === delivery.ruleId)?.name : undefined
+  const folder = delivery?.deliveryFolder ?? delivery?.workspacePath ?? undefined
 
-  const handleOpenWorkspace = async () => {
-    if (!delivery?.workspacePath) return
-    const res = await window.axon.shell.openPath(delivery.workspacePath)
+  const openFolder = async () => {
+    if (!folder) return
+    const res = await window.axon.shell.openPath(folder)
     if (!res.success) toast.error(res.error ? `Failed to open folder: ${res.error}` : 'Failed to open folder')
   }
-
-  const handleOpenInVSCode = async () => {
-    if (!delivery?.workspacePath) return
-    const res = await window.axon.shell.openInVSCode(delivery.workspacePath)
+  const openVSCode = async () => {
+    if (!folder) return
+    const res = await window.axon.shell.openInVSCode(folder)
     if (!res.success) toast.error(res.error ? `Failed to open VS Code: ${res.error}` : 'Failed to open VS Code')
   }
 
-  const handleCopyRepoLink = async () => {
-    if (!delivery?.repoUrl) return
-    await navigator.clipboard.writeText(delivery.repoUrl)
-    toast.success('Repo link copied')
-  }
+  const steps = delivery?.steps ?? []
+  const current = steps.find((s) => s.status === 'Running' || s.status === 'AwaitingApproval')
+  const done = steps.filter((s) => s.status === 'Completed').length
 
   return (
-    <div style={{
-      width: 340, flexShrink: 0,
-      background: 'var(--axon-bg2)',
-      borderLeft: '1px solid var(--axon-border)',
-      display: 'flex', flexDirection: 'column',
-      height: '100%', overflow: 'hidden',
-    }}>
+    <aside className="flex h-full w-[380px] shrink-0 flex-col overflow-hidden border-l bg-card text-card-foreground" data-testid="delivery-panel">
       {isLoading || !delivery ? (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <span style={{ fontSize: 12, color: 'var(--axon-t3)' }}>Loading…</span>
-        </div>
+        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">Loading…</div>
       ) : (
         <>
-          {/* Header */}
-          <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid var(--axon-border)' }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 4 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--axon-t1)', fontFamily: 'var(--font-mono)' }}>
-                    {delivery.ticketId}
-                  </span>
-                  <Badge
-                    variant="outline"
-                    style={{
-                      color: STATUS_COLORS[delivery.status], background: STATUS_BG[delivery.status],
-                      borderColor: `${STATUS_COLORS[delivery.status]}33`,
-                    }}
-                  >
-                    {delivery.status}
-                  </Badge>
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--axon-t3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {delivery.title} · {delivery.pipelineName}
-                </div>
+          {/* header */}
+          <header className="flex flex-col gap-2 border-b px-4 py-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <JiraTicketLink ticket={delivery.ticketId} className="text-sm" />
+                <Badge variant="outline" className={STATUS_BADGE[delivery.status] ?? ''}>{delivery.status}</Badge>
               </div>
-              <Button onClick={onClose} variant="outline" size="icon-sm" className="shrink-0">
-                <X className="size-3.5" />
-              </Button>
+              <Button onClick={onClose} variant="ghost" size="icon-sm" aria-label="Close"><X /></Button>
             </div>
-          </div>
-
-          {/* Progress section */}
-          <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--axon-border)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
-                Progress — {(delivery.steps ?? []).filter(s => s.status === 'Completed').length} of {(delivery.steps ?? []).length} stages
-              </span>
-              <span style={{ fontSize: 11, color: 'var(--axon-t3)' }}>{delivery.progress}%</span>
-            </div>
-            <div style={{ height: 5, borderRadius: 3, background: 'var(--axon-bg4)', overflow: 'hidden' }}>
-              <div style={{
-                height: '100%', borderRadius: 3,
-                width: `${delivery.progress}%`,
-                background: delivery.status === 'Completed' ? 'var(--axon-green)'
-                  : delivery.status === 'Failed' ? 'var(--axon-red)'
-                  : 'var(--axon-nexus2)',
-                transition: 'width 0.3s',
-              }} />
-            </div>
-          </div>
-
-          {/* Current stage card */}
-          {(() => {
-            const current = (delivery.steps ?? []).find(s => s.status === 'Running' || s.status === 'AwaitingApproval')
-            if (!current) return null
-            return (
-              <div style={{ margin: '10px 16px', padding: '10px 12px', background: 'var(--axon-bg3)', borderRadius: 8, border: '1px solid var(--axon-border2)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{ width: 22, height: 22, borderRadius: 4, background: 'var(--axon-nx-glow)', border: '1px solid rgba(111,95,232,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: 'var(--axon-nexus2)', fontWeight: 700 }}>E</div>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--axon-t1)' }}>{current.name}</div>
-                    <div style={{ fontSize: 11, color: 'var(--axon-t3)', marginTop: 1 }}>
-                      {current.status === 'AwaitingApproval' ? 'Awaiting approval' : `Running for ${fmtDuration(current.startedAt)}`}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )
-          })()}
-
-          {/* Tabs */}
-          <Tabs value={tab} onValueChange={v => setTab(v as typeof tab)}>
-            <TabsList
-              className="h-auto w-full justify-start gap-0 rounded-none bg-transparent p-0"
-              style={{ padding: '0 16px', borderBottom: '1px solid var(--axon-border)' }}
-            >
-              {tabs.map(t => (
-                <TabsTrigger
-                  key={t}
-                  value={t}
-                  className="rounded-none border-b-2 border-transparent bg-transparent px-3 py-2 capitalize shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-                  style={{ color: tab === t ? 'var(--axon-nexus2)' : 'var(--axon-t3)', borderBottomColor: tab === t ? 'var(--axon-nexus2)' : 'transparent' }}
-                >
-                  {t}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-
-          {/* Tab content */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
-            {tab !== 'overview' ? (
-              <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--axon-t3)', fontSize: 12 }}>Coming soon</div>
-            ) : (
-              <>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t3)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pipeline Flow</div>
-                <div style={{ borderRadius: 8, overflow: 'hidden' }}>
-                  {(delivery.steps ?? []).map((step, i) => (
-                    <div key={step.id} style={{ borderBottom: i < (delivery.steps ?? []).length - 1 ? '1px solid var(--axon-border)' : 'none' }}>
-                      <StepRow step={step} index={i} />
-                    </div>
-                  ))}
-                </div>
-
-                <div style={{ borderTop: '1px solid var(--axon-border)', marginTop: 12, paddingTop: 12 }}>
-                  {[
-                    ['Started', fmt(delivery.startedAt)],
-                    ['Triggered by', delivery.createdByName ?? '—'],
-                    ['Pipeline Team', delivery.ownerTeam ?? '—'],
-                    ['Repo', delivery.repoUrl ?? '—'],
-                    ['Repository', delivery.repository?.split('/').pop() ?? '—'],
-                    ['Branch', delivery.branch ?? (delivery.ticketId ? `feat/${delivery.ticketId.toLowerCase()}` : '—')],
-                    ['Workspace', delivery.workspacePath ?? delivery.workspaceType ?? '—'],
-                  ].map(([label, value]) => (
-                    <div key={label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0' }}>
-                      <span style={{ fontSize: 11, color: 'var(--axon-t3)' }}>{label}</span>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                        <span style={{
-                          fontSize: 11, fontWeight: 500, color: 'var(--axon-t2)',
-                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        }} title={typeof value === 'string' ? value : undefined}>
-                          {value}
-                        </span>
-                        {label === 'Repo' && delivery.repoUrl && (
-                          <Button
-                            onClick={handleCopyRepoLink}
-                            title="Copy repository link"
-                            variant="outline"
-                            size="icon-xs"
-                            className="dark:bg-[var(--axon-bg3)]"
-                          >
-                            <Copy className="size-3" />
-                          </Button>
-                        )}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-
-                {delivery.workspacePath && (
-                  <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
-                    <Button
-                      onClick={handleOpenWorkspace}
-                      title="Open workspace folder in Explorer"
-                      variant="outline"
-                      size="sm"
-                      className="flex-1 dark:bg-[var(--axon-bg3)]"
-                    >
-                      <FolderOpen className="size-3" /> Explorer
-                    </Button>
-                    <Button
-                      onClick={handleOpenInVSCode}
-                      title="Open workspace folder in VS Code"
-                      variant="outline"
-                      size="sm"
-                      className="flex-1 dark:bg-[var(--axon-bg3)]"
-                    >
-                      <Code2 className="size-3" /> VS Code
-                    </Button>
-                  </div>
-                )}
-              </>
+            {delivery.title && delivery.title !== delivery.ticketId && (
+              <h2 className="text-sm font-medium leading-snug" data-testid="delivery-title">{delivery.title}</h2>
             )}
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="text-foreground">{delivery.pipelineName}</span>
+              {delivery.pipelineVersion !== undefined && <Badge variant="secondary" className="font-mono">v{delivery.pipelineVersion}</Badge>}
+              {delivery.trigger === 'Watcher' && <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">Automation</Badge>}
+            </div>
+          </header>
+
+          <div className="flex flex-1 flex-col gap-5 overflow-y-auto px-4 py-4">
+            {/* progress */}
+            {delivery.status === 'Superseded' ? (
+              <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">A newer attempt replaced this delivery, so its partial progress ({done} of {steps.length} stages) no longer matters.</p>
+            ) : (
+            <section className="flex flex-col gap-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-medium">{done} of {steps.length} stages</span>
+                <span className="text-muted-foreground">{delivery.progress}%</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={delivery.progress} aria-valuemin={0} aria-valuemax={100}>
+                <div
+                  className={`h-full rounded-full transition-[width] ${delivery.status === 'Completed' ? 'bg-success' : delivery.status === 'Failed' ? 'bg-destructive' : 'bg-primary'}`}
+                  style={{ width: `${delivery.progress}%` }}
+                />
+              </div>
+            </section>
+            )}
+
+            {/* what is happening now */}
+            {current && (
+              <section className="flex items-center gap-3 rounded-lg border bg-background/40 p-3" data-testid="current-stage">
+                {roleOf(current.blockId)
+                  ? <img src={getBlockTypeIcon(roleOf(current.blockId)!)} alt={roleOf(current.blockId)} className="size-9 shrink-0 rounded-md" />
+                  : <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted"><StepIcon status={current.status} /></span>}
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{current.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {current.status === 'AwaitingApproval' ? 'Waiting for a human to approve' : `Running for ${fmtDuration(current.startedAt)}`}
+                  </p>
+                </div>
+              </section>
+            )}
+
+            {/* stages */}
+            <section className="flex flex-col gap-1">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Stages</h3>
+              <ol className="flex flex-col divide-y rounded-lg border">
+                {steps.length === 0 && <li className="px-3 py-3 text-sm text-muted-foreground">Nothing has run yet</li>}
+                {steps.map((step) => {
+                  const role = roleOf(step.blockId)
+                  return (
+                    <li key={step.id} className="flex items-center gap-2.5 px-3 py-2">
+                      <StepIcon status={step.status} />
+                      {role
+                        ? <img src={getBlockTypeIcon(role)} alt="" className="size-4 shrink-0 rounded-sm" />
+                        : !step.blockId && <Repeat className="size-4 shrink-0 text-muted-foreground" aria-label="ForEach" />}
+                      <span className="min-w-0 flex-1 truncate text-sm">
+                        {step.name}
+                        {step.itemKey && <span className="ml-1.5 font-mono text-xs text-muted-foreground">{step.itemKey}</span>}
+                      </span>
+                      <span className="shrink-0 text-xs text-muted-foreground">{STEP_LABEL[step.status] ?? step.status}</span>
+                    </li>
+                  )
+                })}
+              </ol>
+            </section>
+
+            {/* facts */}
+            <section className="flex flex-col gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Details</h3>
+              <dl className="flex flex-col gap-2">
+                <Fact label="Started">{fmt(delivery.startedAt)}</Fact>
+                <Fact label="Duration">{fmtDuration(delivery.startedAt, delivery.completedAt)}</Fact>
+                <Fact label="Trigger">
+                  {delivery.trigger === 'Watcher' ? (
+                    <span className="flex flex-col gap-0.5">
+                      <span>Automation rule</span>
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/rules${delivery.ruleId ? `?rule=${delivery.ruleId}` : ''}`)}
+                        className="w-fit cursor-pointer text-left text-sm font-medium text-primary hover:underline"
+                        title="Show this rule on the Automation page"
+                      >
+                        {ruleName ?? 'Rule no longer exists'}
+                      </button>
+                    </span>
+                  ) : 'Started manually'}
+                </Fact>
+                <Fact label="Triggered by">{delivery.createdByName ?? '—'}</Fact>
+                <Fact label="Pipeline">
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/pipelines/${delivery.pipelineId}/edit${delivery.pipelineVersion !== undefined ? `?version=${delivery.pipelineVersion}` : ''}`)}
+                    className="inline-flex cursor-pointer items-center gap-1 text-left font-medium text-primary hover:underline"
+                    title="Open the pipeline version this delivery ran (read-only if a newer version exists)"
+                  >
+                    {delivery.pipelineName}
+                    {delivery.pipelineVersion !== undefined && <span className="font-mono text-xs opacity-80">v{delivery.pipelineVersion}</span>}
+                  </button>
+                </Fact>
+                {folder && <Fact label="Workspace"><span className="font-mono text-xs" title={folder}>{folder}</span></Fact>}
+              </dl>
+            </section>
+
+            <Separator />
+
+            {/* where to go */}
+            <section className="flex flex-wrap gap-2">
+              {jiraBase && (
+                <Button variant="outline" size="sm" onClick={() => void window.axon.shell.openExternal(`${jiraBase}/browse/${encodeURIComponent(delivery.ticketId)}`)}>
+                  <ExternalLink /> Open in Jira
+                </Button>
+              )}
+              {folder && <Button variant="outline" size="sm" onClick={openFolder} title="Open the delivery folder in Explorer"><FolderOpen /> Explorer</Button>}
+              {folder && <Button variant="outline" size="sm" onClick={openVSCode} title="Open the delivery folder in VS Code"><Code2 /> VS Code</Button>}
+            </section>
           </div>
 
-          {/* Footer */}
-          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--axon-border)' }}>
-            <Button
-              onClick={() => navigate(`/deliveries/${deliveryId}`)}
-              variant="outline"
-              className="w-full dark:bg-[var(--axon-bg3)]"
-            >
-              View Full Delivery →
-            </Button>
-          </div>
+          <footer className="border-t p-3">
+            <Button onClick={() => navigate(`/deliveries/${deliveryId}`)} className="w-full">View full delivery</Button>
+          </footer>
         </>
       )}
-    </div>
+    </aside>
   )
 }

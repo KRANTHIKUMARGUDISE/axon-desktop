@@ -1,6 +1,8 @@
 import type { ActionResult, ResumePreview } from './preview'
 import type { DeliveryEvent } from './schemas'
-import type { RegistryStatus } from './registry'
+import type { RegistryStatus, DeliveryRule } from './registry'
+import type { RuleChainInfo, PipelineEffects } from './ruleChains'
+import type { PipelineDiff } from './pipelineDiff'
 
 export interface ClaudeKeyStatus {
   hasKey: boolean
@@ -83,7 +85,71 @@ export interface CatalogView {
   lastSyncAt: string | null
 }
 
+export interface GateReviewInfo {
+  nodeId: string
+  reason: string
+  checklist: string[]
+  mode: 'Pause' | 'NotifyOnly'
+  repos: { repo: string; name: string; branch?: string; files: { status: string; path: string }[]; truncated: boolean }[]
+  tests: { nodeId: string; blockName: string; summary: string; result: unknown }[]
+  agents: { nodeId: string; blockName: string; itemKey: string | null; summary: string }[]
+}
+
+export interface PermissionReportInfo {
+  ok: boolean
+  /** One clear message per missing permission (or the connection problem). */
+  missing: string[]
+}
+
+export interface WatcherInfo {
+  /** D10 */
+  role: {
+    thisMachineName: string
+    /** This machine may poll right now. */
+    activeHere: boolean
+    /** "Run watcher on this machine" is switched on here. */
+    claimedHere: boolean
+    other: { name: string; heartbeatAt: string; stale: boolean } | null
+  }
+  /** S5b "Pause all" (profile master switch, syncs): no polling anywhere while true. */
+  paused: boolean
+  rules: {
+    ruleId: string
+    lastPollAt: string | null
+    lastError: string | null
+    lastMatchAt: string | null
+    lastMatchKey: string | null
+    nextCheckAt: string | null
+  }[]
+  /** axon-running tickets with no local delivery: Resume or Release. */
+  orphans: { key: string; summary: string; ruleId: string; foundAt: string }[]
+  pendingWritebacks: number
+  /** S5b: which rules trigger on what, and what each rule's pipeline sets in Jira (so spec → code → review chains are visible). */
+  chains: { rules: RuleChainInfo[]; warnings: string[]; effects: Record<string, PipelineEffects> }
+}
+
 export interface AxonBridge {
+  rules: {
+    list(): Promise<DeliveryRule[]>
+    save(input: unknown): Promise<DeliveryRule>
+    /** Enabling re-checks Jira permissions and the pinned pipeline; it throws with the reasons. */
+    setEnabled(id: string, enabled: boolean): Promise<DeliveryRule>
+    delete(id: string): Promise<void>
+    /** Plain-words differences between two published versions of a pipeline. */
+    compareVersions(pipelineId: string, fromVersion: number, toVersion: number): Promise<PipelineDiff>
+  }
+  watcher: {
+    status(): Promise<WatcherInfo>
+    /** "Run watcher on this machine" (also the manual takeover from another machine). */
+    setActiveHere(active: boolean): Promise<WatcherInfo>
+    /** "Pause all": the master switch stored on the profile (syncs to other machines with the next registry sync). */
+    setPaused(paused: boolean): Promise<WatcherInfo>
+    /** "Check now" on one rule: runs that rule's query once. */
+    checkNow(ruleId: string): Promise<WatcherInfo>
+    /** "Retry now" for write-backs waiting for Jira. */
+    retryWritebacks(): Promise<WatcherInfo>
+    resolveOrphan(key: string, choice: 'resume' | 'release'): Promise<WatcherInfo>
+  }
   secrets: {
     setGitToken(token: string): Promise<void>
     hasGitToken(): Promise<boolean>
@@ -109,6 +175,8 @@ export interface AxonBridge {
     stageChange(site: string, email: string, token: string): Promise<{ ok: boolean; error?: string; email?: string; displayName?: string; site?: string; identityChanges?: boolean }>
     commitChange(): Promise<{ success: boolean; identityChanged: boolean; email: string }>
     cancelChange(): Promise<void>
+    /** Can the stored account read the project, edit labels and add comments? */
+    checkPermissions(projectKey: string): Promise<PermissionReportInfo>
   }
   registry: {
     status(): Promise<RegistryStatus>
@@ -140,6 +208,8 @@ export interface AxonBridge {
   pipelines: {
     list(): Promise<unknown[]>
     get(id: string): Promise<unknown | null>
+    /** One published version of a pipeline (read-only history). */
+    getVersion(id: string, version: number): Promise<unknown | null>
     create(input: unknown): Promise<unknown>
     update(id: string, patch: unknown): Promise<unknown>
     delete(id: string): Promise<void>
@@ -151,12 +221,15 @@ export interface AxonBridge {
     stepData(deliveryId: string, nodeId: string, kind: 'context' | 'output', itemKey?: string): Promise<Record<string, unknown>>
   }
   delivery: {
-    start(id: string): Promise<ActionResult>
+    /** `queued`: the concurrency cap is reached — the delivery stays Pending and starts when a slot frees. */
+    start(id: string): Promise<ActionResult & { queued?: boolean }>
     resume(id: string): Promise<ActionResult>
     cancel(id: string): Promise<ActionResult>
     previewResume(id: string): Promise<ActionResult & { preview?: ResumePreview }>
     approveGate(id: string, comment?: string): Promise<ActionResult>
     rejectGate(id: string, comment: string): Promise<ActionResult>
+    /** Q7: files changed per repo, test results and agent summaries for the delivery's current gate. */
+    gateReview(id: string): Promise<GateReviewInfo | null>
     clearWorkspace(id: string): Promise<{ success: boolean; error?: string }>
     workspaceSize(id: string): Promise<{ success: boolean; bytes: number }>
     /** The git repos this delivery worked in, derived from the recorded step folders (never scanned). */
@@ -167,6 +240,8 @@ export interface AxonBridge {
   events: {
     /** Subscribes to the single typed delivery event channel; returns an unsubscribe function. */
     onDeliveryEvent(callback: (event: DeliveryEvent) => void): () => void
+    /** A desktop notification was clicked: open this delivery's Live View. Returns an unsubscribe function. */
+    onOpenDelivery(callback: (deliveryId: string) => void): () => void
   }
   workspace: {
     readFile(path: string): Promise<string>

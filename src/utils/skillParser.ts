@@ -4,6 +4,7 @@ export function parseSkillFrontmatter(content: string): { name?: string; descrip
 
   const result: Record<string, string> = {}
   for (const line of match[1].split('\n')) {
+    if (/^\s/.test(line)) continue // nested keys (e.g. under axon:) are not name/description
     const colonIndex = line.indexOf(':')
     if (colonIndex === -1) continue
     const key = line.slice(0, colonIndex).trim()

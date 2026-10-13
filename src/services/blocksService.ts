@@ -1,5 +1,5 @@
 import type { Block, BlockInput } from '@shared'
-import { outputFieldNames } from '@shared'
+import { outputFieldNames, parseAxonContract, entryFileContent } from '@shared'
 import type { OutputSchemaEntry } from '@shared'
 import type { BuildingBlock, SourceType, AgentRuntime, ArtifactFormat, ExecutionType, BuildingBlockVisibility } from '../types'
 import type { CachedFile } from '../utils/fileHandler'
@@ -43,7 +43,13 @@ function toBuildingBlock(b: Block): BuildingBlock {
     cachedFiles: b.cachedFiles?.map((f) => f.relativePath),
     outputSchema: b.outputSchema ? outputFieldNames(b.outputSchema) : undefined,
     outputSchemaTyped: b.outputSchema,
+    ...(contractDeclared(b) ? { contractSource: 'artifact' as const, contractFile: b.entryPointPath } : { contractSource: 'form' as const }),
   }
+}
+
+function contractDeclared(b: Block): boolean {
+  const parsed = parseAxonContract(entryFileContent(b) ?? '')
+  return parsed.declared && parsed.errors.length === 0
 }
 
 function toInput(req: Partial<CreateBlockRequest>, acceptedBy?: string): Partial<BlockInput> {

@@ -2,11 +2,12 @@ id: axon-ticket-fetcher
 schemaVersion: 2
 name: Ticket Fetcher
 role: IO
-description: Fetches the Jira ticket for a delivery. Registered now; becomes runnable in a later release.
-version: 1
-tags: [axon, io, stub]
+description: Reads the Jira ticket of this delivery - summary, description (as markdown), acceptance criteria when the description has them, labels, status and the last 20 comments (author, date, text) - and returns it as data for the blocks after it. Native AXON code with your own Jira credentials; no AI, no tokens.
+version: 2
+tags: [axon, io, jira]
 sourceType: Axon
 agentRuntime: Axon
 artifactFormat: Native
 artifactName: ticket-fetcher
+outputSchema: [ticket]
 verified: true

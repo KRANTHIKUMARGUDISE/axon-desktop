@@ -1,8 +1,10 @@
-import type { AgentOutput } from '../../shared'
+import type { AgentOutput, ModelPrice } from '../../shared'
+import { parseAxonContract, contractPromptSection } from '../../shared'
 import { normalizeAgentOutput, buildUntrustedContext } from './output'
 import type { RunnerInput } from './types'
 
-const MODEL = 'claude-haiku-4-5-20251001'
+export const PROMPT_MODEL = 'claude-haiku-4-5-20251001'
+const MODEL = PROMPT_MODEL
 const MAX_TOKENS = 4096
 const MAX_RETRIES = 3
 const MAX_BACKOFF_MS = 60_000
@@ -11,6 +13,14 @@ export interface PromptDeps {
   fetchImpl?: typeof fetch
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   random?: () => number
+  /** S5b: $ per million tokens by model id (Settings). Without an entry for the model, only tokens are reported. */
+  getPrices?: () => Record<string, ModelPrice>
+}
+
+/** Estimated cost of one call from the user's price table; undefined when the model has no price. */
+export function estimateCost(usage: { inputTokens: number; outputTokens: number }, price: ModelPrice | undefined): number | undefined {
+  if (!price) return undefined
+  return (usage.inputTokens / 1e6) * price.inputPerMTok + (usage.outputTokens / 1e6) * price.outputPerMTok
 }
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -41,7 +51,7 @@ export async function callClaude(
   apiKey: string,
   systemPrompt: string,
   userMessage: string,
-  opts: { timeoutSeconds: number; signal?: AbortSignal },
+  opts: { timeoutSeconds: number; signal?: AbortSignal; onUsage?: (u: { inputTokens: number; outputTokens: number }) => void },
   deps: PromptDeps = {},
 ): Promise<string> {
   if (!apiKey) throw new Error('Claude API key not configured')
@@ -87,17 +97,24 @@ export async function callClaude(
     }
     if (!res.ok) throw new Error(`Claude API error ${res.status}: ${await res.text()}`)
 
-    const data = (await res.json()) as { content: Array<{ type: string; text: string }> }
+    const data = (await res.json()) as { content: Array<{ type: string; text: string }>; usage?: { input_tokens?: number; output_tokens?: number } }
+    if (data.usage) opts.onUsage?.({ inputTokens: data.usage.input_tokens ?? 0, outputTokens: data.usage.output_tokens ?? 0 })
     const text = data.content.find((c) => c.type === 'text')
     if (!text) throw new Error('No text content in Claude response')
     return text.text
   }
 }
 
+/** D19: the output contract declared in the artifact's frontmatter, appended so authors do not describe it twice. */
+export function declaredContractSection(instructions: string): string {
+  const parsed = parseAxonContract(instructions)
+  return parsed.declared && !parsed.errors.length ? contractPromptSection(parsed.contract) : ''
+}
+
 export function createClaudePromptRunner(getApiKey: () => string, deps: PromptDeps = {}) {
   return async (input: RunnerInput): Promise<AgentOutput> => {
     const { block, instructions, deliveryContext, timeoutSeconds, signal } = input
-    const systemPrompt = `${instructions}
+    const systemPrompt = `${instructions}${declaredContractSection(instructions)}
 
 ## Required Output Format
 Respond ONLY with a valid JSON object. No preamble, no markdown fences.
@@ -111,8 +128,14 @@ Respond ONLY with a valid JSON object. No preamble, no markdown fences.
     const userMessage = buildUntrustedContext(deliveryContext, block)
 
     try {
-      const text = await callClaude(getApiKey(), systemPrompt, userMessage, { timeoutSeconds, signal }, deps)
-      return normalizeAgentOutput(text, block.outputMapping, block.outputSchema)
+      let usage: { inputTokens: number; outputTokens: number } | undefined
+      const text = await callClaude(getApiKey(), systemPrompt, userMessage, { timeoutSeconds, signal, onUsage: (u) => { usage = u } }, deps)
+      // Tokens come from the API response; the cost is an estimate from the price table in Settings (none is baked in).
+      const costUsd = usage ? estimateCost(usage, deps.getPrices?.()[MODEL]) : undefined
+      return {
+        ...normalizeAgentOutput(text, block.outputMapping, block.outputSchema),
+        ...(usage ? { usage: { ...usage, model: MODEL, ...(costUsd !== undefined ? { costUsd, costEstimated: true } : {}) } } : {}),
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return {

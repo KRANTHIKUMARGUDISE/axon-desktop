@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { parseRepoUrl } from './repoUrl'
+import { OnFailureActionSchema } from './actions'
 
 // Canonical document schemas shared by the Electron main process and the renderer.
 // Every persisted document carries id + schemaVersion + createdAt + updatedAt; the
@@ -184,6 +185,9 @@ export const PipelineSchema = z.object({
   version: z.number().int().default(1),
   nodes: z.array(PipelineNodeSchema).default([]),
   edges: z.array(PipelineEdgeSchema).default([]),
+  // S5b: ordered actions that run only when a delivery fails (and, if ticked, when it is cancelled).
+  onFailure: z.array(OnFailureActionSchema).default([]),
+  onFailureOnCancel: z.boolean().default(false),
   tags: z.array(z.string()).optional(),
   isActive: z.boolean().optional(),
   createdByName: z.string().optional(),
@@ -197,6 +201,8 @@ export const PipelineInputSchema = z.object({
   description: z.string().default(''),
   nodes: z.array(z.unknown()).default([]),
   edges: z.array(z.unknown()).default([]),
+  onFailure: z.array(OnFailureActionSchema).optional(),
+  onFailureOnCancel: z.boolean().optional(),
 })
 export type PipelineInput = z.infer<typeof PipelineInputSchema>
 
@@ -208,6 +214,7 @@ export const AgentOutputSchema = z.object({
   // Optional model usage reported by runners that know it; only these numbers reach run summaries.
   usage: z.object({
     inputTokens: z.number().optional(), outputTokens: z.number().optional(), costUsd: z.number().optional(),
+    model: z.string().max(100).optional(), costEstimated: z.boolean().optional(),
   }).optional(),
   summary: z.string().default(''),
   result: z.record(z.string(), z.unknown()).default({}),
@@ -229,6 +236,9 @@ export const Availability = z.enum(['available', 'missing', 'empty'])
 
 export const StepOutputSchema = AgentOutputSchema.extend({
   humanGateReason: z.string().optional(),
+  // S5 gate config recorded on the step: the checklist shown to the reviewer and the mode that was in effect.
+  gateChecklist: z.array(z.string()).optional(),
+  gateMode: z.enum(['Pause', 'NotifyOnly']).optional(),
   approvedBy: z.string().optional(),
   approvedAt: z.string().optional(),
   rejectedBy: z.string().optional(),
@@ -243,6 +253,10 @@ export const DeliveryStepSchema = z.object({
   itemKey: z.string().nullable().default(null),
   blockId: z.string().optional(),
   blockName: z.string(),
+  // S5: runtime of the block that ran ('Axon' = built-in, others = AI) for "AI steps vs built-in steps".
+  agentRuntime: z.string().optional(),
+  // 15b: automatic retries of Platform failures inside this step (git/network/HTTP), logged here.
+  retries: z.array(z.object({ attempt: z.number().int(), at: z.string(), message: z.string() })).optional(),
   // The resolved working folder the block ran in (D17). PR Creator derives its repos from these.
   cwd: z.string().optional(),
   status: StepStatusSchema,
@@ -267,6 +281,9 @@ export const PipelineSnapshotSchema = z.object({
   name: z.string(),
   nodes: z.array(PipelineNodeSchema),
   edges: z.array(PipelineEdgeSchema),
+  // S5b: pinned with the pipeline version so a delivery's on-failure actions never drift.
+  onFailure: z.array(OnFailureActionSchema).default([]),
+  onFailureOnCancel: z.boolean().default(false),
   // Block ids + versions at creation time, so reruns don't drift.
   blockVersions: z.record(z.string(), z.number()).default({}),
 })
@@ -274,6 +291,21 @@ export type PipelineSnapshot = z.infer<typeof PipelineSnapshotSchema>
 
 export const RepositoryRefSchema = z.object({ url: z.string().min(1), branch: z.string().optional() })
 export type RepositoryRef = z.infer<typeof RepositoryRefSchema>
+
+export const TriggerSchema = z.enum(['Manual', 'Watcher'])
+export type Trigger = z.infer<typeof TriggerSchema>
+
+export const FAILURE_CATEGORIES = ['Requirement', 'Agent', 'Platform'] as const
+export const FailureCategorySchema = z.enum(FAILURE_CATEGORIES)
+export type FailureCategory = z.infer<typeof FailureCategorySchema>
+
+export const INTERVENTION_KINDS = ['GateRejected', 'RerunAfterFailure', 'EditBeforeApproval', 'ManualStartWatcherEligible'] as const
+export const InterventionSchema = z.object({
+  kind: z.enum(INTERVENTION_KINDS),
+  at: z.string(),
+  nodeId: z.string().optional(),
+})
+export type Intervention = z.infer<typeof InterventionSchema>
 
 export const DeliverySchema = z.object({
   ...meta,
@@ -320,6 +352,18 @@ export const DeliverySchema = z.object({
   attemptNumber: z.number().optional(),
   // Set when this delivery was re-run (status Superseded): the id of the newer attempt.
   supersededBy: z.string().optional(),
+  // S5: how the delivery started, and (for the watcher) which rule/ticket claimed it.
+  trigger: TriggerSchema.optional(),
+  ruleId: z.string().optional(),
+  claimKey: z.string().optional(),
+  // S5 Part C: set on every Failed delivery (Requirement | Agent | Platform).
+  failureCategory: FailureCategorySchema.optional(),
+  // S5b: what the pipeline's "On failure" actions did after this delivery failed (or was cancelled). Never changes the status.
+  onFailureResults: z.array(z.object({ at: z.string(), event: z.enum(['failed', 'cancelled']), ok: z.boolean(), message: z.string().max(1000) })).optional(),
+  // S5 Q13: counted per the intervention definition (see shared/metrics.ts).
+  interventions: z.array(InterventionSchema).optional(),
+  // S5: tree hash of the repo working trees when the current gate was reached (edit detection).
+  gateTreeHashes: z.record(z.string(), z.string()).optional(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
   createdByName: z.string().optional(),
@@ -340,6 +384,14 @@ export const CreateDeliveryInputSchema = z.object({
   repositories: z.array(RepositoryRefSchema).optional(),
   retriedFromDeliveryId: z.string().optional(),
   rerunReason: RerunReasonSchema.optional(),
+  trigger: TriggerSchema.optional(),
+  ruleId: z.string().optional(),
+  // Watcher: `${jiraKey}:${ruleId}:${rerunSeq}` — one delivery per key, across restarts.
+  claimKey: z.string().max(200).optional(),
+  // Run this published version of the pipeline (a watcher rule pins one); default = the current one.
+  pipelineVersion: z.number().int().min(1).optional(),
+  // Set by main (never trusted from the renderer): a Manual start of something an enabled watcher rule could have run.
+  watcherEligible: z.boolean().optional(),
 })
 export type CreateDeliveryInput = z.infer<typeof CreateDeliveryInputSchema>
 
@@ -361,6 +413,8 @@ export const DeliveryEventSchema = z.discriminatedUnion('type', [
   ev('gate_reached', { nodeId: z.string(), blockName: z.string(), output: AgentOutputSchema }),
   ev('gate_approved', { nodeId: z.string(), approvedBy: z.string(), comment: z.string().optional() }),
   ev('gate_rejected', { nodeId: z.string(), rejectedBy: z.string(), comment: z.string() }),
+  // Notify-only gate: a review is due but the delivery does not pause.
+  ev('gate_notified', { nodeId: z.string(), blockName: z.string(), reason: z.string().optional() }),
   ev('item_started', { nodeId: z.string(), itemKey: z.string(), index: z.number().int(), total: z.number().int() }),
   ev('item_completed', { nodeId: z.string(), itemKey: z.string(), index: z.number().int(), total: z.number().int() }),
   ev('item_failed', {
@@ -369,7 +423,7 @@ export const DeliveryEventSchema = z.discriminatedUnion('type', [
   ev('workspace_notice', { message: z.string() }),
   ev('status_changed', { status: DeliveryStatusSchema }),
   ev('completed', { prUrl: z.string().optional() }),
-  ev('failed', { message: z.string(), nodeId: z.string().optional() }),
+  ev('failed', { message: z.string(), nodeId: z.string().optional(), failureCategory: FailureCategorySchema.optional() }),
   ev('cancelled', {}),
   ev('interrupted', {}),
 ])
@@ -377,6 +431,12 @@ export type DeliveryEvent = z.infer<typeof DeliveryEventSchema>
 export type DeliveryEventType = DeliveryEvent['type']
 
 // ---------------------------------------------------------------- settings
+
+export const ModelPriceSchema = z.object({
+  inputPerMTok: z.number().min(0).max(100000),
+  outputPerMTok: z.number().min(0).max(100000),
+})
+export type ModelPrice = z.infer<typeof ModelPriceSchema>
 
 export const SettingsSchema = z.object({
   workspaceRoot: z.string().default(''),
@@ -394,6 +454,9 @@ export const SettingsSchema = z.object({
   jiraVerifiedAt: z.string().default(''),
   team: z.string().default(''),
   activityConsent: z.boolean().default(false),
+  maxConcurrentDeliveries: z.number().default(1),
+  // S5b: $ per million tokens by model id, used to price Prompt steps (Agentic steps keep SDK cost).
+  modelPrices: z.record(z.string(), ModelPriceSchema).default({}),
 })
 export type Settings = z.infer<typeof SettingsSchema>
 export type SettingsKey = keyof Settings
@@ -423,6 +486,10 @@ export const SETTING_VALIDATORS = {
   syncIntervalMinutes: z.number().int().min(1).max(1440),
   team: z.string().max(60).regex(/^[A-Za-z0-9][A-Za-z0-9 ._-]*$|^$/),
   activityConsent: z.boolean(),
+  maxConcurrentDeliveries: z.number().int().min(1).max(10),
+  modelPrices: z
+    .record(z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/), ModelPriceSchema)
+    .refine((r) => Object.keys(r).length <= 50, 'too many models'),
 } as const
 export type WritableSettingKey = keyof typeof SETTING_VALIDATORS
 

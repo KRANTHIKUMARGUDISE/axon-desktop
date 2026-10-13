@@ -9,7 +9,7 @@ import {
 import type {
   Block, BlockInput, Pipeline, PipelineInput, Delivery, CreateDeliveryInput, DeliveryStep,
 } from '../../shared'
-import { atMostOneWorkItemListField, normalizeStoppedSteps } from '../../shared'
+import { atMostOneWorkItemListField, normalizeStoppedSteps, parseAxonContract, contractToFields, entryFileContent } from '../../shared'
 import { atomicWrite } from './atomic'
 import { log } from '../log'
 import { KeyedMutex } from './mutex'
@@ -37,6 +37,16 @@ function docKindOf(kind: 'blocks' | 'pipelines' | 'deliveries'): 'block' | 'pipe
 
 // {dir}/blocks/{id}.json, {dir}/pipelines/{id}.json, {dir}/deliveries/{id}.json (steps
 // embedded — one file per delivery), {dir}/meta.json (localSeq counter).
+// D19: when the block's artifact declares `axon:` (inputs/outputs) in its frontmatter, that contract is the one stored on the
+// block (frontmatter wins over whatever the form sent). An invalid declaration is refused with the reason.
+function applyArtifactContract<T extends { cachedFiles?: unknown; entryPointPath?: string }>(block: T): T {
+  const parsed = parseAxonContract(entryFileContent(block as never) ?? '')
+  if (!parsed.declared) return block
+  if (parsed.errors.length) throw new Error(`The artifact's axon: contract is invalid: ${parsed.errors.join('; ')}`)
+  const f = contractToFields(parsed.contract)
+  return { ...block, contextRequirements: f.contextRequirements, outputSchema: f.outputSchema, requiredItemFields: f.requiredItemFields.length ? f.requiredItemFields : undefined }
+}
+
 export class FileStore implements Store {
   private readonly dir: string
   private readonly now: () => Date
@@ -190,7 +200,7 @@ export class FileStore implements Store {
   }
 
   async createBlock(input: BlockInput): Promise<Block> {
-    const block = BlockSchema.parse({ ...input, ...this.newDefinitionMeta() })
+    const block = BlockSchema.parse({ ...applyArtifactContract(input), ...this.newDefinitionMeta() })
     const multi = atMostOneWorkItemListField(block)
     if (multi) throw new Error(multi)
     await this.writeDoc('blocks', block.id, block)
@@ -204,9 +214,9 @@ export class FileStore implements Store {
         throw new Error('This block comes from the registry (read-only) — duplicate it to edit')
       }
       this.assertEditable('block', existing, id, 'modified')
-      const next = BlockSchema.parse({
+      const next = BlockSchema.parse(applyArtifactContract({
         ...existing, ...defined(patch), id, immutable: existing.immutable, ...this.nextRevision(existing), updatedAt: this.ts(),
-      })
+      }))
       const multi = atMostOneWorkItemListField(next)
       if (multi) throw new Error(multi)
       await this.writeDoc('blocks', id, next)
@@ -261,6 +271,8 @@ export class FileStore implements Store {
       description: input.description,
       nodes: input.nodes.map((n) => PipelineNodeSchema.parse(n)),
       edges: input.edges.map((e) => PipelineEdgeSchema.parse(e)),
+      ...(input.onFailure ? { onFailure: input.onFailure } : {}),
+      ...(input.onFailureOnCancel !== undefined ? { onFailureOnCancel: input.onFailureOnCancel } : {}),
       ...this.newDefinitionMeta(),
       createdByName,
     })
@@ -281,6 +293,8 @@ export class FileStore implements Store {
         ...(patch.description !== undefined ? { description: patch.description } : {}),
         ...(patch.nodes ? { nodes: patch.nodes.map((n) => PipelineNodeSchema.parse(n)) } : {}),
         ...(patch.edges ? { edges: patch.edges.map((e) => PipelineEdgeSchema.parse(e)) } : {}),
+        ...(patch.onFailure ? { onFailure: patch.onFailure } : {}),
+        ...(patch.onFailureOnCancel !== undefined ? { onFailureOnCancel: patch.onFailureOnCancel } : {}),
         ...this.nextRevision(existing),
         updatedAt: this.ts(),
       })
@@ -430,8 +444,10 @@ export class FileStore implements Store {
   }
 
   async createDelivery(input: CreateDeliveryInput, createdByName?: string): Promise<Delivery> {
-    const pipeline = await this.getPipeline(input.pipelineId)
-    if (!pipeline) throw new Error(`Pipeline ${input.pipelineId} not found`)
+    const pipeline = input.pipelineVersion !== undefined
+      ? await this.getPipelineVersion(input.pipelineId, input.pipelineVersion)
+      : await this.getPipeline(input.pipelineId)
+    if (!pipeline) throw new Error(`Pipeline ${input.pipelineId}${input.pipelineVersion !== undefined ? ` v${input.pipelineVersion}` : ''} not found`)
 
     const blockVersions: Record<string, number> = {}
     for (const node of pipeline.nodes) {
@@ -463,6 +479,8 @@ export class FileStore implements Store {
         name: pipeline.name,
         nodes: pipeline.nodes,
         edges: pipeline.edges,
+        onFailure: pipeline.onFailure,
+        onFailureOnCancel: pipeline.onFailureOnCancel,
         blockVersions,
       },
       status: 'Pending',
@@ -475,6 +493,14 @@ export class FileStore implements Store {
       retriedFromDeliveryId: input.retriedFromDeliveryId ?? null,
       rerunReason: input.retriedFromDeliveryId ? (input.rerunReason ?? 'RequirementUpdated') : input.rerunReason,
       attemptNumber: (prev?.attemptNumber ?? 1) + (prev ? 1 : 0),
+      trigger: input.trigger ?? 'Manual',
+      ruleId: input.ruleId,
+      claimKey: input.claimKey,
+      // Q13: re-running an unsuccessful attempt is a human step; so is starting by hand what a watcher rule could have run.
+      interventions: [
+        ...(prev && (prev.status === 'Failed' || prev.status === 'Cancelled') ? [{ kind: 'RerunAfterFailure' as const, at: ts }] : []),
+        ...(input.watcherEligible && (input.trigger ?? 'Manual') === 'Manual' ? [{ kind: 'ManualStartWatcherEligible' as const, at: ts }] : []),
+      ],
       startedAt: ts,
       createdByName,
     })

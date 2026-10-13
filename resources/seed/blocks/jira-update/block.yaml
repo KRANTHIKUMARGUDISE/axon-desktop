@@ -1,0 +1,13 @@
+id: axon-jira-update
+schemaVersion: 2
+name: Jira Update
+role: IO
+description: Changes the ticket in Jira - moves it to a status, adds or removes labels, assigns it, and posts a comment built from a template ({{output.<field>}}, {{prUrls}}, {{deliveryLink}}, {{failureReason}}, {{ticketKey}}). Native AXON code with your own Jira credentials; no AI, no tokens. Safe to repeat - nothing is applied twice.
+version: 1
+tags: [axon, io, jira, action]
+sourceType: Axon
+agentRuntime: Axon
+artifactFormat: Native
+artifactName: jira-update
+contextRequirements: [prUrls?]
+verified: true

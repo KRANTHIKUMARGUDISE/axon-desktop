@@ -290,7 +290,7 @@ describe('run summary contract', () => {
   const delivery = (): Delivery => ({
     id: 'd1', schemaVersion: 2, createdAt: 't', updatedAt: 't', localSeq: 1, ticketId: 'ABC-1', title: 'SECRET TITLE sk-ant-api03-zzzzzzzzzzzzzzzzzzzzzzzz',
     pipelineId: 'p1', pipelineName: 'P', pipelineVersion: 3,
-    pipelineSnapshot: { pipelineId: 'p1', pipelineVersion: 3, name: 'P', nodes: [], edges: [], blockVersions: { b1: 2 } },
+    pipelineSnapshot: { pipelineId: 'p1', pipelineVersion: 3, name: 'P', nodes: [], edges: [], onFailure: [], onFailureOnCancel: false, blockVersions: { b1: 2 } },
     status: 'Completed', repoUrl: 'https://github.com/acme/app.git', workspaceType: 'Default', prUrl: 'https://github.com/acme/app/pull/9',
     startedAt: '2026-10-01T10:00:00.000Z', completedAt: '2026-10-01T10:05:00.000Z', retriedFromDeliveryId: 'd0', rerunReason: 'flaky',
     workspacePath: 'C:\\secret\\workspace', errorMessage: 'customer code leaked here', inputs: { ticket: 'description with secrets' },
@@ -308,9 +308,11 @@ describe('run summary contract', () => {
     const s = toRunSummary(delivery(), 'alice@example.com')
     expect(() => RunSummarySchema.parse(s)).not.toThrow()
     expect(Object.keys(s).sort()).toEqual([
-      'blockVersions', 'completedAt', 'costUsd', 'durationMs', 'gates', 'id', 'inputTokens', 'outputTokens', 'owner', 'pipelineId',
-      'pipelineVersion', 'prUrls', 'repoUrls', 'rerunOf', 'rerunReason', 'schemaVersion', 'scope', 'startedAt', 'status', 'steps', 'ticketId',
+      'aiSteps', 'blockVersions', 'builtInSteps', 'completedAt', 'costUsd', 'durationMs', 'gateCount', 'gates', 'gatesPaused', 'id', 'inputTokens',
+      'interventions', 'outputTokens', 'owner', 'pipelineId', 'pipelineVersion', 'prUrls', 'repoUrls', 'rerunOf', 'rerunReason', 'schemaVersion',
+      'scope', 'startedAt', 'status', 'steps', 'ticketId', 'totalTokens', 'trigger',
     ])
+    expect(s).toMatchObject({ trigger: 'Manual', gateCount: 1, gatesPaused: 1, interventions: 0, totalTokens: 15 })
     expect(s).toMatchObject({
       pipelineId: 'p1', pipelineVersion: 3, blockVersions: { b1: 2 }, rerunOf: 'd0', rerunReason: 'flaky', prUrls: ['https://github.com/acme/app/pull/9'],
       repoUrls: ['https://github.com/acme/app.git'], inputTokens: 10, outputTokens: 5, costUsd: 0.01, durationMs: 300000,

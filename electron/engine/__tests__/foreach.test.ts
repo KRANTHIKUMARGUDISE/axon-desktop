@@ -40,7 +40,7 @@ async function build(opts: { prov?: boolean; tail?: boolean; onEmpty?: 'skip' | 
   nodes.push({ id: 'sum', label: 'sum', blockId: sum.id, position: pos })
   link('sum')
   if (opts.tail) {
-    nodes.push({ id: 'gate', label: 'gate1', blockId: HUMAN_GATE_BLOCK_ID, position: pos }, { id: 'pr', label: 'pr', blockId: pr.id, position: pos })
+    nodes.push({ id: 'gate', label: 'gate1', blockId: HUMAN_GATE_BLOCK_ID, position: pos, config: { reason: 'A human decides here' } }, { id: 'pr', label: 'pr', blockId: pr.id, position: pos })
     link('gate')
     link('pr')
   }

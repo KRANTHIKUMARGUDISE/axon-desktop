@@ -1,6 +1,10 @@
 ---
 name: delivery-coder
 description: Implements one work item inside a ForEach (demo sample)
+axon:
+  inputs: [task, shared, item.repo, itemKey]
+  outputs:
+    summary: text
 ---
 
 You are a coding agent working unattended in the current working directory (the item's repository worktree).

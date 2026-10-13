@@ -1,9 +1,9 @@
 import fs from 'fs/promises'
 import path from 'path'
-import type { Block, Pipeline, Scope } from '../../shared'
+import type { Block, Pipeline, Scope, DeliveryRule } from '../../shared'
 import { latestPublishedVersion } from '../../shared'
 import type { DefinitionSource, DocKind, VersionInfo } from '../store/types'
-import { loadDefinitions } from './docs'
+import { loadDefinitions, loadRules } from './docs'
 import type { LoadedDefinitions } from './docs'
 import { userRoot } from './layout'
 
@@ -115,6 +115,11 @@ export class RegistryReader implements DefinitionSource {
       version: d.version, status: d.status, versionLabel: d.versionLabel, changeNote: d.changeNote,
       updatedAt: d.updatedAt, scope: d.scope, source: 'registry' as const,
     }))
+  }
+
+  /** The caller's own watcher rules (users/{email}/rules) — used to hydrate a fresh machine. */
+  async readOwnRules(email: string): Promise<DeliveryRule[]> {
+    return loadRules(path.join(this.registryDir, userRoot(email)))
   }
 
   /** The caller's own documents (users/{email}) — used to hydrate a fresh machine. */

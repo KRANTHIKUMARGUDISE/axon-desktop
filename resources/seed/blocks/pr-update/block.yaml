@@ -1,0 +1,13 @@
+id: axon-pr-update
+schemaVersion: 2
+name: PR Update
+role: IO
+description: Updates the pull requests from PR Creator or Find PRs - adds labels, requests reviewers, marks a draft ready for review and posts a comment from a template. Native AXON code with your own GitHub token; no AI, no tokens. Safe to repeat - nothing is applied twice.
+version: 1
+tags: [axon, io, github, action]
+sourceType: Axon
+agentRuntime: Axon
+artifactFormat: Native
+artifactName: pr-update
+contextRequirements: [prUrls]
+verified: true

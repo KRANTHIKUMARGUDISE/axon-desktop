@@ -105,6 +105,7 @@ export async function remoteFiles(remote: string): Promise<string[]> {
 import { FileStore } from '../../store/fileStore'
 import { GitRepoStore } from '../../store/gitRepoStore'
 import { RegistryReader } from '../reader'
+import { RuleStore } from '../../rules/ruleStore'
 import { RegistryService } from '../service'
 import { createIdentityProvider } from '../../identity'
 import { seedBuiltIns } from '../../store/seed'
@@ -113,9 +114,10 @@ export async function createMachine(
   root: string,
   name: string,
   remote: string,
-  over: Parameters<typeof createClient>[3] & { team?: string; consent?: boolean; token?: string | null; fetchImpl?: typeof fetch } = {},
+  over: Parameters<typeof createClient>[3] & { team?: string; consent?: boolean; token?: string | null; fetchImpl?: typeof fetch; watcherHere?: boolean } = {},
 ) {
-  const hooks: { onSynced?: () => Promise<void> } = {}
+  const hooks: { onSynced?: () => Promise<void>; service?: RegistryService } = {}
+  const flags = { watcherHere: over.watcherHere ?? false }
   const client = await createClient(root, name, remote, { ...over, onSynced: () => hooks.onSynced?.() ?? Promise.resolve() })
   const identity = createIdentityProvider({
     readSettings: () => ({ userEmail: client.email, userName: `${name} Dev`, team: over.team ?? 'core' }),
@@ -130,13 +132,21 @@ export async function createMachine(
     getEmail: () => client.email,
     enqueue: async (op) => { await client.queue.enqueue(op) },
   })
+  const rules = new RuleStore({
+    dir: path.join(root, name, 'rules'),
+    getOwner: () => client.email,
+    onSaved: (r) => hooks.service?.mirrorRule(r),
+    onDeleted: (id) => hooks.service?.mirrorRuleDelete(id),
+  })
   const service = new RegistryService({
     sync: client.sync, queue: client.queue, reader, local, registryDir: client.registryDir, identity, appVersion: '0.1.0',
     consent: () => over.consent ?? true, getGitToken: async () => (over.token === undefined ? 'ghp_fake' : over.token),
     isReserved: (id) => id.startsWith('axon-'), fetchImpl: over.fetchImpl,
     repoFromUrl: () => ({ owner: 'acme', repo: 'axon-registry' }),
+    rules, isWatcherHere: () => flags.watcherHere, onWatcherYield: () => { flags.watcherHere = false },
   })
+  hooks.service = service
   hooks.onSynced = () => service.onSynced()
-  return { ...client, local, store, reader, service, identity }
+  return { ...client, local, store, reader, service, identity, rules, flags }
 }
 export type Machine = Awaited<ReturnType<typeof createMachine>>

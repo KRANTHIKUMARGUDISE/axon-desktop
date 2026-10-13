@@ -250,3 +250,73 @@ Validator matrix, WorkItemList (missing key/task, duplicate, extras preserved, e
 
 ### About copy + diagnostics (2026-10-13)
 - Sidebar About: new "Built-in safety" section after "How it works", two new bullets under "AI only where it's needed", and two under "Where your data lives" (the old "Secrets (Claude, Jira, GitHub)" line now names Jira and GitHub only, since the Claude key has its own bullet). Copy diagnostics now adds `Claude key: linked|entered|none` and `Catalog version: <12-char commit>|unknown` (strict shapes; never a key value).
+
+## Session 5 — Jira watcher, gates for S3, run metrics (2026-10-13)
+
+### Done
+- **Watcher (Part A).** `DeliveryRule` (`shared/registry.ts`) in `users/{email}/rules/{id}.yaml` (own folder only: `assertWritable` already allowed it; `rulePath`, `ruleYaml/parseRule/loadRules`, `RegistryReader.readOwnRules`, hydration on a fresh machine — **arrives disabled**, mirror at save/delete + at launch). Rules UI: sidebar **Jira watcher** (`src/pages/Rules.tsx`): create/edit/enable/delete, pinned *published* pipeline version, "newer pipeline version available", optional default Workspace path (validated inside the Workspace Root, D18). Saving leaves a rule disabled; **enabling** re-checks Jira permissions (`BROWSE_PROJECTS`, `EDIT_ISSUES`, `ADD_COMMENTS`, one message each) and the pinned version. The same check is in Settings → Accounts → Jira ("Check watcher permissions").
+- **`JiraClient`** (`electron/jira/client.ts`): Basic auth like the identity check, injectable fetch/sleep, paginated `POST /search/jql`, single `PUT /issue` label update, ADF comments, `mypermissions`; 429 honours `Retry-After`, network/5xx retried twice with backoff.
+- **Poller** (`electron/watcher/watcher.ts`, state in `{userData}/watcher/state.json`): runs only on the active machine with ≥1 enabled rule. JQL `project AND assignee = currentUser() AND (labels = ready | status = …) AND updated >= "-Nm"` (relative minutes → no time-zone ambiguity; cursor overlaps 1 min; omitted on the first poll), jitter, pagination. **Claim** = one `PUT` (remove ready + `axon-done`/`axon-failed`, add `axon-running`) then `createDelivery` (pinned version, `trigger: Watcher`, `ruleId`, `claimKey = KEY:rule:rerunSeq`); creation failure rolls the labels back. An **intent** is persisted before the PUT, so a crash between PUT and delivery is repaired at boot with exactly one delivery. A ticket whose previous attempt is still Pending/Running/Paused/Interrupted is deferred (cursor held back).
+- **Write-back**: on `completed|failed|cancelled` → label swap + one comment guarded by the marker `axon:{deliveryId}:{event}` (searched first). Pending write-backs are persisted and retried every tick/boot. The marker is a small grey ADF paragraph — Jira has no invisible text.
+- **Rerun**: ready label re-added after a finished run → `createDelivery` with `retriedFromDeliveryId` + `RequirementUpdated` (S4b path: attempt number, Superseded, `RerunAfterFailure`).
+- **Active machine (D10)**: `watcherActiveHere` (main-only setting) + `profile.yaml activeMachine {id, heartbeatAt}` (5-min heartbeat via the queue). Takeover is **manual only** (`watcher:setActiveHere(true)` → `updateProfile({takeover:true})`); a plain heartbeat that finds another machine's fresh claim *yields* (clears its local flag) instead of overwriting; >15 min old = "stale" warning, never auto-taken-over.
+- **Boot reconcile**: finishes interrupted claims, re-sends lost write-backs, lists orphans (`axon-running`, no local delivery) with **Resume here / Release** (Rules page). Pending watcher deliveries left over from a crash are started at boot.
+- **Concurrency** (`electron/engine/scheduler.ts`): cap = setting `maxConcurrentDeliveries` (default 1, Settings → Preferences); starts beyond it stay Pending (FIFO) and begin when a delivery completes/fails/cancels/is interrupted/pauses at a gate. Applies to manual and watcher starts (resume/approve are not queued).
+- **Notifications** (`electron/notifications.ts`, text in `notificationText.ts`): gate reached, review due (notify-only), completed, failed; click opens the Live View (`notification:openDelivery`); `app.setAppUserModelId('com.company.axon')`.
+- **Gates (Part B)**: reason/checklist/mode live in `PipelineNode.config` (so they are pinned with the published version; `shared/gate.ts`). Validator: gate without a reason = error. Creator panel (reason required, checklist, Pause | Notify only). **Notify only** records the gate (`gate_notified`, step Completed with `gateMode`), notifies, does not pause. Gate card shows reason + checklist + **review** (`delivery:gateReview` → `buildGateReview`: files changed per repo via `git status`, steps that returned `testResults`/`testSummary`/`tests`, each AI step's summary). Pipeline cards list "Human decisions in this pipeline".
+- **Failure classification (Part C)** (`shared/failure.ts`, set in `failDelivery`/`rejectGate`): Requirement (block tagged `readiness`/`requirement`, or `result.requirementUnclear === true`), Agent (agent step failed/invalid output, gate rejection), Platform (anything thrown, built-in step failures). Shown in the Live View, the Jira failure comment, the `failed` event and the run summary. **Auto-retry (15b)**: built-in (Axon runtime) steps retry up to 2× with backoff on git/network/HTTP-looking errors; each retry is logged on the step (`retries`). Agent and Requirement failures never retry.
+- **Interventions (Q13)**: `GateRejected`, `RerunAfterFailure`, `EditBeforeApproval` (working-tree hash at the gate vs at approval — `SnapshotService.treeHash`), `ManualStartWatcherEligible` (main-owned: the renderer cannot set `trigger`/`ruleId`/`claimKey`/`watcherEligible`).
+- **Run summary** adds `trigger, ruleId, gateCount, gatesPaused, interventions, aiSteps, builtInSteps, failureCategory, totalTokens` (+ existing `rerunReason`, `costUsd`). Live View job details: trigger, AI vs built-in steps, tokens, cost, interventions, failure category. Deliveries header: **autonomy %** (completed with zero interventions).
+- **Usage**: `claudePrompt` now records API token counts; `claudeAgentic` records SDK `usage` + `total_cost_usd`.
+
+### Deviations / assumptions
+- **Prerequisites not met**: the live agent-containment tests and the real-Jira identity check (see "Pending verification") were not run; everything here is tested against a mock Jira and local bare repos. Do not point the watcher at real tickets/agents before they pass.
+- Existing pipelines with a Human Gate now fail validation until the gate gets a reason (spec: validator error). Published pipeline versions are immutable, so those need a new version.
+- Prompt-runtime steps report **tokens only** (no price table in the app, `costUsd` stays empty); agentic steps report the SDK's cost.
+- Status-based rules skip tickets labelled `axon-running|done|failed` (otherwise a finished ticket still in that status would re-run every poll); clear the result label to rerun.
+- A cancelled watcher delivery releases the ticket (removes `axon-running`, comments once) but does **not** put the ready label back.
+- Requirement-failure signal is a convention (tag or `requirementUnclear`), not a new block field.
+- The autonomy metric counts the deliveries stored on this machine (the registry run summaries carry the same fields for later aggregation).
+- Heartbeat race: a machine that claims while another machine's queued heartbeat is still unsynced can briefly be overwritten; the yield logic converges after the next sync.
+- UI was exercised in the browser pane against a stubbed `window.axon` (Rules page + new-rule dialog, Deliveries autonomy header, Live View job details + gate card with reason/checklist/files/tests/agent summaries, Creator gate panel, Pipelines "Human decisions"): renders, no console errors. **Not** run in the real Electron window against real Jira — see "Pending verification".
+- Tests: 344 → 396 (S5: engine/gates/failure/retry/interventions, scheduler, gate review + notification text, mock-Jira watcher + client, rules/active-machine registry sync).
+
+## Session 5b — Action blocks and staged workflows (2026-10-13)
+
+Guide: `docs/staged-workflows.md`. Spec: `docs/session-v1-s5b-actions.md`.
+
+### Done
+- **System markers per rule.** Issue property `axon.runs` (`{ruleId: {deliveryId,status,at,statusAtStart}}`) replaces the global `axon-done`/`axon-failed` labels; `axon.comments` holds comment idempotency markers (no grey marker text in new comments). Status rules skip a ticket only when this rule already ran from the current status and the ticket has not re-entered it (changelog `statusEnteredAt`). `axon-running` stays. Rule option **Post AXON outcome comment** (default on). Cancel removes `axon-running`, records `cancelled`, does not re-add the ready label (cancel dialog says so). Legacy `axon-done|failed` tickets are not touched.
+- **Action blocks** (native, no AI): Jira Update, PR Update, Find PRs, and Ticket Fetcher (was a stub). Config in `PipelineNode.config` → `RunnerInput.nodeConfig`; templates `{{output.x}} {{prUrls}} {{deliveryLink}} {{failureReason}} {{ticketKey}}` validated against upstream outputs; effect shown in plain words as the step summary; counted as built-in steps. Workspace Provisioner (v7) checks out an item's existing `branch`; PR Creator reuses the PR.
+- **On failure** actions (+ "also on cancel"), run from `failDelivery`/`rejectGate`/`cancel` before the workspace is released; recorded in `delivery.onFailureResults`.
+- **Pre-flight** at `engine.start` (Jira permissions, first transition reachable, GitHub token) — fails with a clear message before any agent runs; delivery stays Pending.
+- **Creator**: "Actions" palette group, per-block config panels with template hints, "On failure" section.
+- **Automation page** (was Jira watcher): status strip, **Pause all** (profile, synced), per-rule **Check now** + last checked/last match/next check, write-backs warning with **Retry now** only when > 0, rule chains + loop warning, `source: 'jira'` on rules (existing rules load with it).
+- **Prompt cost**: Settings → Model prices; estimated cost on Prompt steps ("≈").
+- Docs: `docs/staged-workflows.md`, CLAUDE.md "Action blocks and staged workflows (S5b)".
+
+### Deviations / assumptions
+- **Comment marker order**: the plan said "write a pending marker first"; implemented post-then-record instead, so a crash between the two can duplicate one comment but never loses an outcome comment.
+- Rerun idempotency is by `rootDeliveryId` + hash of the rendered text: unchanged text is never posted twice, **changed** text (e.g. a corrected spec) does post.
+- Pre-flight can only prove reachability of the *first* status change (later ones depend on where the ticket will be then); later transitions fail at run time with the same clear message. On-failure actions are included in the permission/GitHub checks.
+- `{{deliveryLink}}` is `axon://delivery/{id}` (no custom protocol is registered yet, so it is informational in Jira).
+- Pause all reaches other machines with their next registry sync (default 5 min); the page says so. A machine's own pause takes effect immediately.
+- Jira issue properties have no compare-and-swap; only the active machine writes them (D10), so read-modify-write is acceptable.
+- Find PRs searches at most 60 catalog repos / 300 open PRs each and is GitHub-only (like PR Creator).
+- Not verified against real Jira/GitHub (mock Jira + fake GitHub + local bare repos only), same caveat as S5: the live containment tests and real-Jira identity check from "Pending verification" still stand. The Creator/Automation UI was typechecked and built but not exercised in the Electron window in this session.
+
+### Tests
+- 396 → 433 passing (S5b: shared actions/templates/validator/chains, mock-Jira watcher markers/pause/check-now, action blocks + Find PRs/PR Update/Ticket Fetcher/ADF, provisioner on an existing PR branch, engine pre-flight / on-failure / gate ordering / rerun idempotency, prompt cost).
+
+### Block contracts in the artifact + Create/Edit/View Block (D19, 2026-10-13)
+- **Contract in the frontmatter**: `axon: { inputs, outputs }` in SKILL.md (`shared/blockContract.ts`: parse, map to the existing fields, summary, reconcile, prompt section). Stored via `applyArtifactContract` in `FileStore` (frontmatter wins, invalid = refused with a reason, none = unchanged); the declared output shape is appended to the Prompt and Agentic prompts. Samples (Demo Planner/Coder, epic analyzer) and `docs/agent-standard.md` updated.
+- **Block form rebuilt in shadcn** and simplified: no preset tag rows, no per-field work-list checkboxes, no separate "item fields" / "required item fields" boxes, no "branch conditions" text; role is a dropdown with icons (6 big boxes gone); Source/Runtime are dropdowns; the contract is read-only when the artifact declares it. View mode shows Needs / Returns.
+- **Deviations**: a stored block whose artifact was not re-attached in this edit session shows the contract from `contractSource` (it cannot re-read the file content); output types other than text/list (number, boolean, array, object) are accepted in frontmatter and map to typed entries. Existing blocks migrate without behaviour change (no frontmatter = same stored fields).
+- Also fixed: the watcher test mock clock followed a fixed date, which made one S5b test time-dependent.
+- Not exercised in the Electron window (typecheck, build and tests only).
+
+### Automation: version diff, collapsible rules, pause, enable switch (2026-10-13)
+- **Pipeline version diff** (`shared/pipelineDiff.ts`, `rules:compareVersions`): added/removed/changed nodes, block version bumps, settings (gate reason/mode/checklist, Jira/PR Update fields), connections, ForEach limits, on-failure actions, plus the effect on Jira (status/labels set, Human Gate). The rule card's "See changes and update" opens `UpdateVersionDialog` (change note + diff + Update). Update keeps the enabled state and runs the usual save checks.
+- **Rules as expandable rows** (`src/components/automation/RuleRow.tsx`): header = name, trigger → pipeline vN, "vN available", last delivery, enable switch; details/deliveries/actions inside; search box when there are more than 4 rules.
+- Pause all applies at once on this machine (`pause-local.json`, newest of local/profile wins); "Enable" is a switch beside Save; rules refuse an invalid pinned pipeline or inputs nobody provides; Jira comment for a delivery that could not start is plain.
+- Known: `watcher.test.ts` (status re-entry) and `scheduler.test.ts` are timing-sensitive and can fail in the full parallel run on a loaded machine; they pass alone (`npx vitest run electron/watcher`).

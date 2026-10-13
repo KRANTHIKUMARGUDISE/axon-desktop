@@ -1,6 +1,11 @@
 ---
 name: delivery-planner
 description: Splits a ticket into per-repository work items for a ForEach, choosing repos from the governed catalog (demo sample - teams supply their own planner)
+axon:
+  inputs: [ticket, repoCatalog]
+  outputs:
+    workItems: { list: true, itemFields: [repo] }
+    summary: text
 ---
 
 You are a delivery planner. Read the ticket and the repository catalog in the delivery context, decide which

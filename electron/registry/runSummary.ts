@@ -44,6 +44,16 @@ export function toRunSummary(delivery: Delivery, owner: string): RunSummary {
     const vals = delivery.steps.map((s) => s.output?.usage?.[key]).filter((v): v is number => typeof v === 'number')
     return vals.length ? vals.reduce((a, b) => a + b, 0) : undefined
   }
+  // S5: counts and enums only. A gate step is recognised by the mode/reason recorded on it (legacy gates have the reason).
+  const gateSteps = delivery.steps.filter((s) => {
+    const o = s.output
+    return o?.gateMode !== undefined || o?.humanGateReason !== undefined || o?.approvedBy !== undefined || o?.rejectedBy !== undefined
+  })
+  const aiSteps = delivery.steps.filter((s) => s.agentRuntime !== undefined && s.agentRuntime !== 'Axon').length
+  const builtInSteps = delivery.steps.filter((s) => s.agentRuntime === 'Axon').length
+  const tokens = sum('inputTokens') !== undefined || sum('outputTokens') !== undefined
+    ? (sum('inputTokens') ?? 0) + (sum('outputTokens') ?? 0)
+    : undefined
   return RunSummarySchema.parse({
     id: delivery.id,
     schemaVersion: SCHEMA_VERSION,
@@ -69,6 +79,15 @@ export function toRunSummary(delivery: Delivery, owner: string): RunSummary {
     inputTokens: sum('inputTokens'),
     outputTokens: sum('outputTokens'),
     costUsd: sum('costUsd'),
+    trigger: delivery.trigger ?? 'Manual',
+    ...(delivery.ruleId ? { ruleId: cap(delivery.ruleId, 100) } : {}),
+    gateCount: gateSteps.length,
+    gatesPaused: gateSteps.filter((s) => s.output?.gateMode !== 'NotifyOnly').length,
+    interventions: delivery.interventions?.length ?? 0,
+    aiSteps,
+    builtInSteps,
+    ...(delivery.failureCategory ? { failureCategory: delivery.failureCategory } : {}),
+    totalTokens: tokens,
   })
 }
 

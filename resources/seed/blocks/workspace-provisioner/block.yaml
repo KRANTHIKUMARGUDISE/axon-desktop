@@ -3,7 +3,7 @@ schemaVersion: 2
 name: Workspace Provisioner
 role: IO
 description: Takes the work-item list from the block before it (each item names a catalog repo in "repo") and returns the same list with workspacePath set to that repo's per-delivery git worktree. Its output list carries the same item fields as its input plus workspacePath (pass-through). Connect a ForEach after it.
-version: 6
+version: 7
 tags: [axon, io, workspace]
 sourceType: Axon
 agentRuntime: Axon

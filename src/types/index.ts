@@ -77,9 +77,11 @@ export interface Pipeline {
 export interface StepAgentOutput {
   summary?: string
   confidence?: number
-  usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number }
+  usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number; model?: string; costEstimated?: boolean }
   missingFields?: string[]
   humanGateReason?: string
+  gateChecklist?: string[]
+  gateMode?: 'Pause' | 'NotifyOnly'
   result?: Record<string, unknown>
   errorCode?: string
   recoverable?: boolean
@@ -105,9 +107,15 @@ export interface DeliveryStep {
   /** Resolved working folder the step ran in (D17). */
   cwd?: string
   name: string
+  /** The block this step ran (for its role icon). */
+  blockId?: string
   status: StepStatus
   nodeName?: string
   nodeType?: string
+  /** Block runtime: Axon = built-in step, anything else = AI step. */
+  agentRuntime?: string
+  /** Automatic Platform retries logged on this step (15b). */
+  retries?: { attempt: number; at: string; message: string }[]
   startedAt?: string
   completedAt?: string
   duration?: string
@@ -136,6 +144,8 @@ export interface Delivery {
   title: string
   pipelineId: string
   pipelineName: string
+  /** The published pipeline version this delivery ran. */
+  pipelineVersion?: number
   pipelineSnapshot?: { name: string; nodes?: PipelineNode[]; edges?: PipelineEdge[] }
   status: DeliveryStatus
   currentNodeId?: string
@@ -159,6 +169,10 @@ export interface Delivery {
   attemptNumber?: number
   errorMessage?: string
   localSeq?: number
+  trigger?: 'Manual' | 'Watcher'
+  ruleId?: string
+  failureCategory?: 'Requirement' | 'Agent' | 'Platform'
+  interventions?: { kind: string; at: string; nodeId?: string }[]
 }
 
 export interface DeliverySummary {
@@ -167,6 +181,8 @@ export interface DeliverySummary {
   title: string
   pipelineId: string
   pipelineName: string
+  /** The published pipeline version this delivery ran. */
+  pipelineVersion?: number
   status: DeliveryStatus
   progress: number
   startedAt: string
@@ -175,6 +191,11 @@ export interface DeliverySummary {
   ownerTeam?: string
   duration?: string
   localSeq?: number
+  trigger?: 'Manual' | 'Watcher'
+  ruleId?: string
+  failureCategory?: 'Requirement' | 'Agent' | 'Platform'
+  /** Number of interventions (Q13). */
+  interventionCount?: number
   /** ForEach progress, e.g. "Stories: 2 of 4 · refunds-api" (S4). */
   itemCounter?: string
 }
@@ -231,6 +252,9 @@ export interface BuildingBlock {
   executionType?: ExecutionType
   allowedTools?: string[]
   requiredItemFields?: string[]
+  /** D19: where the block's Needs/Returns come from: the artifact's `axon:` frontmatter, or the form. */
+  contractSource?: 'artifact' | 'form'
+  contractFile?: string
   catalogTags?: string[]
   defaultTimeoutSeconds?: number
   executionAgreementAcceptedAt?: string

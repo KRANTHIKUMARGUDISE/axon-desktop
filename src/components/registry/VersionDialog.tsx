@@ -46,6 +46,7 @@ function VersionPanel({ target, onChanged }: { target: VersionTarget; onChanged:
 
   function refresh() {
     queryClient.invalidateQueries({ queryKey: ['versions', kind, id] })
+    queryClient.invalidateQueries({ queryKey: ['pipeline-versions'] })
     queryClient.invalidateQueries({ queryKey: [kind === 'block' ? 'blocks' : 'pipelines'] })
     onChanged()
   }

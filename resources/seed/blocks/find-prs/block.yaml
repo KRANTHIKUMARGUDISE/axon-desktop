@@ -1,0 +1,17 @@
+id: axon-find-prs
+schemaVersion: 2
+name: Find PRs
+role: IO
+description: Finds the open pull requests in the catalog repositories whose branch name contains the ticket key, and returns them as a work-item list (repo, branch, prUrl) so a later stage - possibly on another engineer's machine - can check the branch out with Workspace Provisioner. GitHub only in v1.
+version: 1
+tags: [axon, io, github, action]
+sourceType: Axon
+agentRuntime: Axon
+artifactFormat: Native
+artifactName: find-prs
+outputSchema:
+  - name: workItems
+    type: WorkItemList
+    itemFields: [repo, branch, prUrl]
+  - prUrls
+verified: true

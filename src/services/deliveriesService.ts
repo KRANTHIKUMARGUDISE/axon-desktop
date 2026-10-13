@@ -32,10 +32,13 @@ function normalizeStep(raw: StoredStep): DeliveryStep {
   return {
     id: raw.itemKey ? `${raw.nodeId}::${raw.itemKey}` : raw.nodeId,
     nodeId: raw.nodeId,
+    blockId: raw.blockId,
     itemKey: raw.itemKey,
     cwd: raw.cwd,
     name: raw.blockName,
     nodeName: raw.blockName,
+    agentRuntime: raw.agentRuntime,
+    retries: raw.retries,
     status: raw.status,
     startedAt: raw.startedAt,
     completedAt: raw.completedAt,
@@ -50,6 +53,8 @@ function normalizeStep(raw: StoredStep): DeliveryStep {
           summary: out.summary,
           confidence: out.confidence,
           humanGateReason: out.humanGateReason,
+          gateChecklist: out.gateChecklist,
+          gateMode: out.gateMode,
           result: out.result,
           errorCode: out.errorCode,
           recoverable: out.recoverable,
@@ -82,8 +87,18 @@ function progressOf(d: StoredDelivery): number {
 function formatDuration(startedAt: string, completedAt?: string): string | undefined {
   if (!completedAt) return undefined
   const secs = Math.max(0, Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000))
-  const m = Math.floor(secs / 60)
-  return m > 0 ? `${m}m ${secs % 60}s` : `${secs}s`
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${secs % 60}s` : `${secs}s`
+}
+
+// A run that has not finished still has a length: how long it ran until it was cancelled, interrupted or paused, or how long it
+// has been running so far.
+function endOf(d: StoredDelivery): string | undefined {
+  if (d.completedAt) return d.completedAt
+  if (d.status === 'Cancelled' || d.status === 'Interrupted' || d.status === 'Paused') return d.updatedAt
+  if (d.status === 'Running') return new Date().toISOString()
+  return undefined
 }
 
 function toSummary(d: StoredDelivery): DeliverySummary {
@@ -93,13 +108,18 @@ function toSummary(d: StoredDelivery): DeliverySummary {
     title: d.title,
     pipelineId: d.pipelineId,
     pipelineName: d.pipelineName,
+    pipelineVersion: d.pipelineVersion,
     status: d.status,
     progress: progressOf(d),
     startedAt: d.startedAt,
     completedAt: d.completedAt,
     createdByName: d.createdByName,
-    duration: formatDuration(d.startedAt, d.completedAt),
+    duration: formatDuration(d.startedAt, endOf(d)),
     localSeq: d.localSeq,
+    trigger: d.trigger,
+    ruleId: d.ruleId,
+    failureCategory: d.failureCategory,
+    interventionCount: d.interventions?.length ?? 0,
     itemCounter: forEachProgress(d).map((p) => `${p.label}: ${p.counter}`).join(' · ') || undefined,
   }
 }
@@ -132,6 +152,8 @@ function toDelivery(d: StoredDelivery): Delivery {
     rerunReason: d.rerunReason,
     attemptNumber: d.attemptNumber,
     errorMessage: d.errorMessage,
+    ruleId: d.ruleId,
+    interventions: d.interventions,
   }
 }
 
@@ -189,3 +211,6 @@ export const rejectGate = async (id: string, req?: GateRequest): Promise<void> =
   assertOk(await window.axon.delivery.rejectGate(id, req?.reason ?? ''), 'Failed to reject gate')
 
 export type { DeliveryStatus }
+
+/** Q7: files changed per repo, test results and agent summaries for the delivery's current gate. */
+export const getGateReview = (id: string) => window.axon.delivery.gateReview(id)

@@ -3,6 +3,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 // Keep the channel name in sync with electron/ipc/delivery.ts (DELIVERY_EVENT_CHANNEL).
 const DELIVERY_EVENT = 'delivery:event'
 const REGISTRY_STATUS = 'registry:status'
+// Keep in sync with electron/notifications.ts (OPEN_DELIVERY_CHANNEL).
+const OPEN_DELIVERY = 'notification:openDelivery'
 
 contextBridge.exposeInMainWorld('axon', {
   secrets: {
@@ -29,6 +31,22 @@ contextBridge.exposeInMainWorld('axon', {
     stageChange: (site: string, email: string, token: string) => ipcRenderer.invoke('jira:stageChange', site, email, token),
     commitChange: () => ipcRenderer.invoke('jira:commitChange'),
     cancelChange: () => ipcRenderer.invoke('jira:cancelChange'),
+    checkPermissions: (projectKey: string) => ipcRenderer.invoke('jira:checkPermissions', projectKey),
+  },
+  rules: {
+    list: () => ipcRenderer.invoke('rules:list'),
+    save: (input: unknown) => ipcRenderer.invoke('rules:save', input),
+    setEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('rules:setEnabled', id, enabled),
+    delete: (id: string) => ipcRenderer.invoke('rules:delete', id),
+    compareVersions: (pipelineId: string, fromVersion: number, toVersion: number) => ipcRenderer.invoke('rules:compareVersions', pipelineId, fromVersion, toVersion),
+  },
+  watcher: {
+    status: () => ipcRenderer.invoke('watcher:status'),
+    setActiveHere: (active: boolean) => ipcRenderer.invoke('watcher:setActiveHere', active),
+    setPaused: (paused: boolean) => ipcRenderer.invoke('watcher:setPaused', paused),
+    checkNow: (ruleId: string) => ipcRenderer.invoke('watcher:checkNow', ruleId),
+    retryWritebacks: () => ipcRenderer.invoke('watcher:retryWritebacks'),
+    resolveOrphan: (key: string, choice: 'resume' | 'release') => ipcRenderer.invoke('watcher:resolveOrphan', key, choice),
   },
   registry: {
     status: () => ipcRenderer.invoke('registry:status'),
@@ -62,6 +80,7 @@ contextBridge.exposeInMainWorld('axon', {
   pipelines: {
     list: () => ipcRenderer.invoke('pipelines:list'),
     get: (id: string) => ipcRenderer.invoke('pipelines:get', id),
+    getVersion: (id: string, version: number) => ipcRenderer.invoke('pipelines:getVersion', id, version),
     create: (input: unknown) => ipcRenderer.invoke('pipelines:create', input),
     update: (id: string, patch: unknown) => ipcRenderer.invoke('pipelines:update', id, patch),
     delete: (id: string) => ipcRenderer.invoke('pipelines:delete', id),
@@ -80,6 +99,7 @@ contextBridge.exposeInMainWorld('axon', {
     previewResume: (id: string) => ipcRenderer.invoke('delivery:previewResume', id),
     approveGate: (id: string, comment?: string) => ipcRenderer.invoke('delivery:approveGate', id, comment),
     rejectGate: (id: string, comment: string) => ipcRenderer.invoke('delivery:rejectGate', id, comment),
+    gateReview: (id: string) => ipcRenderer.invoke('delivery:gateReview', id),
     clearWorkspace: (id: string) => ipcRenderer.invoke('delivery:clearWorkspace', id),
     workspaceSize: (id: string) => ipcRenderer.invoke('delivery:workspaceSize', id),
     repos: (id: string) => ipcRenderer.invoke('delivery:repos', id),
@@ -91,6 +111,11 @@ contextBridge.exposeInMainWorld('axon', {
       const listener = (_e: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(DELIVERY_EVENT, listener)
       return () => ipcRenderer.removeListener(DELIVERY_EVENT, listener)
+    },
+    onOpenDelivery: (callback: (deliveryId: string) => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, id: unknown) => { if (typeof id === 'string') callback(id) }
+      ipcRenderer.on(OPEN_DELIVERY, listener)
+      return () => ipcRenderer.removeListener(OPEN_DELIVERY, listener)
     },
   },
   workspace: {

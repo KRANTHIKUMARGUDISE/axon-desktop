@@ -1,8 +1,8 @@
 import fs from 'fs/promises'
 import path from 'path'
 import YAML from 'yaml'
-import { BlockSchema, PipelineSchema, migrateDoc, ProfileSchema } from '../../shared'
-import type { Block, Pipeline, Profile } from '../../shared'
+import { BlockSchema, PipelineSchema, migrateDoc, ProfileSchema, DeliveryRuleSchema } from '../../shared'
+import type { Block, Pipeline, Profile, DeliveryRule } from '../../shared'
 import { blockDir, cleanRelPath, pipelineDraftPath, pipelineVersionPath } from './layout'
 import { log } from '../log'
 
@@ -54,6 +54,36 @@ export function parseProfile(text: string): Profile | null {
   } catch {
     return null
   }
+}
+
+// Watcher rules: users/{email}/rules/{id}.yaml (S5). Personal only — rules are never promoted.
+export function ruleYaml(rule: DeliveryRule): string {
+  return toYaml(rule)
+}
+
+export function parseRule(text: string): DeliveryRule | null {
+  try {
+    return DeliveryRuleSchema.parse(migrateDoc(YAML.parse(text), 'other'))
+  } catch {
+    return null
+  }
+}
+
+/** Reads `{rootDir}/rules/*.yaml`; unreadable files are skipped (never fatal). */
+export async function loadRules(rootDir: string): Promise<DeliveryRule[]> {
+  let names: string[]
+  try {
+    names = (await fs.readdir(path.join(rootDir, 'rules'), { withFileTypes: true })).filter((e) => e.isFile() && e.name.endsWith('.yaml')).map((e) => e.name)
+  } catch {
+    return []
+  }
+  const out: DeliveryRule[] = []
+  for (const name of names) {
+    const rule = parseRule((await readOptional(path.join(rootDir, 'rules', name))) ?? '')
+    if (rule && `${rule.id}.yaml` === name) out.push(rule)
+    else log.warn(`[registry] skipping rules/${name}`)
+  }
+  return out
 }
 
 export function parsePipelineFile(text: string): Pipeline {

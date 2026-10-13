@@ -1,4 +1,7 @@
 import '@xyflow/react/dist/style.css'
+import { JiraTicketLink } from '@/components/shared/JiraTicketLink'
+import { deliveryStats, formatCost } from '../utils/deliveryStats'
+import { GateReason, GateReviewPanel } from '../components/delivery/GateReviewPanel'
 import { GRAPH_LEGEND, statusBadgeCss } from '../utils/statusColors'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
@@ -560,7 +563,11 @@ export default function DeliveryLiveView() {
       setLocalStatus('Running')
       warnIfClaudeKeyMissing()
       window.axon.delivery.start(id).then((startRes) => {
-        if (!startRes.success) {
+        if (startRes.success && startRes.queued) {
+          // Concurrency cap (Settings → Preferences): it stays Pending and starts by itself when a slot frees.
+          setLocalStatus(null)
+          toast.info('Queued — it will start when a running delivery finishes or pauses.')
+        } else if (!startRes.success) {
           console.error('Auto-start failed:', startRes.error)
           setLocalStatus(null)
           toast.error(startRes.error ? `Failed to start delivery: ${startRes.error}` : 'Failed to start delivery')
@@ -780,7 +787,10 @@ export default function DeliveryLiveView() {
     await warnIfClaudeKeyMissing()
     try {
       const res = await window.axon.delivery.start(id)
-      if (!res.success) {
+      if (res.success && res.queued) {
+        setLocalStatus(null)
+        toast.info('Queued — it will start when a running delivery finishes or pauses.')
+      } else if (!res.success) {
         setLocalStatus(null)
         toast.error(res.error ? `Failed to start delivery: ${res.error}` : 'Failed to start delivery')
       }
@@ -795,7 +805,14 @@ export default function DeliveryLiveView() {
 
   const handleStop = async () => {
     if (!id) return
-    if (!(await confirm({ title: 'Stop this delivery?', message: 'The currently running step will be interrupted. You can resume the delivery afterwards.', confirmLabel: 'Stop', destructive: true }))) return
+    const fromRule = delivery?.trigger === 'Watcher'
+    if (!(await confirm({
+      title: 'Stop this delivery?',
+      message: `The currently running step will be interrupted. You can resume the delivery afterwards.${fromRule
+        ? '\n\nThis delivery was started by an automation rule. AXON removes the axon-running label from the Jira ticket and records the cancellation, but does not put the ready label back: add the label again when you want to run it again.'
+        : ''}`,
+      confirmLabel: 'Stop', destructive: true,
+    }))) return
     setIsStopping(true)
     try {
       const res = await window.axon.delivery.cancel(id)
@@ -956,6 +973,7 @@ export default function DeliveryLiveView() {
   const completedCount = localSteps.filter((s) => s.status === 'Completed').length
   const pipelineName = delivery.pipelineSnapshot?.name ?? delivery.pipelineName
   const createdBy = delivery.createdByName ?? 'Unknown'
+  const stats = deliveryStats(delivery)
   // The Delivery Folder (D17): Explorer / VS Code / Remove workspace all act on it, never on a repo.
   const effectiveWorkspacePath = deliveryFolderPath
 
@@ -967,9 +985,9 @@ export default function DeliveryLiveView() {
         margin: '-22px -22px 22px', display: 'flex', alignItems: 'center', padding: '0 22px', gap: 14, flexShrink: 0,
       }}>
         <Button variant="outline" size="sm" className="h-8" onClick={() => navigate('/deliveries')}>← Deliveries</Button>
-        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--axon-t1)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {delivery.ticketId}
-          {delivery.title && delivery.title !== delivery.ticketId ? ` — ${delivery.title}` : ''}
+        <div className="flex min-w-0 flex-1 items-center gap-2 text-[15px] font-semibold" title={delivery.title}>
+          <JiraTicketLink ticket={delivery.ticketId} />
+          {delivery.title && delivery.title !== delivery.ticketId && <span className="truncate">— {delivery.title}</span>}
         </div>
         <Badge variant="outline" className="h-8 gap-1.5 rounded-md px-3 text-xs font-semibold" style={statusBadgeStyle(displayStatus)}>
           <span className="size-1.5 shrink-0 rounded-full bg-current" style={{ animation: displayStatus === 'Running' ? 'axon-node-pulse 1.6s infinite' : undefined }} />
@@ -1181,10 +1199,15 @@ export default function DeliveryLiveView() {
                   <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-amber)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                     ⚠ Review {previousStep?.nodeName ? `— ${previousStep.nodeName}` : ''}
                   </div>
-                  <div style={{ fontSize: 11, color: 'var(--axon-t2)', lineHeight: 1.5, marginBottom: isSelectedNodeActiveGate ? 10 : 0 }}>
-                    {previousStep?.agentOutput?.summary ||
-                      "This step didn't provide a summary. Review its full output below."}
-                  </div>
+                  <GateReason reason={selectedStep.agentOutput?.humanGateReason} checklist={selectedStep.agentOutput?.gateChecklist} mode={selectedStep.agentOutput?.gateMode} />
+                  {isSelectedNodeActiveGate ? (
+                    <GateReviewPanel deliveryId={delivery!.id} />
+                  ) : (
+                    <div style={{ fontSize: 11, color: 'var(--axon-t2)', lineHeight: 1.5 }}>
+                      {previousStep?.agentOutput?.summary ||
+                        "This step didn't provide a summary. Review its full output below."}
+                    </div>
+                  )}
                   {isSelectedNodeActiveGate && (
                     <>
                       <textarea
@@ -1218,6 +1241,16 @@ export default function DeliveryLiveView() {
                       </div>
                     </>
                   )}
+                </div>
+              )}
+
+              {selectedStep.status === 'Completed' && selectedBlock?.role === 'Control' && selectedStep.agentOutput?.gateMode === 'NotifyOnly' && (
+                <div data-testid="gate-notified" style={{ background: 'var(--axon-bg3)', border: '1px solid var(--axon-border2)', borderRadius: 8, padding: 11, marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-t2)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    🔔 Review due — did not pause
+                  </div>
+                  <GateReason reason={selectedStep.agentOutput?.humanGateReason} checklist={selectedStep.agentOutput?.gateChecklist} mode="NotifyOnly" />
+                  <div style={{ fontSize: 11, color: 'var(--axon-t2)' }}>A notification was sent. Review the pull request instead.</div>
                 </div>
               )}
 
@@ -1408,6 +1441,12 @@ export default function DeliveryLiveView() {
                 { k: 'Triggered by', v: createdBy },
                 { k: 'Step', v: `${completedCount} of ${localSteps.length}` },
                 ...(delivery.attemptNumber && delivery.attemptNumber > 1 ? [{ k: 'Attempt', v: `#${delivery.attemptNumber}` }] : []),
+                { k: 'Trigger', v: delivery.trigger === 'Watcher' ? 'Automation rule' : 'Manual' },
+                { k: 'Steps', v: `${stats.aiSteps} AI · ${stats.builtInSteps} built-in` },
+                ...(stats.totalTokens !== null ? [{ k: 'Tokens', v: stats.totalTokens.toLocaleString() }] : []),
+                ...(stats.costUsd !== null ? [{ k: 'Cost', v: `${stats.costEstimated ? '≈ ' : ''}${formatCost(stats.costUsd)}` }] : []),
+                ...(delivery.interventions?.length ? [{ k: 'Interventions', v: String(delivery.interventions.length) }] : []),
+                ...(delivery.failureCategory ? [{ k: 'Failure category', v: delivery.failureCategory }] : []),
               ].map(({ k, v }) => (
                 <div key={k} className="flex items-baseline justify-between gap-4 py-2 text-xs">
                   <span className="shrink-0 text-muted-foreground">{k}</span>

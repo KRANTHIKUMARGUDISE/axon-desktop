@@ -57,7 +57,7 @@ const blocks = new Map<string, ValidatorBlock>([
   blk('pr', { artifactName: 'pr-creator' }),
   blk('gate', { role: 'Control' }),
 ])
-const n = (id: string, blockId: string, extra: Partial<PipelineNode> = {}): PipelineNode => ({ id, blockId, label: id, position: { x: 0, y: 0 }, ...extra })
+const n = (id: string, blockId: string, extra: Partial<PipelineNode> = {}): PipelineNode => ({ id, blockId, label: id, position: { x: 0, y: 0 }, ...(blockId === 'gate' ? { config: { reason: 'A human decides here' } } : {}), ...extra })
 const fe = (id: string, extra: Partial<PipelineNode> = {}): PipelineNode => ({ id, type: 'forEach', blockId: '', label: id, position: { x: 0, y: 0 }, ...extra })
 const e = (s: string, t: string): PipelineEdge => ({ id: `${s}-${t}`, sourceNodeId: s, targetNodeId: t })
 const errs = (nodes: PipelineNode[], edges: PipelineEdge[]) => validatePipeline(nodes, edges, blocks).errors.join('|')

@@ -13,6 +13,12 @@ export interface RunnerInput {
   effectiveTools: string[]
   timeoutSeconds: number
   signal: AbortSignal
+  /** S5b: the node's own settings (action blocks: Jira Update / PR Update config), pinned with the pipeline version. */
+  nodeId?: string
+  itemKey?: string | null
+  nodeConfig?: Record<string, unknown>
+  /** The first attempt of this story (follows retriedFromDeliveryId): action idempotency markers use it so a Rerun never re-applies. */
+  rootDeliveryId?: string
 }
 
 export type Runner = (input: RunnerInput) => Promise<AgentOutput>
