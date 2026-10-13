@@ -234,3 +234,19 @@ Validator matrix, WorkItemList (missing key/task, duplicate, extras preserved, e
 - **Resume / Rerun**: Resume (same delivery, from the failed step/item) on Failed, Cancelled, Interrupted; Rerun (renamed Retry) asks a reason, links `rerunOf`, sets attempt number and marks the old delivery Superseded (new status); link both ways in Live View; Superseded tab on the Deliveries page. `buildStories/storyCounts` for chain metrics; run summary has `attemptNumber`/`supersededBy` (the superseded delivery's summary is re-queued).
 - Tests: `engine/__tests__/rerun.test.ts` (resume from a failed top-level step with restore, Interrupted, rejected gate refused, Superseded refused, rerun linking + attempt numbers + default reason, Run again of Completed, reason validation, summary fields, 14-day cleanup, story metrics), snapshot lifetime tests in `s4b.test.ts`, pass-through validator tests.
 - Caveat: Resume of a Failed delivery whose workspace was cleared fails with the existing "No workspace folder" error; Rerun is then the way forward. The Intelligence page still uses static demo data, so story metrics are exposed as helpers only.
+
+### Resume dialog (2026-10-13)
+- Native `window.confirm` replaced by `ResumeDialog` (same dialog component as Rerun). Message by case: restore (git repo + snapshot), plain (block cannot write files), warn (non-git + writable block); the failed step's reason is shown. `previewResume` returns `stepLabel, failureReason, folder, resumeMode`. Tests: `engine/__tests__/resumeDialog.test.ts`.
+
+### Cancelled / Interrupted step status (2026-10-13)
+- Steps that were running when the user cancelled or AXON stopped are now `Cancelled` / `Interrupted` (new `StepStatus` values), not `Failed`. Live View: grey node/lane/badge, "Stopped" timeline entry and a neutral "Stopped" box instead of the red Error box; ForEach item switcher/table/chips show Cancelled/Interrupted. Resume/preview treat them like a failed step (`isStoppedStep`).
+- Older deliveries (stored as `Failed` + "Cancelled by user" / "Interrupted (AXON …") are re-labelled in memory on read (`normalizeStoppedSteps` in `FileStore.getDelivery/listDeliveries`); nothing is rewritten on disk.
+
+### Claude key persistence (2026-10-13)
+- The Claude key was memory-only (a past decision), so it was lost on every app restart and Settings showed "not configured" again. It is now saved encrypted with the OS keychain (safeStorage, `axon-claude-key.enc`, like the Git/Jira tokens), loaded at boot, removed when cleared, and never returned to the renderer. A saved key wins over a key found in `~/.claude.json`. Test: `ipc/__tests__/claudeKeyStore.test.ts`.
+
+### Claude key sources (2026-10-13)
+- Two modes, one active: Linked to Claude Code config (consent + file + fingerprint only; key re-read from the file every use; missing -> red, changed -> confirm once) and Entered in AXON (safeStorage). Switching removes the other's data; runner and Settings share `resolve()`. Settings shows the active source; sidebar key icon goes red with the reason. Tests: `ipc/__tests__/claudeKeyStore.test.ts` (linked survives restart with no copy on disk, missing, changed, mode switching, no key in logs/status/run summary).
+
+### About copy + diagnostics (2026-10-13)
+- Sidebar About: new "Built-in safety" section after "How it works", two new bullets under "AI only where it's needed", and two under "Where your data lives" (the old "Secrets (Claude, Jira, GitHub)" line now names Jira and GitHub only, since the Claude key has its own bullet). Copy diagnostics now adds `Claude key: linked|entered|none` and `Catalog version: <12-char commit>|unknown` (strict shapes; never a key value).

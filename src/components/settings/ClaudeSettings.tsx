@@ -9,7 +9,8 @@ import { Field, Info, Notice, SettingsCard, StatusBadge, cleanError } from './pa
 
 const changed = () => window.dispatchEvent(new CustomEvent('axon:claudeKeyChanged'))
 
-// Claude: an Anthropic Console API key, held in memory only (detected from ~/.claude.json on launch, or entered here).
+// Claude: an Anthropic Console API key from exactly one source — linked to Claude Code's own config (read fresh from
+// that file, only a fingerprint is stored) or entered in AXON (encrypted with the OS keychain).
 export function ClaudeSettings() {
   const [status, setStatus] = useState<ClaudeKeyStatus | null>(null)
   const [open, setOpen] = useState(false)
@@ -17,7 +18,13 @@ export function ClaudeSettings() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
+  // Read again every time Settings opens: a linked key is re-read from its file.
   useEffect(() => { window.axon.claudeKey.getStatus().then(setStatus).catch(() => {}) }, [])
+
+  const apply = async (call: () => Promise<ClaudeKeyStatus>) => {
+    setStatus(await call())
+    changed()
+  }
 
   function close(o: boolean) {
     if (!o) { setKey(''); setError('') }
@@ -28,9 +35,8 @@ export function ClaudeSettings() {
     if (!key.startsWith('sk-ant-')) { setError('Key must start with "sk-ant-"'); return }
     setBusy(true)
     try {
-      setStatus(await window.axon.claudeKey.set(key))
-      changed()
-      toast.success('Claude API key updated for this session')
+      await apply(() => window.axon.claudeKey.set(key))
+      toast.success('Claude API key saved in AXON')
       close(false)
     } catch (e) {
       setError(cleanError(e))
@@ -39,31 +45,54 @@ export function ClaudeSettings() {
     }
   }
 
+  const badge = !status ? null
+    : status.hasKey ? <StatusBadge tone="ok">Key set</StatusBadge>
+    : status.problem ? <StatusBadge tone="error">{status.problem.kind === 'missing' ? 'Linked key missing' : 'Key changed'}</StatusBadge>
+    : <StatusBadge tone="warn">No key</StatusBadge>
+
   return (
     <>
       <SettingsCard
         title="Claude"
-        description="Agent runs need an Anthropic Console API key (a Claude subscription login isn't supported). The key is kept in memory only — never written to disk."
-        status={status?.hasKey ? <StatusBadge tone="ok">Key set</StatusBadge> : <StatusBadge tone="warn">No key</StatusBadge>}
-        footer={<Button variant="outline" onClick={() => setOpen(true)}>{status?.hasKey ? 'Update key' : 'Enter key'}</Button>}
+        description="Agent runs need an Anthropic Console API key (a Claude subscription login isn't supported). Use the key from your Claude Code config, or enter one in AXON."
+        status={badge}
+        footer={<Button variant="outline" onClick={() => setOpen(true)}>{status?.mode === 'entered' ? 'Update key' : 'Enter key in AXON'}</Button>}
       >
         <Info
-          label="API key"
-          mono
-          hint={status?.hasKey && status.source
-            ? <>Resolved from <span className="text-foreground">{status.source}</span>; re-detected on every launch.</>
-            : <>Get a key at console.anthropic.com.</>}
+          label="Active source"
+          hint={status?.mode === 'linked'
+            ? <>AXON stores only your consent and a fingerprint, never the key. It reads the key from that file each time it is needed.</>
+            : status?.mode === 'entered'
+              ? <>Stored encrypted with your OS keychain on this machine.</>
+              : <>Get a key at console.anthropic.com.</>}
         >
-          {status?.hasKey ? status.masked ?? "" : ""}
+          {status?.source ?? 'None'}
         </Info>
+        <Info label="API key" mono>{status?.hasKey ? status.masked ?? '' : ''}</Info>
+
+        {status?.problem && <Notice ok={false}>{status.problem.message}</Notice>}
+
+        {status?.changed && (
+          <Alert>
+            <AlertTitle>Use the new key found in {status.changed.source}?</AlertTitle>
+            <AlertDescription>
+              <span className="font-mono">{status.changed.masked}</span>
+              <div className="mt-2 flex gap-2">
+                <Button size="sm" onClick={() => apply(() => window.axon.claudeKey.confirmChanged())}>Use the new key</Button>
+                <Button size="sm" variant="outline" onClick={() => setOpen(true)}>Enter a different key</Button>
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
 
         {status?.candidate && (
           <Alert>
-            <AlertTitle>Use the key found in {status.candidate.source}?</AlertTitle>
+            <AlertTitle>{status.mode === 'linked' ? 'Re-link to' : 'Link to'} the key found in {status.candidate.source}?</AlertTitle>
             <AlertDescription>
               <span className="font-mono">{status.candidate.masked}</span>
+              <div className="mt-1 text-xs">AXON won&apos;t copy it: it keeps only a fingerprint and reads the key from that file each time. Linking removes any key entered in AXON.</div>
               <div className="mt-2 flex gap-2">
-                <Button size="sm" onClick={async () => { setStatus(await window.axon.claudeKey.confirmDetected()); changed() }}>Use this key</Button>
+                <Button size="sm" onClick={() => apply(() => window.axon.claudeKey.confirmDetected())}>Use this key</Button>
                 <Button size="sm" variant="outline" onClick={async () => setStatus(await window.axon.claudeKey.rejectDetected())}>Don&apos;t use</Button>
               </div>
             </AlertDescription>
@@ -84,16 +113,18 @@ export function ClaudeSettings() {
       <Dialog open={open} onOpenChange={close}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Update Claude API key</DialogTitle>
-            <DialogDescription>Applies to this session and is re-detected from your Claude config on the next launch.</DialogDescription>
+            <DialogTitle>Enter a Claude API key</DialogTitle>
+            <DialogDescription>
+              Saved encrypted on this machine. {status?.mode === 'linked' ? 'This replaces the link to your Claude Code config.' : ''}
+            </DialogDescription>
           </DialogHeader>
-          <Field label="New API key" htmlFor="claude-new-key">
+          <Field label="API key" htmlFor="claude-new-key">
             <Input id="claude-new-key" type="password" autoComplete="off" autoFocus placeholder="sk-ant-…" value={key} onChange={(e) => { setKey(e.target.value); setError('') }} />
           </Field>
           {error && <Notice ok={false}>{error}</Notice>}
           <DialogFooter>
             <Button variant="outline" onClick={() => close(false)}>Cancel</Button>
-            <Button onClick={save} disabled={busy || !key}>{busy ? 'Saving…' : 'Update'}</Button>
+            <Button onClick={save} disabled={busy || !key}>{busy ? 'Saving…' : 'Save'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

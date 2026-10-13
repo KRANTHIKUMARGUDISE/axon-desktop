@@ -1,7 +1,7 @@
 import type { Block, Delivery, DeliveryStep, AgentOutput, ActionResult, ResumePreview, DeliveryStatus } from '../../shared'
 import {
   LOCAL_USER, DS1_DEFAULT_THRESHOLD_BYTES, findStartNode, nextNode, resolvePipelineProgress, forEachBody,
-  validatePipeline, outputFieldNames, contextKey, isOptionalContext, parseWorkItemList, validateWorkItemList, workItemListFields, forEachPredecessors, capSummary, buildRepoCatalogText,
+  validatePipeline, outputFieldNames, contextKey, isOptionalContext, parseWorkItemList, validateWorkItemList, workItemListFields, forEachPredecessors, capSummary, buildRepoCatalogText, isStoppedStep,
 } from '../../shared'
 import type { PipelineNode, WorkItemEntry, AgentCatalogRepo } from '../../shared'
 import type { Store } from '../store/types'
@@ -816,7 +816,7 @@ export function createEngine(deps: EngineDeps): Engine {
           rejected = true
           return
         }
-        markRunningSteps(d, 'Cancelled by user')
+        markRunningSteps(d, 'Cancelled by user', 'Cancelled')
         d.status = 'Cancelled'
       })
       if (rejected) return { success: false, error: 'Delivery already finished' }
@@ -829,10 +829,10 @@ export function createEngine(deps: EngineDeps): Engine {
     return { success: true }
   }
 
-  function markRunningSteps(d: Delivery, reason: string) {
+  function markRunningSteps(d: Delivery, reason: string, status: 'Cancelled' | 'Interrupted') {
     for (const s of d.steps) {
       if (s.status !== 'Running') continue
-      s.status = 'Failed'
+      s.status = status
       s.completedAt = iso()
       s.output = { status: 'failed', summary: reason, result: {}, errorMessage: reason }
     }
@@ -861,15 +861,30 @@ export function createEngine(deps: EngineDeps): Engine {
         preview: { ...base, resumeNodeId: '', resumeNodeLabel: '', hasPriorAttempt: false, allNodesCompleted: true },
       }
     }
-    const block = resumeNode.type === 'forEach' ? null : await store.getBlock(resumeNode.blockId)
+    // The step that will actually run again: the one that failed/stopped (inside a ForEach, the failing body step), else the next node.
+    const failed = [...d.steps].reverse().find(isStoppedStep)
+    const stepNode = (failed && nodes.find((n) => n.id === failed.nodeId && n.type !== 'forEach')) || (resumeNode.type !== 'forEach' ? resumeNode : undefined)
+    const block = stepNode ? await store.getBlock(stepNode.blockId) : null
+    const resumeStep = stepNode ? d.steps.find((s) => s.nodeId === stepNode.id && (failed?.nodeId === stepNode.id ? s.itemKey === failed.itemKey : true) && isStoppedStep(s)) ?? failed : undefined
+    const hasPriorAttempt = d.steps.some((s) => s.nodeId === (stepNode ?? resumeNode).id)
+    const canWrite = !!block && block.agentRuntime !== 'Axon' && block.executionType === 'Agentic'
+      && resolveEffectiveTools(block).some((t) => t === 'Write' || t === 'Edit' || t === 'Bash')
+    const folder = resumeStep?.cwd
+    const stepKey = stepNode ? (resumeStep?.itemKey ? `${stepNode.id}@${resumeStep.itemKey}` : stepNode.id) : ''
+    const restorable = !!(deps.snapshots && folder && stepNode && await deps.snapshots.has(folder, id, stepKey).catch(() => false))
+    const resumeMode: NonNullable<ResumePreview['resumeMode']> = restorable ? 'restore' : (canWrite && hasPriorAttempt ? 'warn' : 'plain')
     return {
       success: true,
       preview: {
         ...base,
+        stepLabel: (stepNode ?? resumeNode).label ?? (stepNode ?? resumeNode).id,
+        failureReason: resumeStep?.output?.errorMessage ?? resumeStep?.output?.summary,
+        folder,
+        resumeMode,
         resumeNodeId: resumeNode.id,
         resumeNodeLabel: resumeNode.label ?? resumeNode.id,
         resumeNodeRole: block?.role,
-        hasPriorAttempt: d.steps.some((s) => s.nodeId === resumeNode.id),
+        hasPriorAttempt,
         allNodesCompleted: false,
       },
     }
@@ -880,7 +895,7 @@ export function createEngine(deps: EngineDeps): Engine {
     for (const d of await store.listDeliveries()) {
       if (d.status !== 'Running' || active.has(d.id)) continue
       await store.updateDelivery(d.id, (x) => {
-        markRunningSteps(x, 'Interrupted (AXON stopped while this step was running)')
+        markRunningSteps(x, 'Interrupted (AXON stopped while this step was running)', 'Interrupted')
         x.status = 'Interrupted'
       })
       emit(d.id, { type: 'status_changed', status: 'Interrupted' })
@@ -900,7 +915,7 @@ export function createEngine(deps: EngineDeps): Engine {
       runs.map(([id]) =>
         store.updateDelivery(id, (d) => {
           if (d.status !== 'Running') return
-          markRunningSteps(d, 'Interrupted (AXON was closed while this step was running)')
+          markRunningSteps(d, 'Interrupted (AXON was closed while this step was running)', 'Interrupted')
           d.status = 'Interrupted'
         }).catch((err) => log.warn(`[engine] shutdown persist failed for ${id}`, err)),
       ),

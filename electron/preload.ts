@@ -102,6 +102,7 @@ contextBridge.exposeInMainWorld('axon', {
     set: (value: string) => ipcRenderer.invoke('claudeKey:set', value),
     confirmDetected: () => ipcRenderer.invoke('claudeKey:confirmDetected'),
     rejectDetected: () => ipcRenderer.invoke('claudeKey:rejectDetected'),
+    confirmChanged: () => ipcRenderer.invoke('claudeKey:confirmChanged'),
   },
   dialog: {
     openDirectory: (startInWorkspaceRoot?: boolean) => ipcRenderer.invoke('dialog:openDirectory', startInWorkspaceRoot),

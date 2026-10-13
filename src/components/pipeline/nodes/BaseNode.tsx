@@ -1,4 +1,5 @@
 import type React from 'react'
+import { statusColor } from '../../../utils/statusColors'
 import { Handle, Position } from '@xyflow/react'
 import { getBlockTypeIcon } from '../../../utils/blockTypeIcons'
 import { getRuntimeIcon, RUNTIME_LABELS } from '../../../utils/runtimeIcons'
@@ -18,14 +19,16 @@ const TYPE_COLORS: Record<string, string> = {
   IO:        '#10b981',
 }
 
-export type ExecutionStatus = 'Pending' | 'Running' | 'Success' | 'Failed' | 'AwaitingApproval'
+export type ExecutionStatus = 'Pending' | 'Running' | 'Success' | 'Failed' | 'AwaitingApproval' | 'Cancelled' | 'Interrupted'
 
 const STATUS_COLORS: Record<ExecutionStatus, string> = {
-  Pending: '#64748b',
-  Running: '#3b82f6',
-  Success: '#22c55e',
-  Failed: '#ef4444',
-  AwaitingApproval: '#f59e0b',
+  Pending: statusColor('Pending'),
+  Running: statusColor('Running'),
+  Success: statusColor('Completed'),
+  Failed: statusColor('Failed'),
+  AwaitingApproval: statusColor('Waiting'),
+  Cancelled: statusColor('Cancelled'),
+  Interrupted: statusColor('Interrupted'),
 }
 
 interface BaseNodeData {
@@ -84,6 +87,8 @@ export default function BaseNode({ data, selected }: Props) {
         >
           {data.executionStatus === 'Success' && '✓'}
           {data.executionStatus === 'Failed' && '✕'}
+          {data.executionStatus === 'Cancelled' && '■'}
+          {data.executionStatus === 'Interrupted' && '⏸'}
           {data.executionStatus === 'AwaitingApproval' && '⏸'}
           {data.executionStatus === 'Running' && (
             <div style={{
@@ -152,7 +157,7 @@ export default function BaseNode({ data, selected }: Props) {
             border: '1px solid #6f5fe844',
             borderRadius: 4,
             padding: '2px 6px',
-            color: '#a78bfa',
+            color: '#22d3ee',
           }}
         >
           {data.condition}

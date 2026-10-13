@@ -1,8 +1,9 @@
-import { loadCatalog } from '../registry/catalog'
+import { loadCatalog, registryHead } from '../registry/catalog'
 import os from 'os'
 import { app, clipboard } from 'electron'
 import { z } from 'zod'
 import { buildDiagnostics } from '../diagnostics'
+import { claudeKeyMode } from './claudeKeyStore'
 import { SETTING_VALIDATORS } from '../../shared'
 import type { RegistryStatus } from '../../shared'
 import { handle } from './guard'
@@ -131,9 +132,11 @@ export function registerRegistryHandlers(deps: RegistryIpcDeps): void {
   })
 
   // ---- support: "Copy diagnostics" (allow-listed facts only — see electron/diagnostics.ts)
-  handle('system:copyDiagnostics', z.tuple([]), () => {
+  handle('system:copyDiagnostics', z.tuple([]), async () => {
     const s = service.status()
     const text = buildDiagnostics({
+      claudeKeyMode: claudeKeyMode(),
+      catalogVersion: (await registryHead(deps.registryDir)) ?? '',
       appVersion: app.getVersion(), electronVersion: process.versions.electron, nodeVersion: process.versions.node,
       platform: process.platform, arch: process.arch, osRelease: os.release(),
       registry: { url: s.registryUrl, state: s.state, lastSyncAt: s.lastSyncAt, queued: s.queued },

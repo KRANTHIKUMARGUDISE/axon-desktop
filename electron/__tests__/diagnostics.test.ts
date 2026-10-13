@@ -10,6 +10,7 @@ const { collectLicenses } = require('../../scripts/generate-licenses.js') as { c
 afterEach(() => clearRegisteredSecrets())
 
 const base = (over: Partial<DiagnosticsInput['registry']> = {}): DiagnosticsInput => ({
+  claudeKeyMode: 'linked', catalogVersion: '4a552552f0c1a2b3c4d5e6f708192a3b4c5d6e7f',
   appVersion: '0.1.0', electronVersion: '44.7.0', nodeVersion: '24.21.0', platform: 'win32', arch: 'x64', osRelease: '10.0.26200',
   registry: { url: 'https://github.com/acme/axon-registry.git', state: 'Idle', lastSyncAt: '2026-10-13T08:30:00.000Z', queued: 3, ...over },
 })
@@ -31,7 +32,18 @@ describe('copy diagnostics', () => {
     expect(buildDiagnostics(base())).toBe([
       'AXON diagnostics', 'AXON: 0.1.0', 'Electron: 44.7.0', 'Node: 24.21.0', 'OS: win32 x64 (10.0.26200)',
       'Registry host: github.com', 'Registry sync: Idle, last sync 2026-10-13T08:30:00.000Z', 'Queued writes: 3',
+      'Claude key: linked', 'Catalog version: 4a552552f0c1',
     ].join('\n'))
+  })
+
+  it('reports the Claude key mode and catalog version in strict shapes only (never a key value)', () => {
+    const key = 'sk-ant-api03-SEEDEDKEYabcdefghijklmnop'
+    expect(buildDiagnostics({ ...base(), claudeKeyMode: 'entered' })).toContain('Claude key: entered')
+    expect(buildDiagnostics({ ...base(), claudeKeyMode: 'none', catalogVersion: '' })).toContain('Catalog version: unknown')
+    const hostile = buildDiagnostics({ ...base(), claudeKeyMode: key, catalogVersion: `abc ${key}` })
+    expect(hostile).toContain('Claude key: unknown')
+    expect(hostile).toContain('Catalog version: unknown')
+    expect(hostile).not.toContain(key)
   })
 
   it('handles an unconfigured registry that never synced', () => {

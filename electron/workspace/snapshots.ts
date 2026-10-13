@@ -31,6 +31,8 @@ export type SnapshotOutcome = 'snapshotted' | 'restored' | 'skipped'
 export interface SnapshotService {
   /** Snapshot before the first run of a step; restore it if one already exists (retry/resume). Non-git folders are skipped. */
   ensure(cwd: string, deliveryId: string, stepId: string): Promise<SnapshotOutcome>
+  /** True when `cwd` is in a git repo that holds a snapshot ref for this step. */
+  has(cwd: string, deliveryId: string, stepId: string): Promise<boolean>
   /** Put the working tree back to the step's snapshot. */
   restore(cwd: string, deliveryId: string, stepId: string): Promise<boolean>
   /** Delete every refs/axon/<deliveryId>/… in the repos behind these folders. */
@@ -104,6 +106,11 @@ export function createSnapshotService(deps: { git?: GitRun } = {}): SnapshotServ
       }
       await snapshotTo(top, ref)
       return 'snapshotted'
+    },
+
+    async has(cwd, deliveryId, stepId) {
+      const top = await topLevel(cwd)
+      return !!top && !!(await refCommit(top, snapshotRef(deliveryId, stepId)))
     },
 
     async restore(cwd, deliveryId, stepId) {

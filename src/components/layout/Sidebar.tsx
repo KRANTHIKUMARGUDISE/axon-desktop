@@ -187,7 +187,7 @@ export function Sidebar() {
                 ? 'var(--axon-t4)'
                 : claudeKeyStatus.hasKey
                 ? 'var(--axon-green)'
-                : claudeKeyStatus.conflict
+                : claudeKeyStatus.conflict || claudeKeyStatus.changed
                   ? 'var(--axon-amber)'
                   : 'var(--axon-red)',
             }}
@@ -196,9 +196,11 @@ export function Sidebar() {
                 ? 'Checking Claude key…'
                 : claudeKeyStatus.hasKey
                   ? `Claude key resolved (${claudeKeyStatus.source ?? 'unknown source'})`
-                  : claudeKeyStatus.conflict
-                    ? 'Conflicting Claude keys detected — resolve in Settings'
-                    : 'No Claude key resolved — set one in Settings'}</title>
+                  : claudeKeyStatus.problem
+                    ? claudeKeyStatus.problem.message
+                    : claudeKeyStatus.conflict
+                      ? 'Conflicting Claude keys detected — resolve in Settings'
+                      : 'No Claude key resolved — set one in Settings'}</title>
           </KeyRound>
         </div>
       </div>

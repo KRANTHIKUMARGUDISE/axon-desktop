@@ -9,7 +9,7 @@ import {
 import type {
   Block, BlockInput, Pipeline, PipelineInput, Delivery, CreateDeliveryInput, DeliveryStep,
 } from '../../shared'
-import { atMostOneWorkItemListField } from '../../shared'
+import { atMostOneWorkItemListField, normalizeStoppedSteps } from '../../shared'
 import { atomicWrite } from './atomic'
 import { log } from '../log'
 import { KeyedMutex } from './mutex'
@@ -405,12 +405,13 @@ export class FileStore implements Store {
 
   // ------------------------------------------------------------ deliveries
 
-  listDeliveries(): Promise<Delivery[]> {
-    return this.listDocs('deliveries', DeliverySchema)
+  async listDeliveries(): Promise<Delivery[]> {
+    return (await this.listDocs('deliveries', DeliverySchema)).map(normalizeStoppedSteps)
   }
 
-  getDelivery(id: string): Promise<Delivery | null> {
-    return this.readDoc('deliveries', id, DeliverySchema)
+  async getDelivery(id: string): Promise<Delivery | null> {
+    const d = await this.readDoc('deliveries', id, DeliverySchema)
+    return d ? normalizeStoppedSteps(d) : null
   }
 
   private nextLocalSeq(): Promise<number> {

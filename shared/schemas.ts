@@ -42,6 +42,8 @@ export const RerunReasonSchema = z.enum(RERUN_REASONS)
 export type RerunReason = z.infer<typeof RerunReasonSchema>
 export const StepStatusSchema = z.enum([
   'Pending', 'Running', 'Completed', 'Failed', 'Skipped', 'AwaitingApproval',
+  // The step was running when the user cancelled / AXON stopped: not a failure of the step itself.
+  'Cancelled', 'Interrupted',
 ])
 
 export type BlockRole = z.infer<typeof BlockRoleSchema>

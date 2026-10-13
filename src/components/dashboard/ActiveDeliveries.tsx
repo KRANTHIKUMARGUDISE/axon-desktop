@@ -1,4 +1,5 @@
 import { useNavigate } from 'react-router-dom'
+import { ALL_STATUS_KEYS, statusBg, statusColor, statusColorMap } from '../../utils/statusColors'
 import type { DeliverySummary, DeliveryStatus } from '@/types'
 
 interface ActiveDeliveriesProps {
@@ -7,27 +8,11 @@ interface ActiveDeliveriesProps {
   isError: boolean
 }
 
-const STATUS_COLORS: Record<DeliveryStatus, { bg: string; color: string; dot: string }> = {
-  Running:   { bg: 'var(--axon-nx-glow)',   color: 'var(--axon-nexus2)', dot: 'var(--axon-nexus2)' },
-  Paused:    { bg: 'var(--axon-amber-d)',   color: 'var(--axon-amber)',  dot: 'var(--axon-amber)' },
-  Pending:   { bg: 'var(--axon-amber-d)',   color: 'var(--axon-amber)',  dot: 'var(--axon-amber)' },
-  Completed: { bg: 'var(--axon-green-d)',   color: 'var(--axon-green)',  dot: 'var(--axon-green)' },
-  Failed:    { bg: 'var(--axon-red-d)',     color: 'var(--axon-red)',    dot: 'var(--axon-red)' },
-  Cancelled: { bg: 'rgba(100,116,139,0.12)', color: 'var(--axon-t3)',   dot: 'var(--axon-t3)' },
-  Interrupted: { bg: 'var(--axon-amber-d)', color: 'var(--axon-amber)',  dot: 'var(--axon-amber)' },
-  Superseded: { bg: 'rgba(100,116,139,0.12)', color: 'var(--axon-t3)',  dot: 'var(--axon-t3)' },
-}
+const STATUS_COLORS: Record<DeliveryStatus, { bg: string; color: string; dot: string }> = Object.fromEntries(
+  ALL_STATUS_KEYS.map((k) => [k, { bg: statusBg(k), color: statusColor(k), dot: statusColor(k) }]),
+) as Record<DeliveryStatus, { bg: string; color: string; dot: string }>
 
-const PROG_COLORS: Record<DeliveryStatus, string> = {
-  Running: 'var(--axon-nexus2)',
-  Paused: 'var(--axon-amber)',
-  Pending: 'var(--axon-amber)',
-  Completed: 'var(--axon-green)',
-  Failed: 'var(--axon-red)',
-  Cancelled: 'var(--axon-t3)',
-  Interrupted: 'var(--axon-amber)',
-  Superseded: 'var(--axon-t3)',
-}
+const PROG_COLORS = statusColorMap(ALL_STATUS_KEYS) as Record<DeliveryStatus, string>
 
 function timeAgo(iso?: string) {
   if (!iso) return '—'

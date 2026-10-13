@@ -14,6 +14,7 @@ import { atomicWrite } from '../store/atomic'
 export const SECRET_KEYS = {
   gitToken: 'axon-git-token',
   jiraToken: 'axon-jira-token',
+  claudeKey: 'axon-claude-key',
 } as const
 
 const securePath = (key: string) => path.join(app.getPath('userData'), `${key}.enc`)
@@ -33,6 +34,10 @@ export async function writeSecure(key: string, value: string): Promise<void> {
     throw new Error('Safe storage not available on this platform')
   }
   await atomicWrite(securePath(key), safeStorage.encryptString(value))
+}
+
+export async function deleteSecure(key: string): Promise<void> {
+  await fs.unlink(securePath(key)).catch(() => {})
 }
 
 // One-time migration helper: decrypts a legacy secure-storage file (if present) and

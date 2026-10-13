@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { ALL_STATUS_KEYS, statusBgMap, statusColorMap } from '../../utils/statusColors'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { FolderOpen, Code2, Copy, X } from 'lucide-react'
@@ -51,6 +52,9 @@ function StepRow({ step, index }: { step: DeliveryStep; index: number }) {
   } else if (step.status === 'Failed') {
     icon = <div style={{ ...iconStyle, background: 'var(--axon-red-d)', color: 'var(--axon-red)', border: '1px solid rgba(239,68,68,0.3)' }}>✕</div>
     statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-red)' }}>Failed</span>
+  } else if (step.status === 'Cancelled' || step.status === 'Interrupted') {
+    icon = <div style={{ ...iconStyle, background: 'var(--axon-bg4)', color: 'var(--axon-t2)', border: '1px solid var(--axon-border2)' }}>{step.status === 'Cancelled' ? '■' : '⏸'}</div>
+    statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-t2)' }}>{step.status}</span>
   } else if (step.status === 'AwaitingApproval') {
     icon = <div style={{ ...iconStyle, background: 'var(--axon-amber-d)', color: 'var(--axon-amber)', border: '1px solid rgba(245,158,11,0.3)', fontSize: 11 }}>🚦</div>
     statusLabel = <span style={{ fontSize: 11, color: 'var(--axon-amber)' }}>Awaiting approval</span>
@@ -68,23 +72,9 @@ function StepRow({ step, index }: { step: DeliveryStep; index: number }) {
   )
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  Running: 'var(--axon-nexus2)',
-  Completed: 'var(--axon-green)',
-  Failed: 'var(--axon-red)',
-  Paused: 'var(--axon-amber)',
-  Pending: 'var(--axon-t3)',
-  Cancelled: 'var(--axon-t3)',
-}
+const STATUS_COLORS: Record<string, string> = statusColorMap(ALL_STATUS_KEYS)
 
-const STATUS_BG: Record<string, string> = {
-  Running: 'var(--axon-nx-glow)',
-  Completed: 'var(--axon-green-d)',
-  Failed: 'var(--axon-red-d)',
-  Paused: 'var(--axon-amber-d)',
-  Pending: 'var(--axon-bg4)',
-  Cancelled: 'var(--axon-bg4)',
-}
+const STATUS_BG: Record<string, string> = statusBgMap(ALL_STATUS_KEYS)
 
 
 export default function DeliveryPanel({ deliveryId, onClose }: Props) {

@@ -1,4 +1,5 @@
 import type { ForEachProgress, ItemLane, LaneState } from '@shared'
+import { statusColor } from '../../utils/statusColors'
 import type { DeliveryStep } from '../../types'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
@@ -17,9 +18,12 @@ export type UIStep = DeliveryStep & { nodeId: string }
 export type UIProgress = ForEachProgress<UIStep>
 export type UILane = ItemLane<UIStep>
 
-const COLOR: Record<LaneState, string> = { pending: '#64748b', running: '#3b82f6', done: '#22c55e', failed: '#ef4444' }
-const ICON: Record<LaneState, string> = { pending: '○', running: '●', done: '✓', failed: '✕' }
-const LABEL: Record<LaneState, string> = { pending: 'Pending', running: 'Running', done: 'Done', failed: 'Failed' }
+const COLOR: Record<LaneState, string> = {
+  pending: statusColor('Pending'), running: statusColor('Running'), done: statusColor('Completed'),
+  failed: statusColor('Failed'), cancelled: statusColor('Cancelled'), interrupted: statusColor('Interrupted'),
+}
+const ICON: Record<LaneState, string> = { pending: '○', running: '●', done: '✓', failed: '✕', cancelled: '■', interrupted: '⏸' }
+const LABEL: Record<LaneState, string> = { pending: 'Pending', running: 'Running', done: 'Done', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' }
 
 export function stepDuration(s: Pick<DeliveryStep, 'startedAt' | 'completedAt'>): string {
   if (!s.startedAt) return '—'
@@ -31,7 +35,7 @@ export function stepDuration(s: Pick<DeliveryStep, 'startedAt' | 'completedAt'>)
 export function laneDuration(lane: UILane): string {
   const started = lane.steps.map((s) => s.startedAt).filter((x): x is string => !!x).sort()[0]
   if (!started) return '—'
-  const ended = lane.state === 'done' || lane.state === 'failed'
+  const ended = lane.state === 'done' || lane.state === 'failed' || lane.state === 'cancelled' || lane.state === 'interrupted'
     ? lane.steps.map((s) => s.completedAt).filter((x): x is string => !!x).sort().slice(-1)[0]
     : undefined
   return stepDuration({ startedAt: started, completedAt: ended })

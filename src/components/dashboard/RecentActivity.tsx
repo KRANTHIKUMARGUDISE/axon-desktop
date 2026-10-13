@@ -1,19 +1,11 @@
+import { ALL_STATUS_KEYS, statusColorMap } from '../../utils/statusColors'
 import type { DeliverySummary, DeliveryStatus } from '@/types'
 
 interface RecentActivityProps {
   deliveries: DeliverySummary[]
 }
 
-const DOT_COLORS: Record<DeliveryStatus, string> = {
-  Running:   'var(--axon-nexus2)',
-  Paused:    'var(--axon-blue)',
-  Pending:   'var(--axon-amber)',
-  Completed: 'var(--axon-green)',
-  Failed:    'var(--axon-red)',
-  Cancelled: 'var(--axon-t3)',
-  Interrupted: 'var(--axon-amber)',
-  Superseded: 'var(--axon-t3)',
-}
+const DOT_COLORS = statusColorMap(ALL_STATUS_KEYS) as Record<DeliveryStatus, string>
 
 function describe(d: DeliverySummary): string {
   switch (d.status) {

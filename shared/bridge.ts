@@ -5,7 +5,14 @@ import type { RegistryStatus } from './registry'
 export interface ClaudeKeyStatus {
   hasKey: boolean
   masked: string | null
+  /** Which mode is active: 'linked' (Linked to Claude Code config) or 'entered' (Entered in AXON). */
+  mode: 'linked' | 'entered' | null
+  /** Human-readable active source, e.g. "Linked to Claude Code config (~/.claude.json)". */
   source: string | null
+  /** Linked key missing or changed: the red status message. */
+  problem: { kind: 'missing' | 'changed'; message: string } | null
+  /** Linked file now holds a different key (masked): needs confirmation before use. */
+  changed: { masked: string; source: string } | null
   conflict: { claudeJson: string; configJson: string } | null
   /** Key found in Claude's own config files — unused until the user confirms it (D3). */
   candidate: { masked: string; source: string } | null
@@ -170,6 +177,7 @@ export interface AxonBridge {
     set(value: string): Promise<ClaudeKeyStatus>
     confirmDetected(): Promise<ClaudeKeyStatus>
     rejectDetected(): Promise<ClaudeKeyStatus>
+    confirmChanged(): Promise<ClaudeKeyStatus>
   }
   dialog: {
     openDirectory(startInWorkspaceRoot?: boolean): Promise<string | null>

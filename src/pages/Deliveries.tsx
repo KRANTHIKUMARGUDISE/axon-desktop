@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { ALL_STATUS_KEYS, statusBg, statusBgMap, statusColor, statusColorMap } from '../utils/statusColors'
 import { Plus } from 'lucide-react'
 import { useDeliveries } from '@/hooks/useDeliveries'
 import { usePipelines } from '@/hooks/usePipelines'
@@ -13,34 +14,11 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
-const STATUS_COLOR: Record<string, string> = {
-  Running: 'var(--axon-nexus2)',
-  Completed: 'var(--axon-green)',
-  Failed: 'var(--axon-red)',
-  Paused: 'var(--axon-amber)',
-  Pending: 'var(--axon-t3)',
-  Cancelled: 'var(--axon-t3)',
-  Waiting: 'var(--axon-amber)',
-}
+const STATUS_COLOR: Record<string, string> = statusColorMap(ALL_STATUS_KEYS)
 
-const STATUS_BG: Record<string, string> = {
-  Running: 'var(--axon-nx-glow)',
-  Completed: 'var(--axon-green-d)',
-  Failed: 'var(--axon-red-d)',
-  Paused: 'var(--axon-amber-d)',
-  Pending: 'var(--axon-bg4)',
-  Cancelled: 'var(--axon-bg4)',
-}
+const STATUS_BG: Record<string, string> = statusBgMap(ALL_STATUS_KEYS)
 
-const PROGRESS_COLOR: Record<string, string> = {
-  Running: 'var(--axon-nexus2)',
-  Completed: 'var(--axon-green)',
-  Failed: 'var(--axon-red)',
-  Paused: 'var(--axon-amber)',
-  Pending: 'var(--axon-t3)',
-  Waiting: 'var(--axon-amber)',
-  Cancelled: 'var(--axon-t3)',
-}
+const PROGRESS_COLOR: Record<string, string> = STATUS_COLOR
 
 const STATUS_TABS = ['All', 'Running', 'Waiting', 'Completed', 'Failed', 'Cancelled', 'Superseded'] as const
 type TabStatus = typeof STATUS_TABS[number]
@@ -48,12 +26,12 @@ type TabStatus = typeof STATUS_TABS[number]
 // Tabs that should call out attention with their semantic status color whenever they
 // have a nonzero count — not just when they're the active tab.
 const TAB_ALERT_COLOR: Partial<Record<TabStatus, string>> = {
-  Waiting: 'var(--axon-amber)',
-  Failed: 'var(--axon-red)',
+  Waiting: statusColor('Waiting'),
+  Failed: statusColor('Failed'),
 }
 const TAB_ALERT_BG: Partial<Record<TabStatus, string>> = {
-  Waiting: 'var(--axon-amber-d)',
-  Failed: 'var(--axon-red-d)',
+  Waiting: statusBg('Waiting'),
+  Failed: statusBg('Failed'),
 }
 
 const DATE_RANGES = ['All Time', 'Today', 'This Week', 'This Month', 'Last 30 Days', 'Last 90 Days'] as const

@@ -1,11 +1,12 @@
 import type React from 'react'
+import { statusColor } from '../../../utils/statusColors'
 import { Handle, NodeResizer, Position } from '@xyflow/react'
 import type { NodeProps } from '@xyflow/react'
 
 // ForEach is a pipeline node type, not a block (D14): a resizable container. Child nodes carry its id
 // as `parentId`; the container's own handles connect it to the rest of the flow.
 
-const COLOR = '#a78bfa'
+const COLOR = '#22d3ee'
 
 const handleStyle: React.CSSProperties = { background: COLOR, width: 8, height: 8, border: '2px solid #0f1117' }
 
@@ -17,13 +18,19 @@ export interface ForEachNodeData {
   hideHandles?: boolean
   // Live View only: "2 of 4 · refunds-api" and the lanes rendered under the header.
   counter?: string
-  executionStatus?: 'Pending' | 'Running' | 'Success' | 'Failed' | 'AwaitingApproval'
+  executionStatus?: 'Pending' | 'Running' | 'Success' | 'Failed' | 'AwaitingApproval' | 'Cancelled' | 'Interrupted'
   lanes?: React.ReactNode
   resizable?: boolean
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  Pending: '#64748b', Running: '#3b82f6', Success: '#22c55e', Failed: '#ef4444', AwaitingApproval: '#f59e0b',
+  Pending: statusColor('Pending'),
+  Running: statusColor('Running'),
+  Success: statusColor('Completed'),
+  Failed: statusColor('Failed'),
+  AwaitingApproval: statusColor('Waiting'),
+  Cancelled: statusColor('Cancelled'),
+  Interrupted: statusColor('Interrupted'),
 }
 
 export default function ForEachNode({ data, selected }: NodeProps) {
@@ -35,7 +42,7 @@ export default function ForEachNode({ data, selected }: NodeProps) {
     <div
       style={{
         width: '100%', height: '100%', minWidth: 240, minHeight: 140, boxSizing: 'border-box',
-        background: '#a78bfa0d', border: `1.5px dashed ${border}`, borderRadius: 10, position: 'relative',
+        background: '#22d3ee0d', border: `1.5px dashed ${border}`, borderRadius: 10, position: 'relative',
         boxShadow: status ? `0 0 0 2px ${status}44` : undefined,
       }}
     >
@@ -53,7 +60,7 @@ export default function ForEachNode({ data, selected }: NodeProps) {
         title={d.sourceLabel ? `Runs once per item from ${d.sourceLabel} (max ${d.maxItems ?? 10} items)` : undefined}
         style={{ padding: '3px 10px', fontSize: 10, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
       >
-        {d.sourceLabel ? <>Runs once per item from <b style={{ color: '#a78bfa' }}>{d.sourceLabel}</b></> : 'Connect a block that returns a work-item list.'}
+        {d.sourceLabel ? <>Runs once per item from <b style={{ color: '#22d3ee' }}>{d.sourceLabel}</b></> : 'Connect a block that returns a work-item list.'}
       </div>
       {/* Item chips sit under the container (never over the body nodes) and scroll sideways when there are many. */}
       {d.lanes && <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 6 }}>{d.lanes}</div>}

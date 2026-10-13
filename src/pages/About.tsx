@@ -24,6 +24,8 @@ const HOW_IT_WORKS: { title: string; text: string }[] = [
 
 const PLAIN_CODE_STEPS = [
   'Repeating a step for each item in a list (ForEach)',
+  'Checking every handoff between agents',
+  'Restoring the workspace before a retry',
   'Preparing workspaces and repos',
   'Opening pull requests',
   'Pausing for human review',
@@ -31,9 +33,19 @@ const PLAIN_CODE_STEPS = [
   'Readiness checks on requirements',
 ]
 
+const SAFETY = [
+  'Each agent works only inside its own folder — no pushing, no network, no access elsewhere.',
+  'Everything an agent receives is treated as data, never as instructions.',
+  'Every handoff between agents is checked against its declared contract.',
+  'A retried step starts from a clean snapshot of the workspace.',
+  'Agents get only the repo descriptions they ask for — never URLs or credentials.',
+]
+
 const DATA_LIVES = [
   'Runs execute on this computer. AXON has no server of its own.',
-  'Secrets (Claude, Jira, GitHub) are encrypted on this machine and never synced.',
+  'Secrets (Jira, GitHub) are encrypted on this machine and never synced.',
+  'Your Claude key is either linked to your Claude Code config (AXON keeps only a fingerprint) or entered in AXON (encrypted by your operating system). It is never synced.',
+  'Workspace snapshots stay on this computer and are deleted when a delivery finishes.',
   'The team registry receives pipelines, blocks and run summaries only, never code, prompts or agent output.',
   "The context an agent works on is sent to Anthropic's API only while that agent runs, using your organisation's key.",
   'Jira and GitHub are called with your own credentials.',
@@ -94,6 +106,17 @@ export default function About() {
               </li>
             ))}
           </ol>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Built-in safety</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ul className="flex list-disc flex-col gap-2 pl-5 text-sm leading-relaxed text-muted-foreground marker:text-foreground/60">
+            {SAFETY.map((t) => <li key={t}>{t}</li>)}
+          </ul>
         </CardContent>
       </Card>
 

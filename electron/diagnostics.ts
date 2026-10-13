@@ -10,6 +10,10 @@ export interface DiagnosticsInput {
   platform: string
   arch: string
   osRelease: string
+  /** How the Claude key is provided — never the key itself. */
+  claudeKeyMode: string
+  /** Registry clone commit the repo catalog was read from (hex), or '' when unknown. */
+  catalogVersion: string
   registry: {
     url: string
     state: string
@@ -36,6 +40,8 @@ export function registryHost(url: string): string {
 const VERSION = /^[0-9][0-9A-Za-z.+-]{0,23}$/
 const WORD = /^[a-z0-9_]{1,16}$/
 const STATE = /^(Unconfigured|Idle|Syncing|Offline|NeedsAttention|ReadOnly)$/
+const KEY_MODE = /^(linked|entered|none)$/
+const COMMIT = /^[0-9a-f]{7,40}$/
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
 const only = (value: string, re: RegExp, fallback = 'unknown') => (re.test(value) ? value : fallback)
 
@@ -51,6 +57,8 @@ export function buildDiagnostics(i: DiagnosticsInput): string {
     `Registry host: ${registryHost(i.registry.url) || 'not configured'}`,
     `Registry sync: ${only(i.registry.state, STATE)}${last}`,
     `Queued writes: ${queued}`,
+    `Claude key: ${only(i.claudeKeyMode, KEY_MODE)}`,
+    `Catalog version: ${COMMIT.test(i.catalogVersion ?? '') ? i.catalogVersion.slice(0, 12) : 'unknown'}`,
   ]
   return redact(lines.join('\n'))
 }

@@ -1,7 +1,7 @@
 // ForEach progress derived purely from the stored delivery (plan + steps), so the lanes and the
 // "2 of 4 · key" counter look the same live and after an app restart.
 
-export type LaneState = 'pending' | 'running' | 'done' | 'failed'
+export type LaneState = 'pending' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted'
 
 export interface StepLike {
   nodeId: string
@@ -57,13 +57,15 @@ export function forEachProgress<S extends StepLike>(d: ItemProgressInput<S>): Fo
       const complete = bodyIds.length > 0 && bodyIds.every((id) => steps.some((s) => s.nodeId === id && s.status === 'Completed'))
       const state: LaneState = complete ? 'done'
         : steps.some((s) => s.status === 'Failed') ? 'failed'
+          : steps.some((s) => s.status === 'Cancelled') ? 'cancelled'
+            : steps.some((s) => s.status === 'Interrupted') ? 'interrupted'
           : steps.some((s) => s.status === 'Running') ? 'running'
             : 'pending'
       return { key: it.key, state, steps }
     })
     const done = lanes.filter((l) => l.state === 'done').length
     const failed = lanes.filter((l) => l.state === 'failed').length
-    const current = lanes.find((l) => l.state === 'running') ?? lanes.find((l) => l.state === 'failed') ?? lanes.find((l) => l.state === 'pending')
+    const current = lanes.find((l) => l.state === 'running') ?? lanes.find((l) => l.state === 'failed') ?? lanes.find((l) => l.state === 'cancelled' || l.state === 'interrupted') ?? lanes.find((l) => l.state === 'pending')
     const shown = current ? lanes.indexOf(current) + 1 : lanes.length
     out.push({
       nodeId: fe.id,

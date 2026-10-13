@@ -1,4 +1,5 @@
 import '@xyflow/react/dist/style.css'
+import { GRAPH_LEGEND, statusBadgeCss } from '../utils/statusColors'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
@@ -19,7 +20,9 @@ import RawDataViewerModal from '../components/shared/RawDataViewerModal'
 import type { DeliveryStep, DeliveryEvent, BuildingBlock } from '../types'
 import RraBanner from '../components/delivery/RraBanner'
 import RerunDialog from '../components/delivery/RerunDialog'
-import type { RerunReason } from '@shared'
+import ResumeDialog from '../components/delivery/ResumeDialog'
+import { useConfirm } from '../components/shared/ConfirmDialog'
+import type { RerunReason, ResumePreview } from '@shared'
 import DecisionNode from '../components/pipeline/nodes/DecisionNode'
 import ExecutionNode from '../components/pipeline/nodes/ExecutionNode'
 import KnowledgeNode from '../components/pipeline/nodes/KnowledgeNode'
@@ -126,6 +129,8 @@ function stepStatusToExecutionStatus(status?: DeliveryStep['status']): Execution
     case 'Running': return 'Running'
     case 'Completed': return 'Success'
     case 'Failed': return 'Failed'
+    case 'Cancelled': return 'Cancelled'
+    case 'Interrupted': return 'Interrupted'
     case 'AwaitingApproval': return 'AwaitingApproval'
     default: return 'Pending'
   }
@@ -135,7 +140,7 @@ interface TimelineEvent {
   type:
     | 'WorkspaceProvisioning' | 'WorkspaceProvisioned'
     | 'GitPreparing' | 'GitPrepared'
-    | 'StepStarted' | 'StepCompleted' | 'StepFailed' | 'GateReached'
+    | 'StepStarted' | 'StepCompleted' | 'StepFailed' | 'StepStopped' | 'GateReached'
     | 'DeliveryCompleted' | 'DeliveryFailed' | 'DeliveryInterrupted'
     | 'GateApproved' | 'GateRejected'
   body: string
@@ -146,7 +151,7 @@ interface TimelineEvent {
 
 const eventTypeLabel: Record<TimelineEvent['type'], string> = {
   WorkspaceProvisioning: 'Workspace', WorkspaceProvisioned: 'Workspace', GitPreparing: 'Git', GitPrepared: 'Git',
-  StepStarted: 'Started', StepCompleted: 'Completed', StepFailed: 'Failed', GateReached: 'Approval needed',
+  StepStarted: 'Started', StepCompleted: 'Completed', StepFailed: 'Failed', StepStopped: 'Stopped', GateReached: 'Approval needed',
   DeliveryCompleted: 'Delivery done', DeliveryFailed: 'Delivery failed', DeliveryInterrupted: 'Delivery stopped',
   GateApproved: 'Approved', GateRejected: 'Rejected',
 }
@@ -159,6 +164,7 @@ const eventTypeColor: Record<TimelineEvent['type'], string> = {
   StepStarted: 'var(--axon-nexus2)',
   StepCompleted: 'var(--axon-green)',
   StepFailed: 'var(--axon-red)',
+  StepStopped: 'var(--axon-t3)',
   GateReached: 'var(--axon-amber)',
   DeliveryCompleted: 'var(--axon-green)',
   DeliveryFailed: 'var(--axon-red)',
@@ -175,15 +181,7 @@ function timeAgo(iso: string) {
 }
 
 function statusBadgeStyle(status: string): React.CSSProperties {
-  switch (status) {
-    case 'Running': return { background: 'var(--axon-nx-glow)', color: 'var(--axon-nexus2)', border: '1px solid rgba(111,95,232,0.2)' }
-    case 'Interrupted':
-    case 'Paused': return { background: 'var(--axon-amber-d)', color: 'var(--axon-amber)', border: '1px solid rgba(245,158,11,0.2)' }
-    case 'Completed': return { background: 'var(--axon-green-d)', color: 'var(--axon-green)', border: '1px solid rgba(16,185,129,0.2)' }
-    case 'Failed': return { background: 'var(--axon-red-d)', color: 'var(--axon-red)', border: '1px solid rgba(239,68,68,0.2)' }
-    case 'Pending': return { background: 'rgba(100,116,139,0.12)', color: 'var(--axon-t3)', border: '1px solid rgba(100,116,139,0.2)' }
-    default: return { background: 'var(--axon-bg3)', color: 'var(--axon-t2)', border: '1px solid var(--axon-border2)' }
-  }
+  return statusBadgeCss(status)
 }
 
 function formatBytes(bytes: number): string {
@@ -229,6 +227,8 @@ export default function DeliveryLiveView() {
   const [prUrl, setPrUrl] = useState<string | null>(null)
   const [isStarting, setIsStarting] = useState(false)
   const [rerunOpen, setRerunOpen] = useState(false)
+  const [confirm, confirmDialog] = useConfirm()
+  const [resumePreview, setResumePreview] = useState<ResumePreview | null>(null)
   const [isStopping, setIsStopping] = useState(false)
   const [isClearingWorkspace, setIsClearingWorkspace] = useState(false)
   const [workspaceBytes, setWorkspaceBytes] = useState<number | null>(null)
@@ -324,10 +324,12 @@ export default function DeliveryLiveView() {
           if (step.startedAt) {
             synthesized.push({ type: 'StepStarted', body: `${step.nodeName ?? step.name}${step.itemKey ? ` [${step.itemKey}]` : ''} started`, timestamp: step.startedAt, target: { nodeId: step.nodeId ?? step.id, itemKey: step.itemKey ?? undefined } })
           }
-          if (step.completedAt || step.status === 'Completed' || step.status === 'Failed') {
+          if (step.completedAt || step.status === 'Completed' || step.status === 'Failed' || step.status === 'Cancelled' || step.status === 'Interrupted') {
             const ts = step.completedAt ?? step.startedAt ?? delivery.startedAt
             synthesized.push(
-              step.status === 'Failed'
+              step.status === 'Cancelled' || step.status === 'Interrupted'
+                ? { type: 'StepStopped', body: `${step.nodeName ?? step.name}${step.itemKey ? ` [${step.itemKey}]` : ''} ${step.status === 'Cancelled' ? 'cancelled' : 'interrupted'} — ${step.errorMessage ?? ''}`, timestamp: ts, target: { nodeId: step.nodeId ?? step.id, itemKey: step.itemKey ?? undefined } }
+                : step.status === 'Failed'
                 ? { type: 'StepFailed', body: `${step.nodeName ?? step.name}${step.itemKey ? ` [${step.itemKey}]` : ''} failed — ${step.errorMessage ?? ''}`, timestamp: ts, target: { nodeId: step.nodeId ?? step.id, itemKey: step.itemKey ?? undefined } }
                 : { type: 'StepCompleted', body: `${step.nodeName ?? step.name}${step.itemKey ? ` [${step.itemKey}]` : ''} completed`, timestamp: ts, target: { nodeId: step.nodeId ?? step.id, itemKey: step.itemKey ?? undefined } }
             )
@@ -766,7 +768,7 @@ export default function DeliveryLiveView() {
     if (!usesClaude) return
     const status = await window.axon.claudeKey.getStatus().catch(() => null)
     if (status && !status.hasKey) {
-      toast.warning('No Claude API key resolved — this pipeline has Claude-runtime steps that will fail until one is set in Settings.')
+      toast.warning(status.problem ? `${status.problem.message} This pipeline has Claude-runtime steps that will fail until that is fixed in Settings.` : 'No Claude API key resolved — this pipeline has Claude-runtime steps that will fail until one is set in Settings.')
     }
   }, [delivery, blockMap])
 
@@ -793,7 +795,7 @@ export default function DeliveryLiveView() {
 
   const handleStop = async () => {
     if (!id) return
-    if (!window.confirm('Stop this delivery? The currently running step will be interrupted.')) return
+    if (!(await confirm({ title: 'Stop this delivery?', message: 'The currently running step will be interrupted. You can resume the delivery afterwards.', confirmLabel: 'Stop', destructive: true }))) return
     setIsStopping(true)
     try {
       const res = await window.axon.delivery.cancel(id)
@@ -820,47 +822,22 @@ export default function DeliveryLiveView() {
   // rather than just doing it — so the user isn't guessing what "Resume" will actually do.
   const handleResume = async () => {
     if (!id) return
-    let previewMessage: string
     try {
       const previewRes = await window.axon.delivery.previewResume(id)
       if (!previewRes.success || !previewRes.preview) {
         toast.error(previewRes.error ? `Could not preview resume: ${previewRes.error}` : 'Could not preview resume')
         return
       }
-      const p = previewRes.preview
-      if (p.allNodesCompleted) {
-        previewMessage = 'Every step already has a completed record — resuming will just mark this delivery Completed, nothing will run.'
-      } else {
-        const lines = [
-          p.lastCompletedNodeLabel
-            ? `Resuming after "${p.lastCompletedNodeLabel}", starting at "${p.resumeNodeLabel}".`
-            : `Resuming from the very first step: "${p.resumeNodeLabel}".`,
-          p.reconstructedContextKeys.length > 0
-            ? `Carrying forward context from prior steps: ${p.reconstructedContextKeys.join(', ')}.`
-            : `No prior step output to carry forward.`,
-        ]
-        // hasPriorAttempt means THIS exact node was already started once and didn't
-        // finish cleanly (it has a step record, just never one marked Completed) — if it
-        // can touch files (Execution/Agentic with Write/Edit/Bash), it may have left
-        // partial, uncommitted changes in the workspace already. AXON has no snapshot to
-        // roll back to; resuming just runs the node again on top of whatever's there now.
-        // Steps that already completed cleanly need no such warning — their changes are
-        // final and intentional, not partial.
-        if (p.hasPriorAttempt) {
-          lines.push(
-            `\n⚠ "${p.resumeNodeLabel}" was already attempted once and didn't finish cleanly — it may have left partial, uncommitted changes in the workspace${p.workspacePath ? ` (${p.workspacePath})` : ''}${p.branch ? ` on branch ${p.branch}` : ''}. AXON does not roll those back; resuming runs this step again on top of whatever's already there. Review the workspace first if you're unsure.`,
-          )
-        }
-        previewMessage = lines.join('\n')
-      }
+      setResumePreview(previewRes.preview)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       toast.error(`Could not preview resume: ${message}`)
-      return
     }
+  }
 
-    if (!window.confirm(`Resume this delivery?\n\n${previewMessage}`)) return
-
+  const confirmResume = async () => {
+    if (!id) return
+    setResumePreview(null)
     setIsStarting(true)
     setLocalStatus('Running')
     try {
@@ -1024,6 +1001,8 @@ export default function DeliveryLiveView() {
             {createDelivery.isPending ? 'Starting…' : '↻ Run again'}
           </Button>
         )}
+        {confirmDialog}
+        <ResumeDialog preview={resumePreview} busy={isStarting} onCancel={() => setResumePreview(null)} onConfirm={confirmResume} />
         <RerunDialog
           open={rerunOpen}
           ticketId={delivery.ticketId}
@@ -1072,10 +1051,7 @@ export default function DeliveryLiveView() {
                 <Controls showInteractive={false} />
                 <Panel position="top-left">
                   <div className="pointer-events-none flex items-center gap-3 rounded-md border bg-card/80 px-2.5 py-1.5 text-[10px] text-muted-foreground backdrop-blur-sm">
-                    {([
-                      ['Pending', '#64748b'], ['Running', '#3b82f6'], ['Success', '#22c55e'],
-                      ['Awaiting approval', '#f59e0b'], ['Failed', '#ef4444'],
-                    ] as const).map(([label, color]) => (
+                    {GRAPH_LEGEND.map(([label, color]) => (
                       <span key={label} className="inline-flex items-center gap-1.5">
                         <span className="size-2 rounded-full" style={{ background: color }} />
                         {label}
@@ -1188,7 +1164,7 @@ export default function DeliveryLiveView() {
 
               {panelTab === 'overview' && (<>
               {/* Summary — quick TL;DR, shown prominently up top */}
-              {selectedStep.agentOutput?.summary && !(selectedStep.status === 'Failed' && selectedStep.agentOutput.summary === selectedStep.errorMessage) && (
+              {selectedStep.agentOutput?.summary && !((selectedStep.status === 'Failed' || selectedStep.status === 'Cancelled' || selectedStep.status === 'Interrupted') && selectedStep.agentOutput.summary === selectedStep.errorMessage) && (
                 <div style={{
                   borderLeft: '2px solid var(--axon-nexus2)', paddingLeft: 10,
                   fontSize: 11.5, color: 'var(--axon-t2)', lineHeight: 1.5, marginBottom: 14, fontStyle: 'italic', overflowWrap: 'anywhere',
@@ -1264,6 +1240,18 @@ export default function DeliveryLiveView() {
                       “{selectedStep.agentOutput.reviewComment}”
                     </div>
                   )}
+                </div>
+              )}
+
+              {(selectedStep.status === 'Cancelled' || selectedStep.status === 'Interrupted') && (
+                <div data-testid="stopped-note" style={{ background: 'var(--axon-bg3)', border: '1px solid var(--axon-border2)', borderRadius: 8, padding: 11, marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-t2)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    {selectedStep.status === 'Cancelled' ? '■ Stopped' : '⏸ Interrupted'}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--axon-t2)', lineHeight: 1.5, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
+                    {selectedStep.errorMessage ?? (selectedStep.status === 'Cancelled' ? 'Cancelled by user' : 'Interrupted')}
+                    {'\n'}Resume runs this step again{selectedBlock && selectedBlock.agentRuntime !== 'Axon' && selectedStep.cwd ? ' (its folder is restored first when AXON has a snapshot)' : ''}.
+                  </div>
                 </div>
               )}
 

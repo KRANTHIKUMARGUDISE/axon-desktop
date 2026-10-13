@@ -234,7 +234,7 @@ describe('cancel', () => {
     expect(h.eventTypes()).toContain('cancelled')
     expect(h.eventTypes()).not.toContain('failed')
     expect(h.runner.mock.calls.some((c) => c[0].nodeLabel === 'c')).toBe(false)
-    expect(d.steps.find((s) => s.nodeId === 'n2')!.status).toBe('Failed') // ghost Running step closed out
+    expect(d.steps.find((s) => s.nodeId === 'n2')!.status).toBe('Cancelled') // ghost Running step closed out
   })
 
   it('aborts the signal handed to the in-flight runner', async () => {
@@ -348,7 +348,7 @@ describe('crash recovery', () => {
     expect(await rebooted.reconcileOnBoot()).toBe(1)
     const d1 = (await h.store.getDelivery(delivery.id))!
     expect(d1.status).toBe('Interrupted')
-    expect(d1.steps.find((s) => s.nodeId === 'n2')!.status).toBe('Failed')
+    expect(d1.steps.find((s) => s.nodeId === 'n2')!.status).toBe('Interrupted')
     expect(h.eventTypes()).toContain('interrupted')
 
     expect((await rebooted.resume(delivery.id)).success).toBe(true)

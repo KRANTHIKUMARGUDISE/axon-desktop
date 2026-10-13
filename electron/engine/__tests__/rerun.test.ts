@@ -1,9 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { execFile } from 'child_process'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
-import { createHarness, ok } from './harness'
+import { createHarness, ok, deferred } from './harness'
 import type { Harness } from './harness'
 import { createSnapshotService } from '../../workspace/snapshots'
 import { toRunSummary } from '../../registry/runSummary'
@@ -207,5 +207,64 @@ describe('story metrics', () => {
     // a story whose latest attempt failed (and nothing superseded it) is one failure
     expect(storyCounts([{ id: 'x1', status: 'Superseded', previousId: null }, { id: 'x2', status: 'Failed', previousId: 'x1' }]))
       .toEqual({ stories: 1, failed: 1, completed: 0, attempts: 2 })
+  })
+})
+
+describe('cancelled / interrupted steps are not "Failed"', () => {
+  it('cancelling marks the in-flight step Cancelled; a shutdown marks it Interrupted; Resume continues from it', async () => {
+    h = await createHarness()
+    const { mk } = await twoStep()
+    const gate = deferred<void>()
+    h.script.b = async () => { await gate.promise; return ok('b') }
+    const d = await mk()
+    await h.engine.start(d.id)
+    await vi.waitFor(async () => expect((await get(d.id)).steps.some((s) => s.nodeId === 'b' && s.status === 'Running')).toBe(true))
+    await h.engine.cancel(d.id)
+    gate.resolve()
+    await h.engine.whenIdle(d.id)
+    const cancelled = await get(d.id)
+    expect(cancelled.status).toBe('Cancelled')
+    const step = cancelled.steps.find((s) => s.nodeId === 'b')!
+    expect(step.status).toBe('Cancelled')
+    expect(step.output?.errorMessage).toBe('Cancelled by user')
+    // the preview names it as the step to run again and lists it as the stop reason
+    const prev = (await h.engine.previewResume(d.id)).preview!
+    expect(prev.stepLabel).toBe('b')
+    expect(prev.failureReason).toBe('Cancelled by user')
+    h.script.b = () => ok('b')
+    expect((await h.engine.resume(d.id)).success).toBe(true)
+    await h.engine.whenIdle(d.id)
+    expect((await get(d.id)).status).toBe('Completed')
+  })
+
+  it('shutdown marks the running step Interrupted', async () => {
+    h = await createHarness()
+    const { mk } = await twoStep()
+    const gate = deferred<void>()
+    h.script.b = async () => { await gate.promise; return ok('b') }
+    const d = await mk()
+    await h.engine.start(d.id)
+    await vi.waitFor(async () => expect((await get(d.id)).steps.some((s) => s.nodeId === 'b' && s.status === 'Running')).toBe(true))
+    await h.engine.shutdown()
+    gate.resolve()
+    const got = await get(d.id)
+    expect(got.status).toBe('Interrupted')
+    expect(got.steps.find((s) => s.nodeId === 'b')?.status).toBe('Interrupted')
+  })
+
+  it('older deliveries stored as Failed + "Cancelled by user" are read as Cancelled', async () => {
+    h = await createHarness()
+    const { mk } = await twoStep()
+    const d = await mk()
+    await h.store.updateDelivery(d.id, (x) => {
+      x.status = 'Cancelled'
+      x.steps = [
+        { nodeId: 'a', itemKey: null, blockId: 'x', blockName: 'a', status: 'Failed', output: { status: 'failed', summary: 'Cancelled by user', result: {}, errorMessage: 'Cancelled by user' } },
+        { nodeId: 'b', itemKey: null, blockId: 'x', blockName: 'b', status: 'Failed', output: { status: 'failed', summary: 'Interrupted (AXON was closed while this step was running)', result: {}, errorMessage: 'Interrupted (AXON was closed while this step was running)' } },
+        { nodeId: 'c', itemKey: null, blockId: 'x', blockName: 'c', status: 'Failed', output: { status: 'failed', summary: 'real failure', result: {}, errorMessage: 'real failure' } },
+      ] as never
+    })
+    expect((await get(d.id)).steps.map((s) => s.status)).toEqual(['Cancelled', 'Interrupted', 'Failed'])
+    expect((await h.store.listDeliveries()).find((x) => x.id === d.id)!.steps[0].status).toBe('Cancelled')
   })
 })
