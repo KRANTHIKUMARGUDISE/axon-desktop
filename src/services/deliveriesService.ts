@@ -1,4 +1,5 @@
-import type { Delivery as StoredDelivery, DeliveryStep as StoredStep, CreateDeliveryInput } from '@shared'
+import { forEachProgress } from '@shared'
+import type { Delivery as StoredDelivery, DeliveryStep as StoredStep, CreateDeliveryInput, RerunReason } from '@shared'
 import type { Delivery, DeliverySummary, DeliveryStatus, PagedResponse, DeliveryStep, WorkspaceType, ActionResult } from '../types'
 
 export interface DeliveryFilter {
@@ -17,7 +18,9 @@ export interface CreateDeliveryRequest {
   workspaceType: WorkspaceType
   storeFullContext?: boolean
   inputs?: Record<string, unknown>
+  workspacePath?: string
   retriedFromDeliveryId?: string
+  rerunReason?: RerunReason
 }
 
 export interface GateRequest {
@@ -27,8 +30,10 @@ export interface GateRequest {
 function normalizeStep(raw: StoredStep): DeliveryStep {
   const out = raw.output
   return {
-    id: raw.nodeId,
+    id: raw.itemKey ? `${raw.nodeId}::${raw.itemKey}` : raw.nodeId,
     nodeId: raw.nodeId,
+    itemKey: raw.itemKey,
+    cwd: raw.cwd,
     name: raw.blockName,
     nodeName: raw.blockName,
     status: raw.status,
@@ -38,6 +43,7 @@ function normalizeStep(raw: StoredStep): DeliveryStep {
     isContextTruncated: raw.isContextTruncated,
     contextFileRef: raw.contextFileRef,
     contextAvailability: raw.contextAvailability,
+    catalogStats: raw.catalogStats,
     outputAvailability: raw.outputAvailability,
     agentOutput: out
       ? {
@@ -57,6 +63,7 @@ function normalizeStep(raw: StoredStep): DeliveryStep {
           timedOut: out.timedOut,
           isTruncated: out.isTruncated,
           outputFileRef: out.outputFileRef,
+          usage: out.usage,
         }
       : undefined,
     errorMessage: out?.errorMessage,
@@ -64,10 +71,11 @@ function normalizeStep(raw: StoredStep): DeliveryStep {
 }
 
 function progressOf(d: StoredDelivery): number {
-  const total = d.pipelineSnapshot.nodes.length
+  const top = d.pipelineSnapshot.nodes.filter((n) => !n.parentId)
+  const total = top.length
   if (total === 0) return 0
   if (d.status === 'Completed') return 100
-  const done = d.steps.filter((s) => s.status === 'Completed').length
+  const done = d.steps.filter((s) => s.status === 'Completed' && !s.itemKey).length
   return Math.round((done / total) * 100)
 }
 
@@ -92,6 +100,7 @@ function toSummary(d: StoredDelivery): DeliverySummary {
     createdByName: d.createdByName,
     duration: formatDuration(d.startedAt, d.completedAt),
     localSeq: d.localSeq,
+    itemCounter: forEachProgress(d).map((p) => `${p.label}: ${p.counter}`).join(' · ') || undefined,
   }
 }
 
@@ -108,11 +117,20 @@ function toDelivery(d: StoredDelivery): Delivery {
     workspaceType: d.workspaceType,
     storeFullContext: d.storeFullContext,
     workspacePath: d.workspacePath,
+    deliveryFolder: d.deliveryFolder,
+    workspaceBase: d.workspaceBase,
+    workspaceNotice: d.workspaceNotice,
     steps: d.steps.map(normalizeStep),
     branch: d.branch ?? undefined,
     prUrl: d.prUrl,
+    prUrls: d.prUrls,
+    repositories: d.repositories,
+    itemPlan: d.itemPlan,
     inputs: d.inputs,
     retriedFromDeliveryId: d.retriedFromDeliveryId,
+    supersededBy: d.supersededBy,
+    rerunReason: d.rerunReason,
+    attemptNumber: d.attemptNumber,
     errorMessage: d.errorMessage,
   }
 }
@@ -145,11 +163,19 @@ export const createDelivery = async (req: CreateDeliveryRequest): Promise<Delive
 
 // Full context / output for one step. The main process reads the DS1 file when the
 // delivery document only holds a truncated marker, so callers always get real content.
+// Step ids are the node id, or "nodeId::itemKey" for a ForEach item step (steps are keyed by nodeId + itemKey).
+function stepData(deliveryId: string, stepId: string, kind: 'context' | 'output'): Promise<Record<string, unknown>> {
+  const k = stepId.indexOf('::')
+  return k < 0
+    ? window.axon.deliveries.stepData(deliveryId, stepId, kind)
+    : window.axon.deliveries.stepData(deliveryId, stepId.slice(0, k), kind, stepId.slice(k + 2))
+}
+
 export const getStepContext = (deliveryId: string, stepId: string): Promise<Record<string, unknown>> =>
-  window.axon.deliveries.stepData(deliveryId, stepId, 'context')
+  stepData(deliveryId, stepId, 'context')
 
 export const getStepOutput = (deliveryId: string, stepId: string): Promise<Record<string, unknown>> =>
-  window.axon.deliveries.stepData(deliveryId, stepId, 'output')
+  stepData(deliveryId, stepId, 'output')
 
 function assertOk(res: ActionResult, fallback: string): void {
   if (!res.success) throw new Error(res.error ?? fallback)

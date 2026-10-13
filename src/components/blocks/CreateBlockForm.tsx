@@ -7,6 +7,8 @@ import ArtifactPopup from './ArtifactPopup'
 import type { BuildingBlock, BlockType, SourceType, AgentRuntime, ArtifactFormat, ExecutionType, BuildingBlockVisibility } from '../../types'
 import { AGENTIC_TOOL_OPTIONS } from '../../types'
 import type { CachedFile } from '../../utils/fileHandler'
+import type { OutputSchemaEntry } from '@shared'
+import { AGENT_STANDARD_SHORT, decisionToolWarning } from '@shared'
 
 const BLOCK_TYPES: BlockType[] = ['Decision', 'Execution', 'Knowledge', 'Control', 'Utility', 'IO']
 const SOURCE_TYPES: SourceType[] = ['Axon', 'Local', 'Marketplace', 'CDF']
@@ -35,6 +37,7 @@ const CTX_CHIPS = [
   { key: 'testConfig', desc: 'Test configuration' },
   { key: 'prUrl', desc: 'Created PR link' },
   { key: 'summary', desc: 'Running delivery summary' },
+  { key: 'repoCatalog', desc: 'Governed repo list (name, description, tags — no URLs)' },
 ]
 
 const OUT_CHIPS = [
@@ -209,6 +212,18 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
   const [ctxCustom, setCtxCustom] = useState('')
   const [outSelected, setOutSelected] = useState<string[]>(existingBlock?.outputSchema ?? [])
   const [outCustom, setOutCustom] = useState('')
+  // Output fields typed WorkItemList feed a ForEach node (D16); every other typed entry is carried over unchanged.
+  const [workItemFields, setWorkItemFields] = useState<string[]>(
+    (existingBlock?.outputSchemaTyped ?? []).flatMap((e) => (typeof e !== 'string' && e.type === 'WorkItemList' ? [e.name] : [])),
+  )
+  // Handoff contract: extra per-item fields the WorkItemList provides / the consumed list must provide (comma separated).
+  const csv = (v: string): string[] => [...new Set(v.split(',').map((x) => x.trim()).filter(Boolean))]
+  const [itemFieldsText, setItemFieldsText] = useState(
+    ((existingBlock?.outputSchemaTyped ?? []).find((e) => typeof e !== 'string' && e.type === 'WorkItemList') as { itemFields?: string[] } | undefined)?.itemFields?.join(', ') ?? '',
+  )
+  const [requiredItemFieldsText, setRequiredItemFieldsText] = useState(existingBlock?.requiredItemFields?.join(', ') ?? '')
+  const [catalogTagsText, setCatalogTagsText] = useState(existingBlock?.catalogTags?.join(', ') ?? '')
+  const [contextMode, setContextMode] = useState<'Selective' | 'Full'>(existingBlock?.contextMode ?? 'Selective')
   const [visibility, setVisibility] = useState<BuildingBlockVisibility>(existingBlock?.visibility ?? 'Personal')
   const [executionType, setExecutionType] = useState<ExecutionType>(existingBlock?.executionType ?? 'Prompt')
   const [allowedTools, setAllowedTools] = useState<string[]>(existingBlock?.allowedTools ?? [])
@@ -323,7 +338,14 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
         entryPointPath: sendArtifact ? artifactData?.entryPointPath : undefined,
         tags,
         contextRequirements: ctxSelected,
-        outputSchema: outSelected,
+        outputSchema: outSelected.map((n): OutputSchemaEntry => {
+          if (workItemFields.includes(n)) return { name: n, type: 'WorkItemList', ...(csv(itemFieldsText).length ? { itemFields: csv(itemFieldsText) } : {}) }
+          const prev = (existingBlock?.outputSchemaTyped ?? []).find((e) => typeof e !== 'string' && e.name === n)
+          return prev ?? n
+        }),
+        requiredItemFields: csv(requiredItemFieldsText).length ? csv(requiredItemFieldsText) : undefined,
+        catalogTags: ctxSelected.includes('repoCatalog') && csv(catalogTagsText).length ? csv(catalogTagsText) : undefined,
+        contextMode,
         visibility: sourceType === 'Local' ? visibility : undefined,
         executionType: sourceType === 'Local' ? executionType : undefined,
         allowedTools: isAgentic ? allowedTools : undefined,
@@ -343,6 +365,8 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
       setSubmitting(false)
     }
   }
+
+  const decisionWarning = decisionToolWarning(role, sourceType === 'Local' ? executionType : undefined, allowedTools)
 
   const canCreate = !!(
     name.trim() &&
@@ -616,6 +640,12 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
             </div>
           )}
 
+          {sourceType === 'Local' && (
+            <div data-testid="agent-standard" style={{ ...helper, marginTop: -4, marginBottom: 12, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--axon-border2)', background: 'var(--axon-bg4)' }}>
+              <strong>AXON Agent Standard.</strong> {AGENT_STANDARD_SHORT}
+            </div>
+          )}
+
           {(sourceType === 'Marketplace' || sourceType === 'CDF') && (
             <div style={{ marginBottom: 12, padding: '12px', borderRadius: 6, background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.2)' }}>
               <div style={{ fontSize: 12, color: 'var(--axon-amber)', fontWeight: 500 }}>Coming soon</div>
@@ -718,6 +748,7 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
                     })}
                   </div>
                   {errors.allowedTools && <span style={{ ...helper, color: '#ef4444' }}>{errors.allowedTools}</span>}
+                  {decisionWarning && <span data-testid="decision-tools-warning" style={{ ...helper, color: '#f59e0b', display: 'block', marginTop: 6 }}>⚠ {decisionWarning}</span>}
                 </div>
               )}
 
@@ -825,6 +856,24 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
               onAddCustom={addCtxCustom}
             />
           </div>
+          {ctxSelected.includes('repoCatalog') && (
+            <label style={{ display: 'block', marginBottom: 12 }}>
+              <span style={lbl}>Catalog tags (optional)</span>
+              <input style={inp} value={catalogTagsText} onChange={(e) => setCatalogTagsText(e.target.value)} placeholder="backend, payments" />
+              <span style={helper}>Only repos with at least one of these tags are given to the agent. Empty = the whole catalog.</span>
+            </label>
+          )}
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 12, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={contextMode === 'Full'}
+              onChange={(e) => setContextMode(e.target.checked ? 'Full' : 'Selective')}
+              style={{ marginTop: 2 }}
+            />
+            <span style={helper}>
+              Send the <strong>whole</strong> delivery context (Full). Off by default (Selective): the block only sees the fields listed above.
+            </span>
+          </label>
 
           <div style={divider} />
 
@@ -843,6 +892,36 @@ export default function CreateBlockForm({ onClose, onCreated, existingBlock }: C
               onAddCustom={addOutCustom}
             />
           </div>
+          <span style={{ ...helper, display: 'block', marginBottom: 6 }}>
+            To feed a ForEach, return <code>{'{ items: [{ key, task, workspacePath? }], shared? }'}</code> and mark that field as the work item list below (one per block).
+          </span>
+          {outSelected.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
+              {outSelected.map((f) => (
+                <label key={f} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={workItemFields.includes(f)}
+                    onChange={(e) => setWorkItemFields(e.target.checked ? [f] : [])}
+                  />
+                  <span style={helper}><code>{f}</code> is a work item list (type WorkItemList)</span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          {workItemFields.length > 0 && (
+            <label style={{ display: 'block', marginBottom: 12 }}>
+              <span style={lbl}>Item fields (beyond key, task, workspacePath)</span>
+              <input style={inp} value={itemFieldsText} onChange={(e) => setItemFieldsText(e.target.value)} placeholder="repo" />
+              <span style={helper}>Extra fields every item carries, e.g. <code>repo</code>. Blocks that consume this list can require them.</span>
+            </label>
+          )}
+          <label style={{ display: 'block', marginBottom: 12 }}>
+            <span style={lbl}>Required item fields (from the work-item list this block consumes)</span>
+            <input style={inp} value={requiredItemFieldsText} onChange={(e) => setRequiredItemFieldsText(e.target.value)} placeholder="repo" />
+            <span style={helper}>The pipeline is invalid unless the block before this one declares these item fields, and a missing one fails that step.</span>
+          </label>
 
           <div style={divider} />
 

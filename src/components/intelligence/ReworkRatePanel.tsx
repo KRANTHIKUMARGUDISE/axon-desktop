@@ -30,7 +30,6 @@ const MY_REJECT_COMMENTS = [
 ]
 
 const TEAM_TOP_REJECT_REASONS = [
-  { label: 'Confidence below threshold', count: 21 },
   { label: 'Incomplete context', count: 14 },
   { label: 'Needs manual review', count: 9 },
 ]

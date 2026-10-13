@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "bundleVersion": 5,
+  "bundleVersion": 14,
   "blocks": [
     {
       "id": "axon-human-gate",
@@ -12,9 +12,9 @@
     {
       "id": "axon-pr-creator",
       "name": "PR Creator",
-      "version": 1,
+      "version": 5,
       "path": "blocks/pr-creator",
-      "sha256": "b40646984cbefd54b3a373be18a8e4f32bf0465d4ea9c2634dc7cdfe433eddec"
+      "sha256": "8780e56cd3fc78c929677455cf71ed4007924852953a867d82fb50f340ac1b50"
     },
     {
       "id": "axon-test-runner",
@@ -33,9 +33,9 @@
     {
       "id": "axon-workspace-provisioner",
       "name": "Workspace Provisioner",
-      "version": 1,
+      "version": 6,
       "path": "blocks/workspace-provisioner",
-      "sha256": "739fa9568b843beaab0a8e2285eff56c4648befc46e3c4b317151beabf2efbd8"
+      "sha256": "26bf16272a67a1e61c437fca59be80671e5907cd912b4e387f75b8893cc604cf"
     }
   ]
 }

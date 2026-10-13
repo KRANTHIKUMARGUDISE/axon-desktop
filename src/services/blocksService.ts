@@ -1,4 +1,6 @@
 import type { Block, BlockInput } from '@shared'
+import { outputFieldNames } from '@shared'
+import type { OutputSchemaEntry } from '@shared'
 import type { BuildingBlock, SourceType, AgentRuntime, ArtifactFormat, ExecutionType, BuildingBlockVisibility } from '../types'
 import type { CachedFile } from '../utils/fileHandler'
 
@@ -21,10 +23,13 @@ export interface CreateBlockRequest {
   entryPointPath?: string
   tags: string[]
   contextRequirements?: string[]
-  outputSchema?: string[]
+  outputSchema?: OutputSchemaEntry[]
+  contextMode?: 'Selective' | 'Full'
   visibility?: BuildingBlockVisibility
   executionType?: ExecutionType
   allowedTools?: string[]
+  requiredItemFields?: string[]
+  catalogTags?: string[]
   defaultTimeoutSeconds?: number
   executionAgreementAccepted?: boolean
 }
@@ -36,6 +41,8 @@ function toBuildingBlock(b: Block): BuildingBlock {
     inputs: [],
     outputs: [],
     cachedFiles: b.cachedFiles?.map((f) => f.relativePath),
+    outputSchema: b.outputSchema ? outputFieldNames(b.outputSchema) : undefined,
+    outputSchemaTyped: b.outputSchema,
   }
 }
 

@@ -15,6 +15,7 @@ const STATUS_COLORS: Record<DeliveryStatus, { bg: string; color: string; dot: st
   Failed:    { bg: 'var(--axon-red-d)',     color: 'var(--axon-red)',    dot: 'var(--axon-red)' },
   Cancelled: { bg: 'rgba(100,116,139,0.12)', color: 'var(--axon-t3)',   dot: 'var(--axon-t3)' },
   Interrupted: { bg: 'var(--axon-amber-d)', color: 'var(--axon-amber)',  dot: 'var(--axon-amber)' },
+  Superseded: { bg: 'rgba(100,116,139,0.12)', color: 'var(--axon-t3)',  dot: 'var(--axon-t3)' },
 }
 
 const PROG_COLORS: Record<DeliveryStatus, string> = {
@@ -25,6 +26,7 @@ const PROG_COLORS: Record<DeliveryStatus, string> = {
   Failed: 'var(--axon-red)',
   Cancelled: 'var(--axon-t3)',
   Interrupted: 'var(--axon-amber)',
+  Superseded: 'var(--axon-t3)',
 }
 
 function timeAgo(iso?: string) {

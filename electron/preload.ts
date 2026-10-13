@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('axon', {
   registry: {
     status: () => ipcRenderer.invoke('registry:status'),
     syncNow: () => ipcRenderer.invoke('registry:syncNow'),
+    catalog: () => ipcRenderer.invoke('registry:catalog'),
     onStatus: (callback: (status: unknown) => void) => {
       const listener = (_e: Electron.IpcRendererEvent, data: unknown) => callback(data)
       ipcRenderer.on(REGISTRY_STATUS, listener)
@@ -69,8 +70,8 @@ contextBridge.exposeInMainWorld('axon', {
     list: () => ipcRenderer.invoke('deliveries:list'),
     get: (id: string) => ipcRenderer.invoke('deliveries:get', id),
     create: (input: unknown) => ipcRenderer.invoke('deliveries:create', input),
-    stepData: (deliveryId: string, nodeId: string, kind: 'context' | 'output') =>
-      ipcRenderer.invoke('deliveries:stepData', deliveryId, nodeId, kind),
+    stepData: (deliveryId: string, nodeId: string, kind: 'context' | 'output', itemKey?: string) =>
+      ipcRenderer.invoke('deliveries:stepData', deliveryId, nodeId, kind, itemKey),
   },
   delivery: {
     start: (id: string) => ipcRenderer.invoke('delivery:start', id),
@@ -80,6 +81,9 @@ contextBridge.exposeInMainWorld('axon', {
     approveGate: (id: string, comment?: string) => ipcRenderer.invoke('delivery:approveGate', id, comment),
     rejectGate: (id: string, comment: string) => ipcRenderer.invoke('delivery:rejectGate', id, comment),
     clearWorkspace: (id: string) => ipcRenderer.invoke('delivery:clearWorkspace', id),
+    workspaceSize: (id: string) => ipcRenderer.invoke('delivery:workspaceSize', id),
+    repos: (id: string) => ipcRenderer.invoke('delivery:repos', id),
+    checkWorkspacePath: (path: string) => ipcRenderer.invoke('delivery:checkWorkspacePath', path),
   },
   events: {
     // Returns an unsubscribe function.
@@ -100,7 +104,7 @@ contextBridge.exposeInMainWorld('axon', {
     rejectDetected: () => ipcRenderer.invoke('claudeKey:rejectDetected'),
   },
   dialog: {
-    openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+    openDirectory: (startInWorkspaceRoot?: boolean) => ipcRenderer.invoke('dialog:openDirectory', startInWorkspaceRoot),
     openFile: () => ipcRenderer.invoke('dialog:openFile'),
   },
   shell: {

@@ -30,7 +30,11 @@ import { createEngine } from './engine/engine'
 import type { Engine } from './engine/engine'
 import { createBus } from './engine/bus'
 import { createRunner } from './runners'
-import { createGitWorkspace } from './workspace/gitWorkspace'
+import { createWorkspaceService } from './workspace/gitWorkspace'
+import { createSnapshotService } from './workspace/snapshots'
+import { readCatalog, loadCatalog, registryHead } from './registry/catalog'
+import { redact } from './log'
+import os from 'os'
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
@@ -197,35 +201,51 @@ app.whenReady().then(async () => {
   await purgeLegacyAuthFiles()
   await seedBuiltIns(local)
 
+  const workspaceService = createWorkspaceService({
+    getWorkspaceRoot,
+    makeGit: gitFactory,
+    username: () => os.userInfo().username,
+    getDelivery: (id) => store.getDelivery(id),
+  })
+
   engine = createEngine({
     store,
     bus,
     runsDir,
     identity: () => identity.actor(),
-    runner: createRunner(getClaudeKey),
-    workspace: createGitWorkspace({
+    runner: createRunner(getClaudeKey, {
       getWorkspaceRoot,
       getGitToken,
-      pickDirectory: async () => {
-        if (!mainWindow) return null
-        const res = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'], title: 'Select workspace folder' })
-        const picked = res.canceled ? null : res.filePaths[0] ?? null
-        if (picked) grants.grant(picked)
-        return picked
-      },
+      getCatalog: () => readCatalog(registryDir),
+      lastCatalogSyncAt: () => service.status().lastSyncAt,
+      makeGit: gitFactory,
+      validateUrl: validateRepoUrl,
+      username: () => os.userInfo().username,
+      committer: () => ({ name: identity.displayName(), email: identity.actor() }),
+      redact,
     }),
+    workspace: workspaceService.port,
+    snapshots: createSnapshotService(),
+    getRepoCatalog: async () => ({ entries: (await loadCatalog(registryDir)).entries, version: await registryHead(registryDir) }),
     ds1ThresholdBytes: getDS1ThresholdBytes,
   })
   registerWorkspaceHandlers({
+    onDiscard: async (id) => { await engine?.discardSnapshots(id) },
     store,
     getWorkspaceRoot,
+    makeGit: gitFactory,
+    checkWorkspacePath: workspaceService.checkWorkspacePath,
     access: {
       getRoots: () => [getWorkspaceRoot(), userData, path.join(userData, 'registry')],
       isGranted: grants.isGranted,
     },
   })
   registerShellHandlers({ getWindow: () => mainWindow, store, getWorkspaceRoot, grants })
-  registerDataHandlers(store, runsDir, identity)
+  registerDataHandlers(store, runsDir, identity, (previousId) => {
+    void store.getDelivery(previousId)
+      .then((d) => (d && d.status === 'Superseded' ? service.recordRun(d) : undefined))
+      .catch((err) => log.warn('[registry] superseded run summary failed', err))
+  })
   registerDeliveryHandlers(engine, bus)
   const startRegistry = (firstLogin = false) => {
     void service.onLaunch()
@@ -242,7 +262,7 @@ app.whenReady().then(async () => {
     })().catch((err) => log.warn('[registry] backfill failed', err))
     sync.start()
   }
-  registerRegistryHandlers({ service, store, identity, defaults: registryDefaults, makeGit: gitFactory, onOnboarded: () => startRegistry(true), onIdentityChanged: () => startRegistry(true) })
+  registerRegistryHandlers({ service, store, identity, defaults: registryDefaults, makeGit: gitFactory, registryDir, onOnboarded: () => startRegistry(true), onIdentityChanged: () => startRegistry(true) })
   // A whitelisted run summary (never output/context) is queued for the registry when a delivery ends.
   bus.subscribe((event) => {
     if (event.type !== 'completed' && event.type !== 'failed' && event.type !== 'cancelled') return
@@ -253,6 +273,7 @@ app.whenReady().then(async () => {
   if (identity.get() && isOnboarded()) startRegistry()
   // A delivery left Running by a crash/kill has no active run — make it resumable.
   await engine.reconcileOnBoot()
+  void engine.cleanupFailedSnapshots().catch((e) => log.warn('[main] snapshot cleanup failed', e))
 
   createWindow()
 })

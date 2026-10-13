@@ -5,6 +5,9 @@ import { handle } from './guard'
 import { resolveInside, realpathDeepest, isWithin } from '../security/paths'
 import { log } from '../log'
 import type { Store } from '../store/types'
+import { deliveryRoot, removeDeliveryWorkspace, directorySize } from '../workspace/provisioner'
+import { reposFromCwds } from '../workspace/prCreator'
+import type { GitFactory } from '../workspace/provisioner'
 
 const MAX_READ_BYTES = 5 * 1024 * 1024
 const MAX_LIST_ENTRIES = 5000
@@ -90,6 +93,10 @@ export function registerWorkspaceHandlers(deps: {
   store: Store
   getWorkspaceRoot(): string
   access: WorkspaceAccess
+  makeGit: GitFactory
+  /** Called when the user clears (discards) a delivery's workspace: drops its snapshot refs. */
+  onDiscard?: (deliveryId: string) => Promise<void>
+  checkWorkspacePath(path: string): Promise<string>
 }) {
   const ws = createWorkspaceFs(deps.access)
   const Path = z.string().min(1).max(4096)
@@ -98,21 +105,65 @@ export function registerWorkspaceHandlers(deps: {
   handle('workspace:listFilesRecursive', z.tuple([Path, z.number().int().optional()]), ([p, depth]) =>
     ws.listFilesRecursive(p, depth))
 
-  // Replaces the old arbitrary-path workspace:clear: only a delivery's own clone can be removed.
+  // Only a delivery's own workspace can be removed: worktrees are pruned through git, mirrors are kept.
   handle('delivery:clearWorkspace', z.tuple([z.string().min(1)]), async ([deliveryId]) => {
     const delivery = await deps.store.getDelivery(deliveryId)
     if (!delivery) return { success: false, error: 'Delivery not found' }
     if (delivery.status === 'Running' || delivery.status === 'Paused') {
       return { success: false, error: 'Stop the delivery before clearing its workspace' }
     }
-    if (delivery.workspaceType !== 'Default' || !delivery.workspacePath) {
+    // Only AXON's own Delivery Folder is ever removed — never a repository the engineer chose as the Workspace path.
+    const folder = delivery.deliveryFolder ?? delivery.workspacePath
+    if (delivery.workspaceType !== 'Default' || !folder) {
       return { success: false, error: 'Only AXON-managed workspaces can be cleared from here' }
     }
-    const target = resolveClearableWorkspace(delivery.workspacePath, deps.getWorkspaceRoot())
-    if (!target) return { success: false, error: 'Workspace is not inside the AXON workspace root' }
+    const root = deps.getWorkspaceRoot()
+    await deps.onDiscard?.(deliveryId).catch((e) => log.warn('[workspace] snapshot cleanup failed', e))
     try {
+      if (path.resolve(folder).toLowerCase() === deliveryRoot(root, delivery.id).toLowerCase()) {
+        await removeDeliveryWorkspace({ makeGit: deps.makeGit, workspaceRoot: root }, delivery.id)
+        log.info(`[workspace] cleared deliveries/${delivery.id}`)
+        return { success: true }
+      }
+      // Legacy (pre-S4) single clone directly under the workspace root.
+      const target = resolveClearableWorkspace(folder, root)
+      if (!target) return { success: false, error: 'Workspace is not inside the AXON workspace root' }
       await fs.rm(target, { recursive: true, force: true })
       log.info(`[workspace] cleared ${target}`)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  handle('delivery:workspaceSize', z.tuple([z.string().min(1)]), async ([deliveryId]) => {
+    const delivery = await deps.store.getDelivery(deliveryId)
+    const folder = delivery?.deliveryFolder ?? delivery?.workspacePath
+    if (!folder || delivery?.workspaceType !== 'Default') return { success: true, bytes: 0 }
+    const inside = resolveInside(folder, [deps.getWorkspaceRoot()])
+    if (!inside) return { success: true, bytes: 0 }
+    return { success: true, bytes: await directorySize(inside) }
+  })
+
+  handle('delivery:repos', z.tuple([z.string().min(1)]), async ([deliveryId]) => {
+    const d = await deps.store.getDelivery(deliveryId)
+    if (!d) return { repos: [] }
+    const folder = d.deliveryFolder ?? d.workspacePath
+    const cwds = [...new Set(d.steps.map((s) => s.cwd).filter((c): c is string => !!c && c !== folder))]
+    const repos = await reposFromCwds(deps.makeGit, cwds)
+    const clean = (u: string) => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString() } catch { return u } }
+    return {
+      deliveryFolder: folder,
+      repos: repos.map((r) => ({
+        name: r.name, path: r.worktreePath, branch: r.branch, url: clean(r.url),
+        prUrl: d.prUrls?.find((p) => p.repo === r.name)?.url,
+      })),
+    }
+  })
+
+  handle('delivery:checkWorkspacePath', z.tuple([z.string().min(1).max(4096)]), async ([p]) => {
+    try {
+      await deps.checkWorkspacePath(p)
       return { success: true }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }

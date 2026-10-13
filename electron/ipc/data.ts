@@ -9,7 +9,7 @@ const Id = z.string().min(1)
 const OutputKind = z.enum(['context', 'output'])
 
 // Thin IPC layer over the Store — every argument is validated at the boundary.
-export function registerDataHandlers(store: Store, runsDir: string, identity: IdentityProvider) {
+export function registerDataHandlers(store: Store, runsDir: string, identity: IdentityProvider, onRerun?: (previousDeliveryId: string) => void) {
   handle('blocks:list', z.tuple([]), () => store.listBlocks())
   handle('blocks:get', z.tuple([Id]), ([id]) => store.getBlock(id))
   handle('blocks:create', z.tuple([z.unknown()]), ([input]) => {
@@ -32,13 +32,19 @@ export function registerDataHandlers(store: Store, runsDir: string, identity: Id
 
   handle('deliveries:list', z.tuple([]), () => store.listDeliveries())
   handle('deliveries:get', z.tuple([Id]), ([id]) => store.getDelivery(id))
-  handle('deliveries:create', z.tuple([z.unknown()]), ([input]) =>
-    store.createDelivery(CreateDeliveryInputSchema.parse(input), identity.displayName()))
+  handle('deliveries:create', z.tuple([z.unknown()]), async ([input]) => {
+    const parsed = CreateDeliveryInputSchema.parse(input)
+    const created = await store.createDelivery(parsed, identity.displayName())
+    // The delivery being re-run may now be Superseded: let the registry run summary follow.
+    if (parsed.retriedFromDeliveryId) onRerun?.(parsed.retriedFromDeliveryId)
+    return created
+  })
 
   // Full context / output for one step — reads the DS1 file when the document only holds a marker.
-  handle('deliveries:stepData', z.tuple([Id, Id, OutputKind]), async ([deliveryId, nodeId, kind]) => {
+  // `itemKey` selects one ForEach item's step: a step is keyed by (nodeId, itemKey), never merged across items.
+  handle('deliveries:stepData', z.tuple([Id, Id, OutputKind, z.string().min(1).optional()]), async ([deliveryId, nodeId, kind, itemKey]) => {
     const delivery = await store.getDelivery(deliveryId)
-    const step = delivery?.steps.find((s) => s.nodeId === nodeId)
+    const step = delivery?.steps.find((s) => s.nodeId === nodeId && (s.itemKey ?? null) === (itemKey ?? null))
     if (!delivery || !step) throw new Error('Step not found')
     if (kind === 'context') {
       if (step.isContextTruncated && step.contextFileRef) return readStored(runsDir, delivery.id, step.contextFileRef)

@@ -69,6 +69,7 @@ live('live agent containment (fixture repo with hostile .claude/settings.json)',
   const run = (instruction: string, tools: string[], ticketTitle = 'T-1'): ReturnType<typeof runAgenticBlock> =>
     runAgenticBlock(
       {
+        deliveryId: 'live-test',
         block: { name: 'live', outputSchema: [], contextRequirements: [] } as unknown as RunnerInput['block'],
         nodeLabel: 'live',
         instructions: instruction,

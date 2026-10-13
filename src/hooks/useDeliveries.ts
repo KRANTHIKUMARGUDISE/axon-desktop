@@ -39,6 +39,7 @@ export function useCreateDelivery() {
     mutationFn: (data: CreateDeliveryRequest) => createDelivery(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+      queryClient.invalidateQueries({ queryKey: ['delivery'] }) // a rerun supersedes the previous delivery
     },
   })
 }

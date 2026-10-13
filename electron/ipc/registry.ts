@@ -1,3 +1,4 @@
+import { loadCatalog } from '../registry/catalog'
 import os from 'os'
 import { app, clipboard } from 'electron'
 import { z } from 'zod'
@@ -33,6 +34,8 @@ export interface RegistryIpcDeps {
   identity: IdentityProvider
   defaults: RegistryDefaults
   makeGit: GitFactory
+  /** The local registry clone (read-only source of catalog/repositories.yaml). */
+  registryDir: string
   /** Starts the sync scheduler and records the launch once onboarding finishes. */
   onOnboarded: () => void
   /** The verified Jira email changed (Settings → Jira → change account): re-point sync, profile and backfill at the new folder. */
@@ -141,6 +144,12 @@ export function registerRegistryHandlers(deps: RegistryIpcDeps): void {
 
   // ---- sync
   handle('registry:status', z.tuple([]), (): RegistryStatus => service.status())
+
+  // Settings -> Registry -> Repository catalog: what the Workspace Provisioner will accept, and why anything was dropped.
+  handle('registry:catalog', z.tuple([]), async () => {
+    const c = await loadCatalog(deps.registryDir)
+    return { ...c, lastSyncAt: service.status().lastSyncAt }
+  })
   handle('registry:syncNow', z.tuple([]), () => service.syncNow())
 
   // ---- D13 versioning + promotion

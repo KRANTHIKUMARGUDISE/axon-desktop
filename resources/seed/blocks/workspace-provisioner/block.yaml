@@ -1,12 +1,18 @@
 id: axon-workspace-provisioner
 schemaVersion: 2
 name: Workspace Provisioner
-role: Utility
-description: Provisions the delivery workspace (repositories, worktrees). Registered now; becomes runnable in a later release.
-version: 1
-tags: [axon, utility, stub]
+role: IO
+description: Takes the work-item list from the block before it (each item names a catalog repo in "repo") and returns the same list with workspacePath set to that repo's per-delivery git worktree. Its output list carries the same item fields as its input plus workspacePath (pass-through). Connect a ForEach after it.
+version: 6
+tags: [axon, io, workspace]
 sourceType: Axon
 agentRuntime: Axon
 artifactFormat: Native
 artifactName: workspace-provisioner
+contextRequirements: [workItemList]
+requiredItemFields: [repo]
+outputSchema:
+  - name: workItems
+    type: WorkItemList
+  - provisionedRepos
 verified: true

@@ -9,6 +9,8 @@ import {
   type OnNodesDelete, type OnEdgesDelete,
 } from '@xyflow/react'
 import { toast } from 'sonner'
+import { validatePipeline, toPipelineNodes, parentsFirst, canvasNodeSize, forEachSourceLabel, FOREACH_DEFAULT_SIZE, describeHandoff, effectiveItemFields } from '@shared'
+import type { PipelineNode as SharedNode, PipelineEdge as SharedEdge, CanvasNode } from '@shared'
 import { getBlocks } from '../services/blocksService'
 import { getPipeline, createPipeline, updatePipeline } from '../services/pipelinesService'
 import type { BlockType, PipelineNode, PipelineEdge, ValidationResult } from '../types'
@@ -19,6 +21,7 @@ import KnowledgeNode from '../components/pipeline/nodes/KnowledgeNode'
 import ControlNode from '../components/pipeline/nodes/ControlNode'
 import IONode from '../components/pipeline/nodes/IONode'
 import UtilityNode from '../components/pipeline/nodes/UtilityNode'
+import ForEachNode from '../components/pipeline/nodes/ForEachNode'
 import ConditionalEdge from '../components/pipeline/ConditionalEdge'
 
 const nodeTypes: NodeTypes = {
@@ -28,41 +31,51 @@ const nodeTypes: NodeTypes = {
   controlNode: ControlNode,
   ionode: IONode,
   utilityNode: UtilityNode,
+  forEachNode: ForEachNode,
 }
 
 const edgeTypes: EdgeTypes = {
   conditionalEdge: ConditionalEdge,
 }
 
-const OPERATORS = ['>=', '<=', '==', '!=', 'exists', 'not-exists']
+// Canvas <-> stored-node translation lives in shared/pipelineGraph.ts (unit-tested).
+const sortParentsFirst = (nodes: Node[]): Node[] => parentsFirst(nodes)
+const sizeOf = (n: Node) => canvasNodeSize(n as unknown as CanvasNode)
+const toSharedNodes = (nodes: Node[]): SharedNode[] => toPipelineNodes(nodes as unknown as CanvasNode[])
 
-function validate(nodes: Node[], edges: Edge[]): ValidationResult {
-  const errors: string[] = []
-  const warnings: string[] = []
+function toSharedEdges(edges: Edge[]): SharedEdge[] {
+  return edges.map(e => ({
+    id: e.id, sourceNodeId: e.source, targetNodeId: e.target,
+    isDefault: (e.data as any)?.isDefault ?? false,
+    condition: (e.data as any)?.condition ? { expression: (e.data as any).condition, targetNodeId: e.target } : null,
+  }))
+}
 
-  const incomingIds = new Set(edges.map(e => e.target))
-  const outgoingIds = new Set(edges.map(e => e.source))
-
-  const ioNodes = nodes.filter(n => n.data?.nodeType === 'IO')
-  const hasStart = ioNodes.some(n => !incomingIds.has(n.id))
-
-  if (!hasStart) errors.push('No IO start node (node with no incoming edges)')
-
-  const disconnected = nodes.filter(n => !incomingIds.has(n.id) && !outgoingIds.has(n.id))
-  if (disconnected.length) warnings.push(`${disconnected.length} disconnected node(s): ${disconnected.map(n => n.data?.label).join(', ')}`)
-
-  for (const n of nodes) {
-    const outs = edges.filter(e => e.source === n.id)
-    if (outs.length > 1) {
-      const hasDefault = outs.some(e => (e.data as any)?.isDefault === true)
-      if (!hasDefault) errors.push(`Node "${n.data?.label}" has multiple outgoing edges but no default route`)
-    }
-  }
-
-  return { valid: errors.length === 0, errors, warnings }
+function validate(nodes: Node[], edges: Edge[], blocks: any[]): ValidationResult {
+  const byId = new Map(blocks.map(b => [b.id, {
+    id: b.id, role: b.role, artifactName: b.artifactName, executionType: b.executionType,
+    contextRequirements: b.contextRequirements, outputSchema: b.outputSchemaTyped ?? b.outputSchema,
+    requiredItemFields: b.requiredItemFields,
+  }]))
+  const v = validatePipeline(toSharedNodes(nodes), toSharedEdges(edges), byId as any)
+  const warnings = [...v.warnings]
+  const incoming = new Set(edges.map(e => e.target))
+  const outgoing = new Set(edges.map(e => e.source))
+  const disconnected = nodes.filter(n => !n.parentId && !incoming.has(n.id) && !outgoing.has(n.id))
+  if (nodes.length > 1 && disconnected.length) warnings.push(`${disconnected.length} disconnected node(s): ${disconnected.map(n => n.data?.label).join(', ')}`)
+  return { valid: v.valid, errors: v.errors, warnings }
 }
 
 // Inner component so useReactFlow works (must be inside ReactFlowProvider)
+interface NewNodeDrop {
+  blockId?: string
+  blockType?: BlockType
+  blockName?: string
+  blockRuntime?: string
+  flowType?: 'forEach'
+  position: { x: number; y: number }
+}
+
 interface FlowCanvasProps {
   nodes: Node[]
   edges: Edge[]
@@ -73,16 +86,17 @@ interface FlowCanvasProps {
   isValidConnection: (c: Connection | Edge) => boolean
   onNodeClick: (e: React.MouseEvent, n: Node) => void
   onPaneClick: () => void
-  onNewNode: (d: { blockId: string; blockType: BlockType; blockName: string; blockRuntime?: string; position: { x: number; y: number } }) => void
+  onNewNode: (d: NewNodeDrop) => void
+  onNodeDragStop: (e: unknown, n: Node, getAbs: (id: string) => { x: number; y: number } | undefined, intersecting: Node[]) => void
   onNodesDelete: OnNodesDelete
   onEdgesDelete: OnEdgesDelete
 }
 
 function FlowCanvas({
   nodes, edges, onNodesChange, onEdgesChange, onConnect, onReconnect,
-  isValidConnection, onNodeClick, onPaneClick, onNewNode, onNodesDelete, onEdgesDelete,
+  isValidConnection, onNodeClick, onPaneClick, onNewNode, onNodeDragStop, onNodesDelete, onEdgesDelete,
 }: FlowCanvasProps) {
-  const { screenToFlowPosition } = useReactFlow()
+  const { screenToFlowPosition, getIntersectingNodes, getInternalNode } = useReactFlow()
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -91,6 +105,11 @@ function FlowCanvas({
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
+    const flowType = e.dataTransfer.getData('flowType')
+    if (flowType === 'forEach') {
+      onNewNode({ flowType: 'forEach', position: screenToFlowPosition({ x: e.clientX, y: e.clientY }) })
+      return
+    }
     const blockId = e.dataTransfer.getData('blockId')
     const blockType = e.dataTransfer.getData('blockType') as BlockType
     const blockName = e.dataTransfer.getData('blockName')
@@ -110,6 +129,11 @@ function FlowCanvas({
       onDrop={onDrop}
       onDragOver={onDragOver}
       onNodeClick={onNodeClick}
+      onNodeDragStop={(ev, n) => onNodeDragStop(
+        ev, n,
+        (id) => getInternalNode(id)?.internals.positionAbsolute,
+        getIntersectingNodes(n).filter(x => x.type === 'forEachNode' && x.id !== n.id),
+      )}
       onPaneClick={onPaneClick}
       onNodesDelete={onNodesDelete}
       onEdgesDelete={onEdgesDelete}
@@ -171,6 +195,20 @@ export default function PipelineCreator() {
           const rfNodes = (pipelineData.nodes ?? []).map(n => {
             // Determine node type: from backend field, from block definition, or default to Execution
             let nodeType = (n as any).type || (n as any).nodeType
+            if (nodeType === 'forEach') {
+              return {
+                id: n.id,
+                type: 'forEachNode',
+                position: n.position,
+                style: { width: n.size?.width ?? FOREACH_DEFAULT_SIZE.width, height: n.size?.height ?? FOREACH_DEFAULT_SIZE.height },
+                zIndex: -1,
+                data: {
+                  label: (n as any).label || (n as any).name || 'ForEach', nodeType: 'forEach',
+                  maxItems: n.maxItems, onEmpty: n.onEmpty ?? 'fail',
+                },
+              } as Node
+            }
+            if (nodeType === 'block') nodeType = undefined
             if (!nodeType && n.blockId) {
               nodeType = blockMap.get(n.blockId)?.role || blockMap.get(n.blockId)?.type || 'Execution'
             }
@@ -182,9 +220,11 @@ export default function PipelineCreator() {
               id: n.id,
               type: typeKey === 'io' ? 'ionode' : `${typeKey}Node`,
               position: n.position,
+              ...(n.parentId ? { parentId: n.parentId } : {}),
               data: {
                 label: (n as any).label || (n as any).name,
                 blockId: n.blockId,
+                blockVersion: n.blockVersion,
                 nodeType: nodeType,
                 runtime: block?.agentRuntime,
                 config: (n as any).config ?? {},
@@ -204,7 +244,7 @@ export default function PipelineCreator() {
             },
           }))
 
-          setNodes(rfNodes)
+          setNodes(sortParentsFirst(rfNodes as Node[]))
           setEdges(rfEdges)
         }
       } catch (e) {
@@ -234,7 +274,7 @@ export default function PipelineCreator() {
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
 
-  const validationResult = useMemo(() => validate(nodes, edges), [nodes, edges])
+  const validationResult = useMemo(() => validate(nodes, edges, blocks), [nodes, edges, blocks])
 
   const onConnect = useCallback((connection: Connection) => {
     const newEdge: Edge = {
@@ -249,24 +289,68 @@ export default function PipelineCreator() {
     setEdges(eds => addEdge(newEdge, eds))
   }, [setEdges])
 
-  const onNewNode = useCallback((d: { blockId: string; blockType: BlockType; blockName: string; blockRuntime?: string; position: { x: number; y: number } }) => {
-    const typeKey = d.blockType.toLowerCase()
-    const rfType = typeKey === 'io' ? 'ionode' : `${typeKey}Node`
-    const newNode: Node = {
-      id: Date.now().toString(),
-      type: rfType,
-      position: d.position,
-      data: {
-        label: d.blockName,
-        blockId: d.blockId,
-        nodeType: d.blockType,
-        runtime: d.blockRuntime,
-        config: {},
-        timeoutSeconds: 120,
-      },
+  const onNewNode = useCallback((d: NewNodeDrop) => {
+    if (d.flowType === 'forEach') {
+      const fe: Node = {
+        id: Date.now().toString(),
+        type: 'forEachNode',
+        position: d.position,
+        style: { width: FOREACH_DEFAULT_SIZE.width, height: FOREACH_DEFAULT_SIZE.height },
+        zIndex: -1,
+        data: { label: 'ForEach', nodeType: 'forEach', maxItems: 10, onEmpty: 'fail' },
+      }
+      setNodes(nds => sortParentsFirst([...nds, fe]))
+      setSelectedNodeId(fe.id)
+      return
     }
-    setNodes(nds => [...nds, newNode])
+    const typeKey = (d.blockType ?? 'Execution').toLowerCase()
+    const rfType = typeKey === 'io' ? 'ionode' : `${typeKey}Node`
+    setNodes(nds => {
+      // Dropped on a ForEach container -> becomes its child (position relative to the container).
+      const container = nds.find(n => {
+        if (n.type !== 'forEachNode') return false
+        const { width, height } = sizeOf(n)
+        return d.position.x >= n.position.x && d.position.x <= n.position.x + width && d.position.y >= n.position.y && d.position.y <= n.position.y + height
+      })
+      const newNode: Node = {
+        id: Date.now().toString(),
+        type: rfType,
+        position: container ? { x: d.position.x - container.position.x, y: d.position.y - container.position.y } : d.position,
+        ...(container ? { parentId: container.id } : {}),
+        data: {
+          label: d.blockName,
+          blockId: d.blockId,
+          nodeType: d.blockType,
+          runtime: d.blockRuntime,
+          config: {},
+          timeoutSeconds: 120,
+        },
+      }
+      return sortParentsFirst([...nds, newNode])
+    })
   }, [setNodes])
+
+  // Drag a block into / out of a ForEach container: set or clear parentId and convert the position
+  // between container-relative and absolute. Edges that would now cross the border are dropped.
+  const onNodeDragStop = useCallback((_e: unknown, node: Node, getAbs: (id: string) => { x: number; y: number } | undefined, intersecting: Node[]) => {
+    if (node.type === 'forEachNode') return
+    const target = intersecting[0]
+    const newParent = target?.id
+    if ((node.parentId ?? undefined) === newParent) return
+    const abs = getAbs(node.id) ?? node.position
+    const rel = target ? { x: abs.x - target.position.x, y: abs.y - target.position.y } : abs
+    setNodes(nds => sortParentsFirst(nds.map(n => {
+      if (n.id !== node.id) return n
+      const { parentId: _drop, extent: _ext, ...rest } = n as Node & { extent?: unknown }
+      return { ...rest, position: rel, ...(newParent ? { parentId: newParent } : {}) } as Node
+    })))
+    setEdges(eds => {
+      const parentOf = (id: string) => (id === node.id ? newParent : nodes.find(n => n.id === id)?.parentId)
+      const keep = eds.filter(e => !(e.source === node.id || e.target === node.id) || parentOf(e.source) === parentOf(e.target))
+      if (keep.length !== eds.length) toast.info('Connections that would cross the ForEach border were removed')
+      return keep
+    })
+  }, [setNodes, setEdges, nodes])
 
   const onReconnect = useCallback((oldEdge: Edge, newConnection: Connection) => {
     setEdges(eds => reconnectEdge(oldEdge, newConnection, eds))
@@ -275,10 +359,14 @@ export default function PipelineCreator() {
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const src = connection.sourceHandle
     const tgt = connection.targetHandle
+    // Edges never cross a ForEach border: both ends must have the same parent.
+    const sp = nodes.find(n => n.id === connection.source)?.parentId
+    const tp = nodes.find(n => n.id === connection.target)?.parentId
+    if (sp !== tp) return false
     if (src === 'right') return tgt === 'left' || tgt === 'top'
     if (src === 'bottom') return tgt === 'left' || tgt === 'top'
     return false
-  }, [])
+  }, [nodes])
 
   const onNodesDelete: OnNodesDelete = useCallback((deleted) => {
     if (deleted.some(n => n.id === selectedNodeId)) setSelectedNodeId(null)
@@ -292,18 +380,53 @@ export default function PipelineCreator() {
 
   const onPaneClick = useCallback(() => setSelectedNodeId(null), [])
 
+  // Canvas-only decoration: each ForEach header says which block feeds it.
+  const displayNodes = useMemo(() => {
+    const shared = toSharedNodes(nodes)
+    const sharedEdges = toSharedEdges(edges)
+    return nodes.map(n => n.type === 'forEachNode'
+      ? { ...n, data: { ...n.data, sourceLabel: forEachSourceLabel(n.id, shared, sharedEdges) ?? null } }
+      : n)
+  }, [nodes, edges])
+
   const selectedNode = nodes.find(n => n.id === selectedNodeId) ?? null
+  const selectedIsForEach = selectedNode?.type === 'forEachNode'
+
+  // Drafts keep their pins; this explicit action moves every pinned node to the block's current version.
+  const outdatedPins = nodes.filter(n => {
+    const d = n.data as any
+    const blk = blocks.find(b => b.id === d.blockId)
+    return d.blockVersion !== undefined && blk && blk.version > d.blockVersion
+  })
+  function updateBlockVersions() {
+    setNodes(nds => nds.map(n => {
+      const d = n.data as any
+      const blk = blocks.find(b => b.id === d.blockId)
+      return d.blockVersion !== undefined && blk && blk.version > d.blockVersion ? { ...n, data: { ...d, blockVersion: blk.version } } : n
+    }))
+    toast.success(`Updated ${outdatedPins.length} node(s) to the latest block version`)
+  }
   const outgoingEdges = edges.filter(e => e.source === selectedNodeId)
+
+  // Handoff contract of an edge, e.g. "Demo Planner → Workspace Provisioner: WorkItemList (key, task, repo)".
+  function handoffText(sourceId: string, targetId: string): string {
+    const nodeById = (id: string) => nodes.find(n => n.id === id)?.data as any
+    const src = nodeById(sourceId)
+    const dst = nodeById(targetId)
+    const srcBlock = blocks.find(b => b.id === src?.blockId)
+    const sharedNodes = toSharedNodes(nodes)
+    const srcNode = sharedNodes.find(n => n.id === sourceId)
+    const blockMap = new Map(blocks.map(b => [b.id, { id: b.id, role: b.role, artifactName: b.artifactName, outputSchema: b.outputSchemaTyped ?? b.outputSchema }]))
+    return describeHandoff(
+      { name: src?.label ?? sourceId, block: { outputSchema: srcBlock?.outputSchemaTyped } },
+      dst?.label ?? targetId,
+      srcNode ? effectiveItemFields(srcNode, sharedNodes, toSharedEdges(edges), blockMap as any) : undefined,
+    )
+  }
 
   function updateNodeData(key: string, value: unknown) {
     setNodes(nds => nds.map(n =>
       n.id === selectedNodeId ? { ...n, data: { ...n.data, [key]: value } } : n
-    ))
-  }
-
-  function updateEdge(edgeId: string, patch: Record<string, unknown>) {
-    setEdges(eds => eds.map(e =>
-      e.id === edgeId ? { ...e, data: { ...(e.data ?? {}), ...patch } } : e
     ))
   }
 
@@ -327,18 +450,8 @@ export default function PipelineCreator() {
       return
     }
 
-    const pipelineNodes: PipelineNode[] = nodes.map(n => ({
-      id: n.id,
-      type: (n.data as any).nodeType as BlockType,
-      name: (n.data as any).label,
-      blockId: (n.data as any).blockId,
-      label: (n.data as any).label,
-      positionX: n.position.x,
-      positionY: n.position.y,
-      position: n.position,
-      config: (n.data as any).config ?? {},
-      timeoutSeconds: (n.data as any).timeoutSeconds ?? 120,
-    }))
+    // One flat list, parents first; children positions are relative to their ForEach.
+    const pipelineNodes = toSharedNodes(nodes) as unknown as PipelineNode[]
 
     const pipelineEdges: PipelineEdge[] = edges.map(e => ({
       id: e.id,
@@ -476,7 +589,7 @@ export default function PipelineCreator() {
           <div style={{ flex: 1, overflow: 'hidden' }}>
             <ReactFlowProvider>
               <FlowCanvas
-                nodes={nodes}
+                nodes={displayNodes}
                 edges={edges}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
@@ -484,6 +597,7 @@ export default function PipelineCreator() {
                 onNodeClick={onNodeClick}
                 onPaneClick={onPaneClick}
                 onNewNode={onNewNode}
+                onNodeDragStop={onNodeDragStop}
                 onReconnect={onReconnect}
                 isValidConnection={isValidConnection}
                 onNodesDelete={onNodesDelete}
@@ -528,6 +642,31 @@ export default function PipelineCreator() {
                   />
                 </label>
 
+                {selectedIsForEach && (
+                  <>
+                    <div style={{ fontSize: 10, color: '#94a3b8', lineHeight: 1.4 }}>
+                      {forEachSourceLabel(selectedNode.id, toSharedNodes(nodes), toSharedEdges(edges))
+                        ? `Runs once per item from ${forEachSourceLabel(selectedNode.id, toSharedNodes(nodes), toSharedEdges(edges))}.`
+                        : 'Connect a block that returns a work-item list.'}
+                    </div>
+                    <details>
+                      <summary style={{ fontSize: 11, color: '#94a3b8', cursor: 'pointer' }}>Advanced</summary>
+                      <label style={{ fontSize: 11, color: '#64748b', display: 'block', marginTop: 6 }}>
+                        Max items
+                        <input type="number" min={1} value={(selectedNode.data as any).maxItems ?? 10} onChange={e => updateNodeData('maxItems', Math.max(1, Number(e.target.value) || 1))} style={inputStyle} />
+                      </label>
+                      <label style={{ fontSize: 11, color: '#64748b', display: 'block', marginTop: 6 }}>
+                        If the list is empty
+                        <select value={(selectedNode.data as any).onEmpty ?? 'fail'} onChange={e => updateNodeData('onEmpty', e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
+                          <option value="fail">Fail the run</option>
+                          <option value="skip">Skip the ForEach</option>
+                        </select>
+                      </label>
+                    </details>
+                  </>
+                )}
+
+                {!selectedIsForEach && (<>
                 <label style={{ fontSize: 11, color: '#64748b' }}>
                   Block ID
                   <input
@@ -546,6 +685,7 @@ export default function PipelineCreator() {
                     style={inputStyle}
                   />
                 </label>
+                </>)}
 
                 {outgoingEdges.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -560,7 +700,7 @@ export default function PipelineCreator() {
                           borderRadius: 6, padding: 8, display: 'flex', flexDirection: 'column', gap: 5,
                         }}>
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                            <div style={{ fontSize: 10, color: '#64748b' }}>→ {edge.target}</div>
+                            <div data-testid="handoff-contract" style={{ fontSize: 10, color: '#64748b' }}>{handoffText(edge.source, edge.target)}</div>
                             <button
                               onClick={() => setEdges(eds => eds.filter(e => e.id !== edge.id))}
                               style={{ background: 'none', border: 'none', color: '#475569', cursor: 'pointer', fontSize: 12, lineHeight: 1 }}
@@ -578,39 +718,6 @@ export default function PipelineCreator() {
                             />
                             Default route
                           </label>
-                          {!ed.isDefault && (
-                            <>
-                              <input
-                                value={ed.field ?? ''}
-                                onChange={e => updateEdge(edge.id, { field: e.target.value })}
-                                placeholder="output.score"
-                                style={inputStyle}
-                              />
-                              <select
-                                value={ed.operator ?? '=='}
-                                onChange={e => updateEdge(edge.id, { operator: e.target.value })}
-                                style={{ ...inputStyle, cursor: 'pointer' }}
-                              >
-                                {OPERATORS.map(op => (
-                                  <option key={op} value={op}>{op}</option>
-                                ))}
-                              </select>
-                              {!['exists', 'not-exists'].includes(ed.operator ?? '') && (
-                                <input
-                                  value={ed.value ?? ''}
-                                  onChange={e => updateEdge(edge.id, { value: e.target.value })}
-                                  placeholder="80"
-                                  style={inputStyle}
-                                />
-                              )}
-                            </>
-                          )}
-                          <button
-                            onClick={() => console.log('Sync from Marketplace:', edge.id)}
-                            style={{ background: 'none', border: '1px solid #334155', color: '#64748b', borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer', marginTop: 2 }}
-                          >
-                            Sync from Marketplace
-                          </button>
                         </div>
                       )
                     })}
@@ -624,9 +731,19 @@ export default function PipelineCreator() {
               <div style={{ fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 Validation
               </div>
-              <ValidationRow label="IO start node" pass={!validationResult.errors.some(e => e.includes('start'))} isError />
-              <ValidationRow label="No disconnected nodes" pass={validationResult.warnings.length === 0} isError={false} />
+              <ValidationRow label="Start node" pass={!validationResult.errors.some(e => e.includes('start node'))} isError />
+              <ValidationRow label="Workspace before agents / PRs" pass={!validationResult.errors.some(e => e.includes('Workspace Provisioner'))} isError />
+              <ValidationRow label="ForEach is well-formed" pass={!validationResult.errors.some(e => e.includes('ForEach'))} isError />
               <ValidationRow label="Branch nodes have default" pass={!validationResult.errors.some(e => e.includes('default route'))} isError />
+              {outdatedPins.length > 0 && (
+                <button
+                  onClick={updateBlockVersions}
+                  style={{ background: '#1e293b', border: '1px solid #334155', color: '#94a3b8', borderRadius: 4, padding: '3px 8px', fontSize: 10, cursor: 'pointer', textAlign: 'left' }}
+                  title="Pins stay as saved until you choose to update them"
+                >
+                  Update block versions ({outdatedPins.length} newer)
+                </button>
+              )}
               {validationResult.errors.map((err, i) => (
                 <div key={i} style={{ fontSize: 10, color: '#f87171', paddingLeft: 4 }}>{err}</div>
               ))}

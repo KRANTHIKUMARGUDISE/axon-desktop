@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import type { ConnectionTest } from '@shared'
 import { useRegistryStatus } from '../../hooks/useRegistry'
@@ -129,6 +130,95 @@ export function RegistrySettings() {
           </>
         )}
       </SettingsCard>
+
+      <CatalogCard lastSyncAt={status?.lastSyncAt ?? null} syncing={busy} onSync={syncNow} />
     </div>
+  )
+}
+
+// What the Workspace Provisioner will accept: catalog/repositories.yaml from the local registry clone.
+function CatalogCard({ lastSyncAt, syncing, onSync }: { lastSyncAt: string | null; syncing: boolean; onSync: () => void }) {
+  const { data: catalog, isLoading, refetch } = useQuery({
+    queryKey: ['registry-catalog', lastSyncAt],
+    queryFn: () => window.axon.registry.catalog(),
+    staleTime: 0,
+  })
+  return (
+    <SettingsCard
+      title="Repository catalog"
+      description="The repositories a delivery may work in. A Workspace Provisioner only accepts repos listed here. Read from the registry (catalog/repositories.yaml); changes arrive through a pull request to the registry and then a sync."
+      status={catalog && <StatusBadge tone={!catalog.exists || catalog.error ? 'error' : catalog.entries.length ? 'ok' : 'warn'}>{catalog.exists ? `${catalog.entries.length} repos` : 'No catalog file'}</StatusBadge>}
+      footer={
+        <>
+          <Button variant="outline" onClick={() => refetch()} disabled={isLoading}>Reload</Button>
+          <Button onClick={onSync} disabled={syncing}>{syncing ? 'Syncing…' : 'Sync now'}</Button>
+        </>
+      }
+    >
+      <FieldRow>
+        <Info label="Registry file" mono hint={catalog ? `In the registry repo: ${catalog.registryPath}` : undefined}>{catalog?.filePath ?? ''}</Info>
+        <Info label="Last synced">{lastSyncAt ? new Date(lastSyncAt).toLocaleString() : 'Never'}</Info>
+      </FieldRow>
+
+      {catalog && !catalog.exists && (
+        <Notice ok={false}>
+          This file does not exist in your local registry copy. Add it to the registry (via a pull request) and sync, or check the registry URL and branch above.
+        </Notice>
+      )}
+      {catalog?.error && <Notice ok={false}>{catalog.error}</Notice>}
+
+      {catalog && catalog.entries.length > 0 && (
+        <div className="overflow-x-auto rounded-md border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b text-left text-xs text-muted-foreground">
+                <th className="px-3 py-2 font-medium">Name</th>
+                <th className="px-3 py-2 font-medium">URL</th>
+                <th className="px-3 py-2 font-medium">Default branch</th>
+                <th className="px-3 py-2 font-medium">Description</th>
+                <th className="px-3 py-2 font-medium">Tags</th>
+              </tr>
+            </thead>
+            <tbody>
+              {catalog.entries.map((r) => (
+                <tr key={r.name} className="border-b last:border-0">
+                  <td className="px-3 py-2 font-medium">{r.name}</td>
+                  <td className="px-3 py-2 font-mono text-xs">{r.url}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{r.defaultBranch ?? 'detected from the remote'}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{r.description ?? '—'}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{r.tags?.length ? r.tags.join(', ') : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {catalog && catalog.exists && !catalog.error && catalog.entries.length === 0 && catalog.dropped.length === 0 && (
+        <p className="text-sm text-muted-foreground">The catalog file has no repositories.</p>
+      )}
+
+      {catalog && catalog.warnings.length > 0 && (
+        <Notice ok={false}>
+          <ul className="list-disc pl-4">
+            {catalog.warnings.map((w) => (
+              <li key={w.index}>#{w.index}{w.name ? ` "${w.name}"` : ''} — {w.reason}</li>
+            ))}
+          </ul>
+        </Notice>
+      )}
+
+      {catalog && catalog.dropped.length > 0 && (
+        <Notice ok={false}>
+          {catalog.dropped.length} catalog entr{catalog.dropped.length === 1 ? 'y was' : 'ies were'} ignored:
+          <ul className="mt-1 list-disc pl-4">
+            {catalog.dropped.map((d) => (
+              <li key={d.index}>
+                #{d.index}{d.name ? ` "${d.name}"` : ''} — {d.reason}
+              </li>
+            ))}
+          </ul>
+        </Notice>
+      )}
+    </SettingsCard>
   )
 }

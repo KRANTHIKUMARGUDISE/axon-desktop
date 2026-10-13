@@ -32,8 +32,8 @@ describe('start + linear run', () => {
     const d = await r.get()
     expect(d.status).toBe('Completed')
     expect(d.completedAt).toBeDefined()
-    expect(d.workspacePath).toBe(h.workspaceDir)
-    expect(d.branch).toBe('axon/test/T-1-abc123')
+    expect(d.deliveryFolder).toBe(h.workspaceDir)
+    expect(d.workspacePath).toBeUndefined()
   })
 
   it('runs a linear pipeline in order and records one step per node', async () => {
@@ -56,7 +56,7 @@ describe('start + linear run', () => {
     h = await createHarness()
     const r = await h.run(['a', 'b'])
     expect(h.eventTypes(r.delivery.id)).toEqual(expect.arrayContaining([
-      'workspace_provisioning', 'git_prepared', 'step_started', 'step_completed', 'completed',
+      'workspace_provisioning', 'workspace_provisioned', 'step_started', 'step_completed', 'completed',
     ]))
     for (const e of h.events) expect(() => DeliveryEventSchema.parse(e)).not.toThrow()
   })
@@ -133,29 +133,13 @@ describe('failures', () => {
     expect(h.runner).toHaveBeenCalledTimes(2)
   })
 
-  it('fails (never Completed) when the git/PR tail fails', async () => {
-    h = await createHarness({ workspace: { finalize: async () => { throw new Error('push rejected') } } })
-    const r = await h.run(['a'])
-    const d = await r.get()
-    expect(d.status).toBe('Failed')
-    expect(d.errorMessage).toMatch(/push rejected/)
-    expect(h.eventTypes()).not.toContain('completed')
-    expect(h.eventTypes()).toContain('failed')
-  })
-
-  it('stores the PR url when the git tail succeeds', async () => {
+  it('has no hidden git tail: a delivery completes when its last node succeeds', async () => {
     h = await createHarness()
     const r = await h.run(['a'])
     const d = await r.get()
-    expect(d.prUrl).toBe('https://example.test/pr/1')
-    expect(h.events.find((e) => e.type === 'completed')).toMatchObject({ prUrl: 'https://example.test/pr/1' })
-  })
-
-  it('skips the git tail when no branch was created', async () => {
-    h = await createHarness({ workspace: { prepare: async () => ({ workspacePath: '/tmp/x' }) } })
-    const r = await h.run(['a'])
-    expect((await r.get()).status).toBe('Completed')
-    expect(h.workspace.finalize).not.toHaveBeenCalled()
+    expect(d.status).toBe('Completed')
+    expect(d.prUrl ?? null).toBeNull()
+    expect(h.workspace.prepare).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -296,13 +280,17 @@ describe('cancel', () => {
 })
 
 describe('resume', () => {
-  it('refuses to resume a Completed, Failed or Pending delivery', async () => {
+  it('refuses to resume a Completed or Pending delivery; a Failed one resumes from its failed step', async () => {
     h = await createHarness()
     const done = await h.run(['a'])
     expect((await h.engine.resume(done.delivery.id)).success).toBe(false)
-    h.script.a = () => { throw new Error('x') }
+    let boom = true
+    h.script.a = () => { if (boom) throw new Error('x'); return ok('a') }
     const failed = await h.run(['a'])
-    expect((await h.engine.resume(failed.delivery.id)).success).toBe(false)
+    boom = false
+    expect((await h.engine.resume(failed.delivery.id)).success).toBe(true)
+    await h.engine.whenIdle(failed.delivery.id)
+    expect((await h.store.getDelivery(failed.delivery.id))!.status).toBe('Completed')
     const pending = await h.mkDelivery(['a'])
     expect((await h.engine.resume(pending.delivery.id)).success).toBe(false)
   })

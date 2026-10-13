@@ -31,10 +31,14 @@ export function registerShellHandlers(deps: ShellDeps) {
     return deps.grants.isGranted(p) ? resolveInside(p, [p]) : null
   }
 
-  handle('dialog:openDirectory', z.tuple([]), async () => {
+  // `startInWorkspaceRoot`: the New Delivery picker opens at the Workspace Root (D18).
+  handle('dialog:openDirectory', z.tuple([z.boolean().optional()]), async ([startInWorkspaceRoot]) => {
     const win = deps.getWindow()
     if (!win) return null
-    const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+    const result = await dialog.showOpenDialog(win, {
+      properties: ['openDirectory'],
+      ...(startInWorkspaceRoot ? { defaultPath: deps.getWorkspaceRoot() } : {}),
+    })
     if (result.canceled || !result.filePaths[0]) return null
     deps.grants.grant(result.filePaths[0])
     return result.filePaths[0]

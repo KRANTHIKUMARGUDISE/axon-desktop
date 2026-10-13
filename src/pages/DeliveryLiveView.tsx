@@ -1,9 +1,9 @@
 import '@xyflow/react/dist/style.css'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQueryClient, useQuery } from '@tanstack/react-query'
 import {
-  ReactFlow, ReactFlowProvider, Background, Controls,
+  ReactFlow, ReactFlowProvider, Background, Controls, Panel,
   type Node, type Edge, type NodeTypes, type EdgeTypes, type ReactFlowInstance,
 } from '@xyflow/react'
 import { useDelivery, useApproveGate, useRejectGate, useCreateDelivery } from '../hooks/useDeliveries'
@@ -11,22 +11,32 @@ import { getStepContext, getStepOutput } from '../services/deliveriesService'
 import { getBlocks } from '../services/blocksService'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
+import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
+import { Card, CardContent } from '../components/ui/card'
+import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip'
+import { Separator } from '../components/ui/separator'
 import RawDataViewerModal from '../components/shared/RawDataViewerModal'
 import type { DeliveryStep, DeliveryEvent, BuildingBlock } from '../types'
 import RraBanner from '../components/delivery/RraBanner'
+import RerunDialog from '../components/delivery/RerunDialog'
+import type { RerunReason } from '@shared'
 import DecisionNode from '../components/pipeline/nodes/DecisionNode'
 import ExecutionNode from '../components/pipeline/nodes/ExecutionNode'
 import KnowledgeNode from '../components/pipeline/nodes/KnowledgeNode'
 import ControlNode from '../components/pipeline/nodes/ControlNode'
 import IONode from '../components/pipeline/nodes/IONode'
 import UtilityNode from '../components/pipeline/nodes/UtilityNode'
+import ForEachNode from '../components/pipeline/nodes/ForEachNode'
+import { ForEachChips, ForEachTable, ItemPanel, ItemSwitcher, defaultLane } from '../components/delivery/ForEachPanels'
+import type { UIProgress } from '../components/delivery/ForEachPanels'
+import { forEachProgress, forEachSourceLabel, showConfidence, contextKey, isOptionalContext } from '@shared'
 import ConditionalEdge from '../components/pipeline/ConditionalEdge'
 import { getBlockTypeIcon } from '../utils/blockTypeIcons'
 import { getRuntimeIcon, RUNTIME_LABELS } from '../utils/runtimeIcons'
 import type { ExecutionStatus } from '../components/pipeline/nodes/BaseNode'
 import { toast } from 'sonner'
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '../components/ui/collapsible'
-import { ChevronRight, FolderOpen, Code2, Copy } from 'lucide-react'
+import { ChevronRight, FolderOpen, Code2 } from 'lucide-react'
 
 type AvailabilityStatus = 'available' | 'missing' | 'empty'
 
@@ -47,13 +57,15 @@ function FieldAvailabilityChips({
   declaredFields,
   availability,
   emptyLabel,
+  verb = 'sent',
 }: {
   declaredFields: string[] | undefined
   availability: Record<string, AvailabilityStatus> | undefined
   emptyLabel: string
+  verb?: 'sent' | 'returned'
 }) {
   const declared = declaredFields ?? []
-  const declaredSet = new Set(declared)
+  const declaredSet = new Set(declared.map(contextKey))
   const extraKeys = Object.keys(availability ?? {}).filter((k) => !declaredSet.has(k))
 
   if (declared.length === 0 && extraKeys.length === 0) {
@@ -63,11 +75,12 @@ function FieldAvailabilityChips({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {declared.map((field) => {
+        {declared.map((raw) => {
+          const field = contextKey(raw)
           const status = availability?.[field]
           return (
-            <Badge key={field} variant="outline" className={availabilityChipClass(status)}>
-              {field}{status ? ` · ${status}` : ''}
+            <Badge key={raw} variant="outline" className={availabilityChipClass(status)}>
+              {field}{status ? ` · ${status}` : isOptionalContext(raw) ? ' · optional' : ''}
             </Badge>
           )
         })}
@@ -76,7 +89,7 @@ function FieldAvailabilityChips({
         <Collapsible>
           <CollapsibleTrigger className="group/extra-fields flex cursor-pointer items-center gap-1 text-left" style={{ fontSize: 10.5, color: 'var(--axon-t3)' }}>
             <ChevronRight className="size-3 shrink-0 transition-transform group-data-[state=open]/extra-fields:rotate-90" />
-            +{extraKeys.length} undeclared field{extraKeys.length === 1 ? '' : 's'} also sent — click to view
+            +{extraKeys.length} undeclared field{extraKeys.length === 1 ? '' : 's'} also {verb} — click to view
           </CollapsibleTrigger>
           <CollapsibleContent className="mt-1.5 flex flex-wrap gap-1.5">
             {extraKeys.map((field) => {
@@ -95,6 +108,7 @@ function FieldAvailabilityChips({
 }
 
 const nodeTypes: NodeTypes = {
+  forEachNode: ForEachNode,
   decisionNode: DecisionNode,
   executionNode: ExecutionNode,
   knowledgeNode: KnowledgeNode,
@@ -126,6 +140,15 @@ interface TimelineEvent {
     | 'GateApproved' | 'GateRejected'
   body: string
   timestamp: string
+  /** Clicking the entry selects this node (+ ForEach item). `item: true` opens the item panel instead. */
+  target?: { nodeId: string; itemKey?: string; item?: boolean }
+}
+
+const eventTypeLabel: Record<TimelineEvent['type'], string> = {
+  WorkspaceProvisioning: 'Workspace', WorkspaceProvisioned: 'Workspace', GitPreparing: 'Git', GitPrepared: 'Git',
+  StepStarted: 'Started', StepCompleted: 'Completed', StepFailed: 'Failed', GateReached: 'Approval needed',
+  DeliveryCompleted: 'Delivery done', DeliveryFailed: 'Delivery failed', DeliveryInterrupted: 'Delivery stopped',
+  GateApproved: 'Approved', GateRejected: 'Rejected',
 }
 
 const eventTypeColor: Record<TimelineEvent['type'], string> = {
@@ -163,6 +186,13 @@ function statusBadgeStyle(status: string): React.CSSProperties {
   }
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
 function formatTotalDuration(startedAt: string, completedAt?: string): string {
   const start = new Date(startedAt).getTime()
   const end = completedAt ? new Date(completedAt).getTime() : Date.now()
@@ -195,13 +225,20 @@ export default function DeliveryLiveView() {
   // could be a while away (periodic poll only runs once status reads Running, and a
   // refetch isn't otherwise triggered by these specific events).
   const [localWorkspacePath, setLocalWorkspacePath] = useState<string | null>(null)
-  const [localBranch, setLocalBranch] = useState<string | null>(null)
+  const [, setLocalBranch] = useState<string | null>(null)
   const [prUrl, setPrUrl] = useState<string | null>(null)
   const [isStarting, setIsStarting] = useState(false)
+  const [rerunOpen, setRerunOpen] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
   const [isClearingWorkspace, setIsClearingWorkspace] = useState(false)
+  const [workspaceBytes, setWorkspaceBytes] = useState<number | null>(null)
   const [blocks, setBlocks] = useState<BuildingBlock[]>([])
+  // A node id, or "item:<forEachId>::<itemKey>" for a ForEach item panel.
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  // Which ForEach item a selected body node shows (null = the running one, else the last).
+  const [selectedItemKey, setSelectedItemKey] = useState<string | null>(null)
+  // The step panel is split into Overview / Input / Output so it stays readable.
+  const [panelTab, setPanelTab] = useState<'overview' | 'input' | 'output'>('overview')
   const [gateComment, setGateComment] = useState('')
   const [viewerData, setViewerData] = useState<{ title: string; data: string | Record<string, unknown> } | null>(null)
   const [viewerLoading, setViewerLoading] = useState(false)
@@ -253,19 +290,20 @@ export default function DeliveryLiveView() {
     // the display label from the pipeline snapshot's node.label, so step lookup by node
     // id and the title don't silently go blank/unmatched on a reloaded delivery.
     const persistedByNodeId = new Map(
-      delivery.steps.map((s) => [s.nodeId ?? s.id, { ...s, id: s.nodeId ?? s.id, nodeName: nodeLabelById.get(s.nodeId ?? s.id) ?? s.nodeName ?? s.name }])
+      delivery.steps.filter((s) => !s.itemKey).map((s) => [s.nodeId ?? s.id, { ...s, id: s.nodeId ?? s.id, nodeName: nodeLabelById.get(s.nodeId ?? s.id) ?? s.nodeName ?? s.name }])
     )
 
     if (pipelineNodes.length > 0) {
       setLocalSteps((prev) => {
         const prevById = new Map(prev.map((s) => [s.id, s]))
-        return pipelineNodes.map((n) =>
+        const itemSteps = delivery.steps.filter((s) => s.itemKey).map((s) => ({ ...s, nodeName: nodeLabelById.get(s.nodeId ?? s.id) ?? s.nodeName ?? s.name }))
+        return [...pipelineNodes.map((n) =>
           persistedByNodeId.get(n.id)
             // Not yet persisted — keep whatever live progress we already have locally
             // (e.g. Running from a step_started event), else seed a fresh Pending entry.
             ?? prevById.get(n.id)
             ?? { id: n.id, name: n.label ?? n.id, nodeName: n.label ?? n.id, status: 'Pending' as DeliveryStep['status'] }
-        )
+        ), ...itemSteps]
       })
     } else if (delivery.steps.length > 0) {
       // No pipelineSnapshot.nodes available (shouldn't normally happen) — fall back to
@@ -284,14 +322,14 @@ export default function DeliveryLiveView() {
         const synthesized: TimelineEvent[] = []
         for (const step of delivery.steps) {
           if (step.startedAt) {
-            synthesized.push({ type: 'StepStarted', body: `${step.nodeName ?? step.name} started`, timestamp: step.startedAt })
+            synthesized.push({ type: 'StepStarted', body: `${step.nodeName ?? step.name}${step.itemKey ? ` [${step.itemKey}]` : ''} started`, timestamp: step.startedAt, target: { nodeId: step.nodeId ?? step.id, itemKey: step.itemKey ?? undefined } })
           }
           if (step.completedAt || step.status === 'Completed' || step.status === 'Failed') {
             const ts = step.completedAt ?? step.startedAt ?? delivery.startedAt
             synthesized.push(
               step.status === 'Failed'
-                ? { type: 'StepFailed', body: `${step.nodeName ?? step.name} failed — ${step.errorMessage ?? ''}`, timestamp: ts }
-                : { type: 'StepCompleted', body: `${step.nodeName ?? step.name} completed`, timestamp: ts }
+                ? { type: 'StepFailed', body: `${step.nodeName ?? step.name}${step.itemKey ? ` [${step.itemKey}]` : ''} failed — ${step.errorMessage ?? ''}`, timestamp: ts, target: { nodeId: step.nodeId ?? step.id, itemKey: step.itemKey ?? undefined } }
+                : { type: 'StepCompleted', body: `${step.nodeName ?? step.name}${step.itemKey ? ` [${step.itemKey}]` : ''} completed`, timestamp: ts, target: { nodeId: step.nodeId ?? step.id, itemKey: step.itemKey ?? undefined } }
             )
           }
         }
@@ -323,17 +361,72 @@ export default function DeliveryLiveView() {
 
   const blockMap = useMemo(() => new Map(blocks.map((b) => [b.id, b])), [blocks])
 
+  // Repos used by this delivery, derived in main from the recorded step folders (branch + PR link when known).
+  const { data: repoInfo } = useQuery({
+    queryKey: ['delivery-repos', id, delivery?.status, delivery?.steps.length, delivery?.prUrls?.length],
+    queryFn: () => window.axon.delivery.repos(id as string),
+    enabled: !!id && !!delivery,
+  })
+
+  const deliveryFolderPath = delivery?.deliveryFolder ?? localWorkspacePath ?? delivery?.workspacePath ?? undefined
+
+  const progresses = useMemo(
+    () => (delivery
+      ? forEachProgress({
+        steps: delivery.steps as (DeliveryStep & { nodeId: string })[],
+        itemPlan: delivery.itemPlan,
+        pipelineSnapshot: delivery.pipelineSnapshot,
+      })
+      : []),
+    [delivery],
+  )
+
   const flowNodes: Node[] = useMemo(() => {
     const nodes = delivery?.pipelineSnapshot?.nodes ?? []
-    return nodes.map((n) => {
+    // Parents must precede children for xyflow sub-flows.
+    const ordered = [...nodes.filter((n) => !n.parentId), ...nodes.filter((n) => n.parentId)]
+    return ordered.map((n) => {
+      if (n.type === 'forEach') {
+        const progress = progresses.find((p) => p.nodeId === n.id)
+        const own = localSteps.find((s) => s.id === n.id)
+        const status: ExecutionStatus | undefined = progress?.failed ? 'Failed' : stepStatusToExecutionStatus(own?.status)
+        const base = n.size ?? { width: 420, height: 220 }
+        return {
+          id: n.id,
+          type: 'forEachNode',
+          position: n.position,
+          draggable: false,
+          connectable: false,
+          zIndex: -1,
+          style: { width: base.width, height: base.height }, // keeps its designed size: the items are a compact chip row, not expanding lanes
+          data: {
+            label: n.label ?? n.name ?? 'ForEach',
+            sourceLabel: forEachSourceLabel(n.id, delivery?.pipelineSnapshot?.nodes ?? [], delivery?.pipelineSnapshot?.edges ?? []) ?? null, maxItems: n.maxItems,
+            hideHandles: true, resizable: false,
+            counter: progress ? progress.counter : undefined,
+            executionStatus: status,
+            lanes: progress ? (
+              <ForEachChips
+                progress={progress as UIProgress}
+                selectedKey={selectedNodeId?.startsWith(`item:${n.id}::`) ? selectedNodeId.slice(`item:${n.id}::`.length) : null}
+                onSelectItem={(key) => { setSelectedNodeId(`item:${n.id}::${key}`); setGateComment('') }}
+              />
+            ) : undefined,
+          },
+        }
+      }
       const block = blockMap.get(n.blockId)
       const nodeType = block?.role ?? 'Execution'
       const typeKey = nodeType.toLowerCase()
-      const step = localSteps.find((s) => s.id === n.id)
+      // Inside a ForEach a node's status is that of the current item's step (the lanes show every item).
+      const progress = n.parentId ? progresses.find((p) => p.nodeId === n.parentId) : undefined
+      const lane = progress ? (progress.lanes.find((l) => l.key === progress.currentKey) ?? progress.lanes[progress.lanes.length - 1]) : undefined
+      const step = n.parentId ? lane?.steps.find((s) => s.nodeId === n.id) : localSteps.find((s) => s.id === n.id)
       return {
         id: n.id,
         type: typeKey === 'io' ? 'ionode' : `${typeKey}Node`,
         position: n.position,
+        ...(n.parentId ? { parentId: n.parentId } : {}),
         draggable: false,
         connectable: false,
         data: {
@@ -347,7 +440,7 @@ export default function DeliveryLiveView() {
         },
       }
     })
-  }, [delivery, blockMap, localSteps])
+  }, [delivery, blockMap, localSteps, progresses, selectedNodeId])
 
   // `fitView` on <ReactFlow> only auto-fits once, at initial mount. If this
   // component instance is reused (e.g. retrying a delivery without a full
@@ -376,10 +469,27 @@ export default function DeliveryLiveView() {
     }))
   }, [delivery])
 
-  const selectedStep = localSteps.find((s) => s.id === selectedNodeId)
-  const selectedNode = flowNodes.find((n) => n.id === selectedNodeId)
+  const snapshotNodes = delivery?.pipelineSnapshot?.nodes ?? []
+  const itemSel = selectedNodeId?.startsWith('item:')
+    ? (() => { const rest = selectedNodeId.slice(5); const k = rest.indexOf('::'); return { feId: rest.slice(0, k), key: rest.slice(k + 2) } })()
+    : null
+  const selectedBaseId = itemSel ? undefined : selectedNodeId ?? undefined
+  const selectedDef = snapshotNodes.find((n) => n.id === selectedBaseId)
+  const selectedNode = flowNodes.find((n) => n.id === selectedBaseId)
   const selectedBlock = selectedNode ? blockMap.get((selectedNode.data as { blockId: string }).blockId) : undefined
-  const selectedNodeTimeoutSeconds = delivery?.pipelineSnapshot?.nodes?.find((n) => n.id === selectedNodeId)?.timeoutSeconds
+  // A node inside a ForEach shows ONE item at a time (switcher on top): the chosen one, else running, else the last.
+  const bodyProgress = selectedDef?.parentId ? (progresses.find((p) => p.nodeId === selectedDef.parentId) as UIProgress | undefined) : undefined
+  const activeItemKey = bodyProgress
+    ? (selectedItemKey && bodyProgress.lanes.some((l) => l.key === selectedItemKey) ? selectedItemKey : defaultLane(bodyProgress)?.key)
+    : undefined
+  const selectedStep: DeliveryStep | undefined = bodyProgress && selectedDef
+    ? (localSteps.find((s) => s.id === `${selectedDef.id}::${activeItemKey}`)
+      ?? { id: `${selectedDef.id}::${activeItemKey}`, nodeId: selectedDef.id, itemKey: activeItemKey, name: selectedDef.label ?? selectedDef.id, nodeName: selectedDef.label ?? selectedDef.id, status: 'Pending' as DeliveryStep['status'] })
+    : localSteps.find((s) => s.id === selectedNodeId)
+  const selectedForEachProgress = selectedDef?.type === 'forEach' ? (progresses.find((p) => p.nodeId === selectedDef.id) as UIProgress | undefined) : undefined
+  const itemPanelProgress = itemSel ? (progresses.find((p) => p.nodeId === itemSel.feId) as UIProgress | undefined) : undefined
+  const sidePanelOpen = !!(selectedStep && selectedNode) || !!(itemSel && itemPanelProgress) || !!selectedForEachProgress
+  const selectedNodeTimeoutSeconds = selectedDef?.timeoutSeconds
   const isSelectedNodeActiveGate = selectedNodeId === delivery?.currentNodeId && delivery?.status === 'Paused'
 
   // Gate cards describe the *previous* step's output, not the gate block's own (the
@@ -395,10 +505,19 @@ export default function DeliveryLiveView() {
 
   const onNodeClick = useCallback((_e: React.MouseEvent, node: Node) => {
     setSelectedNodeId(node.id)
+    setSelectedItemKey(null)
     setGateComment('')
   }, [])
 
-  const onPaneClick = useCallback(() => setSelectedNodeId(null), [])
+  // Timeline entry -> select that node and ForEach item (item events open the item panel).
+  const selectTimelineTarget = (t: NonNullable<TimelineEvent['target']>) => {
+    setGateComment('')
+    if (t.item && t.itemKey) { setSelectedNodeId(`item:${t.nodeId}::${t.itemKey}`); return }
+    setSelectedNodeId(t.nodeId)
+    setSelectedItemKey(t.itemKey ?? null)
+  }
+
+  const onPaneClick = useCallback(() => { setSelectedNodeId(null); setSelectedItemKey(null) }, [])
 
   // Loads the full context / output for one step. The main process reads the DS1 file
   // (under {userData}/runs/) when the delivery document only holds a truncated marker.
@@ -493,6 +612,11 @@ export default function DeliveryLiveView() {
           setLocalStatus(data.status)
           break
         case 'step_started':
+          if (data.itemKey) {
+            // Lanes are rebuilt from the refetched delivery; only the signal feed is updated here.
+            addTimelineEvent('StepStarted', `${data.blockName} [${data.itemKey}] started`, { nodeId: data.nodeId, itemKey: data.itemKey })
+            break
+          }
           setLocalSteps((prev) =>
             prev.map((s) =>
               s.id === data.nodeId
@@ -500,9 +624,14 @@ export default function DeliveryLiveView() {
                 : s,
             ),
           )
-          addTimelineEvent('StepStarted', `${data.blockName} started`)
+          addTimelineEvent('StepStarted', `${data.blockName} started`, { nodeId: data.nodeId })
           break
         case 'step_completed':
+          if (data.itemKey) {
+            // Lanes are rebuilt from the refetched delivery; only the signal feed is updated here.
+            addTimelineEvent('StepCompleted', `${data.blockName} [${data.itemKey}] completed`, { nodeId: data.nodeId, itemKey: data.itemKey })
+            break
+          }
           setLocalSteps((prev) =>
             prev.map((s) =>
               s.id === data.nodeId
@@ -521,9 +650,14 @@ export default function DeliveryLiveView() {
                 : s,
             ),
           )
-          addTimelineEvent('StepCompleted', `${data.blockName} completed`)
+          addTimelineEvent('StepCompleted', `${data.blockName} completed`, { nodeId: data.nodeId })
           break
         case 'step_failed':
+          if (data.itemKey) {
+            // Lanes are rebuilt from the refetched delivery; only the signal feed is updated here.
+            addTimelineEvent('StepFailed', `${data.blockName} [${data.itemKey}] failed — ${data.message}`, { nodeId: data.nodeId, itemKey: data.itemKey })
+            break
+          }
           setLocalSteps((prev) =>
             prev.map((s) =>
               s.id === data.nodeId
@@ -543,7 +677,16 @@ export default function DeliveryLiveView() {
                 : s,
             ),
           )
-          addTimelineEvent('StepFailed', `${data.blockName} failed — ${data.message}`)
+          addTimelineEvent('StepFailed', `${data.blockName} failed — ${data.message}`, { nodeId: data.nodeId })
+          break
+        case 'item_started':
+          addTimelineEvent('StepStarted', `Item ${data.index + 1} of ${data.total} started — ${data.itemKey}`, { nodeId: data.nodeId, itemKey: data.itemKey, item: true })
+          break
+        case 'item_completed':
+          addTimelineEvent('StepCompleted', `Item ${data.index + 1} of ${data.total} completed — ${data.itemKey}`, { nodeId: data.nodeId, itemKey: data.itemKey, item: true })
+          break
+        case 'item_failed':
+          addTimelineEvent('StepFailed', `Item ${data.itemKey} failed — ${data.message}`, { nodeId: data.nodeId, itemKey: data.itemKey, item: true })
           break
         case 'gate_reached':
           setLocalSteps((prev) =>
@@ -557,7 +700,7 @@ export default function DeliveryLiveView() {
                 : s,
             ),
           )
-          addTimelineEvent('GateReached', `Awaiting approval — ${data.blockName}`)
+          addTimelineEvent('GateReached', `Awaiting approval — ${data.blockName}`, { nodeId: data.nodeId })
           break
         case 'gate_approved':
           setLocalSteps((prev) =>
@@ -737,13 +880,11 @@ export default function DeliveryLiveView() {
     }
   }
 
-  const handleRetry = async () => {
+  // Rerun = a NEW delivery (first step again) linked to this one, which becomes Superseded. Resume continues this one.
+  // "Run again" of a Completed delivery is a plain new run: nothing is superseded.
+  const handleRetry = async (reason?: RerunReason) => {
     if (!delivery) return
-    const actionLabel = delivery.status === 'Completed' ? 'Run this delivery again' : 'Retry this delivery'
-    const workspaceWarning = delivery.workspaceType === 'Browse'
-      ? 'You will be asked to pick a workspace folder again.'
-      : `This reuses the same workspace folder as this delivery (keyed by ticket "${delivery.ticketId}") — any changes already in that folder will still be there unless you clear the workspace first.`
-    if (!window.confirm(`${actionLabel} as a new run?\n\n${workspaceWarning}`)) return
+    if (delivery.status === 'Completed' && !window.confirm('Run this delivery again as a new run?')) return
     try {
       const newDelivery = await createDelivery.mutateAsync({
         ticketId: delivery.ticketId,
@@ -752,23 +893,32 @@ export default function DeliveryLiveView() {
         repoUrl: delivery.repoUrl,
         workspaceType: delivery.workspaceType,
         retriedFromDeliveryId: delivery.id,
+        ...(reason ? { rerunReason: reason } : {}),
         inputs: delivery.inputs,
+        workspacePath: delivery.workspacePath ?? undefined,
       })
+      setRerunOpen(false)
       navigate(`/deliveries/${newDelivery.id}`)
     } catch {
-      toast.error('Failed to retry delivery')
+      toast.error('Failed to rerun delivery')
     }
   }
 
+  // Size of the delivery's workspace (worktrees); refreshed when the run settles or the workspace is removed.
+  useEffect(() => {
+    if (!id || !delivery?.workspacePath || delivery.status === 'Running') return
+    window.axon.delivery.workspaceSize(id).then((r) => setWorkspaceBytes(r.success ? r.bytes : null)).catch(() => setWorkspaceBytes(null))
+  }, [id, delivery?.workspacePath, delivery?.status, isClearingWorkspace])
+
   const handleClearWorkspace = async () => {
-    const wsPath = localWorkspacePath ?? delivery?.workspacePath
+    const wsPath = deliveryFolderPath
     if (!wsPath || !delivery) return
     if (displayStatus === 'Running' || displayStatus === 'Paused') {
       toast.error('Stop the delivery before clearing its workspace')
       return
     }
     if (!window.confirm(
-      `Permanently delete this workspace folder?\n\n${wsPath}\n\nThis removes the local clone and any uncommitted changes. This cannot be undone.`,
+      `Remove this delivery workspace?\n\n${wsPath}\n\nThis removes its git worktrees and any uncommitted changes (pushed branches are unaffected; shared mirrors are kept). This cannot be undone.`,
     )) return
     setIsClearingWorkspace(true)
     try {
@@ -787,27 +937,14 @@ export default function DeliveryLiveView() {
   }
 
   const handleOpenWorkspace = async () => {
-    const wsPath = localWorkspacePath ?? delivery?.workspacePath
+    const wsPath = deliveryFolderPath
     if (!wsPath) return
     const res = await window.axon.shell.openPath(wsPath)
     if (!res.success) toast.error(res.error ? `Failed to open folder: ${res.error}` : 'Failed to open folder')
   }
 
-  const handleOpenInVSCode = async () => {
-    const wsPath = localWorkspacePath ?? delivery?.workspacePath
-    if (!wsPath) return
-    const res = await window.axon.shell.openInVSCode(wsPath)
-    if (!res.success) toast.error(res.error ? `Failed to open VS Code: ${res.error}` : 'Failed to open VS Code')
-  }
-
-  const handleCopyRepoLink = async () => {
-    if (!delivery?.repoUrl) return
-    await navigator.clipboard.writeText(delivery.repoUrl)
-    toast.success('Repo link copied')
-  }
-
-  const addTimelineEvent = (type: TimelineEvent['type'], body: string) => {
-    setTimeline((prev) => [{ type, body, timestamp: new Date().toISOString() }, ...prev].slice(0, 10))
+  const addTimelineEvent = (type: TimelineEvent['type'], body: string, target?: TimelineEvent['target']) => {
+    setTimeline((prev) => [{ type, body, timestamp: new Date().toISOString(), target }, ...prev].slice(0, 60))
   }
 
   if (isLoading || !delivery) {
@@ -835,19 +972,15 @@ export default function DeliveryLiveView() {
   }
 
   const displayStatus = localStatus ?? delivery.status
+  // A Failed delivery can continue from its failed step unless it failed by a rejected approval (that needs a Rerun).
+  const canResumeFailed = delivery.status === 'Failed'
+    && localSteps.some((s) => s.status === 'Failed')
+    && !localSteps.some((s) => s.agentOutput?.rejectedBy != null)
   const completedCount = localSteps.filter((s) => s.status === 'Completed').length
   const pipelineName = delivery.pipelineSnapshot?.name ?? delivery.pipelineName
   const createdBy = delivery.createdByName ?? 'Unknown'
-  // Prefer the live progress-event value over the delivery record's own field — the
-  // record only catches up on the next full refetch, which can lag well behind when
-  // provisioning actually finished (see workspace_provisioned/git_prepared handling).
-  const effectiveWorkspacePath = localWorkspacePath ?? delivery.workspacePath ?? undefined
-  // No fallback guess — the real branch name (or lack of one, e.g. no git token
-  // configured) is what actually matters here, not a plausible-looking placeholder.
-  const branch = localBranch ?? delivery.branch ?? '—'
-  const workspace = effectiveWorkspacePath
-    ? effectiveWorkspacePath.split(/[\\/]/).filter(Boolean).pop()
-    : undefined
+  // The Delivery Folder (D17): Explorer / VS Code / Remove workspace all act on it, never on a repo.
+  const effectiveWorkspacePath = deliveryFolderPath
 
   return (
     <div style={{ padding: 22, height: '100vh', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -856,96 +989,48 @@ export default function DeliveryLiveView() {
         height: 50, background: 'var(--axon-bg2)', borderBottom: '1px solid var(--axon-border)',
         margin: '-22px -22px 22px', display: 'flex', alignItems: 'center', padding: '0 22px', gap: 14, flexShrink: 0,
       }}>
-        <button
-          onClick={() => navigate('/deliveries')}
-          style={{
-            background: 'transparent', color: 'var(--axon-t2)',
-            border: '1px solid var(--axon-border2)',
-            padding: '5px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-            cursor: 'pointer', fontFamily: 'inherit',
-          }}
-        >
-          ← Deliveries
-        </button>
-        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--axon-t1)', flex: 1 }}>
+        <Button variant="outline" size="sm" className="h-8" onClick={() => navigate('/deliveries')}>← Deliveries</Button>
+        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--axon-t1)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {delivery.ticketId}
           {delivery.title && delivery.title !== delivery.ticketId ? ` — ${delivery.title}` : ''}
         </div>
-        <span style={{
-          ...statusBadgeStyle(displayStatus),
-          display: 'inline-flex', alignItems: 'center', gap: 3,
-          fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 20, letterSpacing: '0.3px',
-        }}>
-          {displayStatus === 'Running' && <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'currentColor', flexShrink: 0 }} />}
+        <Badge variant="outline" className="h-8 gap-1.5 rounded-md px-3 text-xs font-semibold" style={statusBadgeStyle(displayStatus)}>
+          <span className="size-1.5 shrink-0 rounded-full bg-current" style={{ animation: displayStatus === 'Running' ? 'axon-node-pulse 1.6s infinite' : undefined }} />
           {displayStatus}
-        </span>
+        </Badge>
 
         {displayStatus === 'Pending' && (
-          <button
-            onClick={handleStart}
-            disabled={isStarting}
-            style={{
-              background: 'var(--axon-nx-glow)', color: 'var(--axon-nexus2)',
-              border: '1px solid rgba(111,95,232,0.3)',
-              padding: '5px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-              cursor: isStarting ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-              opacity: isStarting ? 0.6 : 1,
-            }}
-          >
-            {isStarting ? 'Starting…' : '▶ Start'}
-          </button>
+          <Button size="sm" className="h-8" onClick={handleStart} disabled={isStarting}>{isStarting ? 'Starting…' : '▶ Start'}</Button>
         )}
-
         {displayStatus === 'Running' && (
-          <button
-            onClick={handleStop}
-            disabled={isStopping}
-            style={{
-              background: 'var(--axon-red-d)', color: 'var(--axon-red)',
-              border: '1px solid rgba(239,68,68,0.3)',
-              padding: '5px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-              cursor: isStopping ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-              opacity: isStopping ? 0.6 : 1,
-            }}
-          >
-            {isStopping ? 'Stopping…' : '■ Stop'}
-          </button>
+          <Button size="sm" variant="destructive" className="h-8" onClick={handleStop} disabled={isStopping}>{isStopping ? 'Stopping…' : '■ Stop'}</Button>
         )}
-
-        {(displayStatus === 'Cancelled' || displayStatus === 'Interrupted') && (
-          <button
-            onClick={handleResume}
-            disabled={isStarting}
-            title="Continue this same delivery from wherever it stopped, skipping already-completed steps"
-            style={{
-              background: 'var(--axon-green-d)', color: 'var(--axon-green)',
-              border: '1px solid rgba(16,185,129,0.3)',
-              padding: '5px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-              cursor: isStarting ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-              opacity: isStarting ? 0.6 : 1,
-            }}
+        {(displayStatus === 'Cancelled' || displayStatus === 'Interrupted' || (displayStatus === 'Failed' && canResumeFailed)) && (
+          <Button
+            size="sm" className="h-8" onClick={handleResume} disabled={isStarting}
+            title="Continue this same delivery from the failed or stopped step in the same workspace (that step's folder is restored first), skipping completed steps"
           >
             {isStarting ? 'Resuming…' : '▶ Resume'}
-          </button>
+          </Button>
         )}
-
-        {(displayStatus === 'Failed' || displayStatus === 'Cancelled' || displayStatus === 'Completed') && (
-          <button
-            onClick={handleRetry}
-            disabled={createDelivery.isPending}
-            style={{
-              background: 'var(--axon-nx-glow)', color: 'var(--axon-nexus2)',
-              border: '1px solid rgba(111,95,232,0.3)',
-              padding: '5px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600,
-              cursor: createDelivery.isPending ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-              opacity: createDelivery.isPending ? 0.6 : 1,
-            }}
-          >
-            {createDelivery.isPending
-              ? (displayStatus === 'Completed' ? 'Starting…' : 'Retrying…')
-              : (displayStatus === 'Completed' ? '↻ Run Again' : '↻ Retry')}
-          </button>
+        {(displayStatus === 'Failed' || displayStatus === 'Cancelled') && (
+          <Button size="sm" variant="outline" className="h-8" onClick={() => setRerunOpen(true)} disabled={createDelivery.isPending}
+            title="Start a new delivery from the first step; this one is marked Superseded">
+            ↻ Rerun
+          </Button>
         )}
+        {displayStatus === 'Completed' && (
+          <Button size="sm" variant="outline" className="h-8" onClick={() => handleRetry()} disabled={createDelivery.isPending}>
+            {createDelivery.isPending ? 'Starting…' : '↻ Run again'}
+          </Button>
+        )}
+        <RerunDialog
+          open={rerunOpen}
+          ticketId={delivery.ticketId}
+          busy={createDelivery.isPending}
+          onCancel={() => setRerunOpen(false)}
+          onConfirm={(reason) => handleRetry(reason)}
+        />
       </div>
 
       {/* RRA Banner — only when pipeline includes an RRA step */}
@@ -960,21 +1045,6 @@ export default function DeliveryLiveView() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10, flexShrink: 0, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)' }}>
               Pipeline Execution
-            </div>
-            <div style={{ display: 'flex', gap: 8, fontSize: 10, color: 'var(--axon-t3)' }}>
-              {([
-                ['Pending', '#64748b'], ['Running', '#3b82f6'], ['Success', '#22c55e'],
-                ['Awaiting approval', '#f59e0b'], ['Failed', '#ef4444'],
-              ] as const).map(([label, color]) => (
-                <span key={label} style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 5,
-                  background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
-                  borderRadius: 20, padding: '3px 9px',
-                }}>
-                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
-                  {label}
-                </span>
-              ))}
             </div>
           </div>
           <div style={{
@@ -1000,6 +1070,19 @@ export default function DeliveryLiveView() {
               >
                 <Background color="#1e293b" gap={20} />
                 <Controls showInteractive={false} />
+                <Panel position="top-left">
+                  <div className="pointer-events-none flex items-center gap-3 rounded-md border bg-card/80 px-2.5 py-1.5 text-[10px] text-muted-foreground backdrop-blur-sm">
+                    {([
+                      ['Pending', '#64748b'], ['Running', '#3b82f6'], ['Success', '#22c55e'],
+                      ['Awaiting approval', '#f59e0b'], ['Failed', '#ef4444'],
+                    ] as const).map(([label, color]) => (
+                      <span key={label} className="inline-flex items-center gap-1.5">
+                        <span className="size-2 rounded-full" style={{ background: color }} />
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                </Panel>
               </ReactFlow>
             </ReactFlowProvider>
           </div>
@@ -1007,12 +1090,32 @@ export default function DeliveryLiveView() {
 
         {/* Right: node detail (when selected) or Signals + Job details */}
         <div style={{ minWidth: 0, overflowY: 'auto' }}>
-          {selectedStep && selectedNode ? (
+          {itemSel && itemPanelProgress && (
+            <ItemPanel
+              progress={itemPanelProgress}
+              itemKey={itemSel.key}
+              repos={repoInfo?.repos ?? []}
+              onClose={() => setSelectedNodeId(null)}
+              onSelectStep={(st) => { setSelectedNodeId(st.nodeId); setSelectedItemKey(st.itemKey ?? null) }}
+              onView={(kind, st) => viewFullField(kind, st, `${kind === 'context' ? 'Input' : 'Output'} — ${st.nodeName ?? st.name} [${st.itemKey}]`)}
+            />
+          )}
+          {selectedForEachProgress && (
+            <ForEachTable
+              progress={selectedForEachProgress}
+              onClose={() => setSelectedNodeId(null)}
+              onSelectItem={(key) => setSelectedNodeId(`item:${selectedForEachProgress.nodeId}::${key}`)}
+              onViewOutput={(st) => viewFullField('output', st, `Output — ${st.nodeName ?? st.name} [${st.itemKey}]`)}
+            />
+          )}
+          {selectedStep && selectedNode && !selectedForEachProgress ? (
             <div style={{
               background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
               borderRadius: 12, padding: '16px', marginBottom: 16,
               boxShadow: '0 4px 24px rgba(0,0,0,0.18)',
             }}>
+              {bodyProgress && <ItemSwitcher progress={bodyProgress} activeKey={activeItemKey} onSelect={setSelectedItemKey} />}
+
               {/* Header: role icon, name, role label */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1026,7 +1129,7 @@ export default function DeliveryLiveView() {
                   )}
                   <div>
                     <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--axon-t1)', lineHeight: 1.3 }}>
-                      {selectedStep.nodeName ?? selectedStep.name}
+                      {selectedStep.nodeName ?? selectedStep.name}{selectedStep.itemKey ? ` · ${selectedStep.itemKey}` : ''}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
                       <span style={{ fontSize: 10.5, color: 'var(--axon-t3)' }}>{selectedBlock?.role ?? '—'}</span>
@@ -1050,32 +1153,45 @@ export default function DeliveryLiveView() {
                 </Button>
               </div>
 
-              {/* Status row */}
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 10, fontSize: 10.5, color: 'var(--axon-t3)',
-                marginBottom: 14, background: 'var(--axon-bg3)', borderRadius: 8, padding: '8px 11px',
-              }}>
+              {/* Status + timings */}
+              <div className="mb-3 flex items-center gap-3">
                 <span style={{
                   ...statusBadgeStyle(selectedStep.status === 'AwaitingApproval' ? 'Paused' : selectedStep.status === 'Completed' ? 'Completed' : selectedStep.status),
-                  fontSize: 9.5, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+                  fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 6,
                 }}>
-                  {selectedStep.status}
+                  {selectedStep.status === 'AwaitingApproval' ? 'Awaiting approval' : selectedStep.status}
                 </span>
-                {selectedStep.startedAt && <span>Started <b style={{ color: 'var(--axon-t1)', fontWeight: 600 }}>{new Date(selectedStep.startedAt).toLocaleTimeString()}</b></span>}
-                {selectedStep.completedAt && <span>Ended <b style={{ color: 'var(--axon-t1)', fontWeight: 600 }}>{new Date(selectedStep.completedAt).toLocaleTimeString()}</b></span>}
-                {selectedStep.startedAt && selectedStep.completedAt && (
-                  <span>Duration <b style={{ color: 'var(--axon-t1)', fontWeight: 600 }}>{formatTotalDuration(selectedStep.startedAt, selectedStep.completedAt)}</b></span>
-                )}
                 {selectedStep.startedAt && !selectedStep.completedAt && selectedStep.status === 'Running' && (
-                  <span>Running for <b style={{ color: 'var(--axon-t1)', fontWeight: 600 }}>{formatTotalDuration(selectedStep.startedAt)}</b></span>
+                  <span className="text-xs text-muted-foreground">running for <b className="text-foreground">{formatTotalDuration(selectedStep.startedAt)}</b></span>
                 )}
               </div>
+              <div className="mb-3 grid grid-cols-3 gap-2 rounded-md border bg-muted/30 px-3 py-2">
+                {([
+                  ['Started', selectedStep.startedAt ? new Date(selectedStep.startedAt).toLocaleTimeString() : '—'],
+                  ['Ended', selectedStep.completedAt ? new Date(selectedStep.completedAt).toLocaleTimeString() : '—'],
+                  ['Took', selectedStep.startedAt && selectedStep.completedAt ? formatTotalDuration(selectedStep.startedAt, selectedStep.completedAt) : '—'],
+                ] as const).map(([k, v]) => (
+                  <div key={k} className="flex min-w-0 flex-col">
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{k}</span>
+                    <span className="truncate text-xs font-semibold text-foreground">{v}</span>
+                  </div>
+                ))}
+              </div>
+              <Tabs value={panelTab} onValueChange={(v) => setPanelTab(v as typeof panelTab)} className="mb-3">
+                <TabsList className="w-full">
+                  <TabsTrigger value="overview">Overview</TabsTrigger>
+                  <TabsTrigger value="input">Input</TabsTrigger>
+                  <TabsTrigger value="output">Output</TabsTrigger>
+                </TabsList>
+              </Tabs>
+              <Separator className="mb-3" />
 
+              {panelTab === 'overview' && (<>
               {/* Summary — quick TL;DR, shown prominently up top */}
-              {selectedStep.agentOutput?.summary && (
+              {selectedStep.agentOutput?.summary && !(selectedStep.status === 'Failed' && selectedStep.agentOutput.summary === selectedStep.errorMessage) && (
                 <div style={{
                   borderLeft: '2px solid var(--axon-nexus2)', paddingLeft: 10,
-                  fontSize: 11.5, color: 'var(--axon-t2)', lineHeight: 1.5, marginBottom: 14, fontStyle: 'italic',
+                  fontSize: 11.5, color: 'var(--axon-t2)', lineHeight: 1.5, marginBottom: 14, fontStyle: 'italic', overflowWrap: 'anywhere',
                 }}>
                   “{selectedStep.agentOutput.summary}”
                 </div>
@@ -1167,9 +1283,14 @@ export default function DeliveryLiveView() {
                       )}.
                     </div>
                   )}
-                  <div style={{ fontSize: 11, color: 'var(--axon-t2)', lineHeight: 1.5 }}>
+                  <div style={{ fontSize: 11, color: 'var(--axon-t2)', lineHeight: 1.5, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
                     {selectedStep.errorMessage ?? 'An error occurred during this step.'}
                   </div>
+                  {selectedBlock && selectedBlock.agentRuntime !== 'Axon' && selectedStep.cwd && delivery?.status === 'Failed' && (
+                    <div data-testid="failed-attempt-note" style={{ marginTop: 8, fontSize: 10.5, color: 'var(--axon-t2)', paddingTop: 8, borderTop: '1px solid rgba(239,68,68,0.2)' }}>
+                      Changes from the failed attempt are still in the folder; Resume restores the pre-step state.
+                    </div>
+                  )}
                   {selectedBlock?.role === 'Control' && selectedStep.agentOutput?.rejectedBy != null && (
                     <div style={{ marginTop: 8, fontSize: 10.5, color: 'var(--axon-t2)', paddingTop: 8, borderTop: '1px solid rgba(239,68,68,0.2)' }}>
                       Rejected by <b style={{ color: 'var(--axon-t1)' }}>{selectedStep.agentOutput.rejectedBy}</b>
@@ -1181,6 +1302,8 @@ export default function DeliveryLiveView() {
                 </div>
               )}
 
+              </>)}
+              {panelTab === 'input' && (<>
               {/* Configured Context Fields — what this block declares it needs, colored by availability */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 7 }}>
                 <span style={{ color: 'var(--axon-nexus2)', fontSize: 11 }}>↓</span>
@@ -1194,6 +1317,11 @@ export default function DeliveryLiveView() {
                   availability={selectedStep.contextAvailability}
                   emptyLabel="(no context fields required)"
                 />
+                {selectedStep.catalogStats && (
+                  <div data-testid="catalog-stats" style={{ fontSize: 11, color: '#94a3b8', marginTop: 6 }}>
+                    repoCatalog: {selectedStep.catalogStats.repos} repo{selectedStep.catalogStats.repos === 1 ? '' : 's'}, ~{selectedStep.catalogStats.approxTokens} tokens
+                  </div>
+                )}
               </div>
               <Button
                 variant="outline"
@@ -1205,6 +1333,8 @@ export default function DeliveryLiveView() {
                 View full context snapshot
               </Button>
 
+              </>)}
+              {panelTab === 'output' && (<>
               {/* Configured Output Fields — what this block declares it produces, colored by availability */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 7 }}>
                 <span style={{ color: 'var(--axon-green)', fontSize: 11 }}>↑</span>
@@ -1217,6 +1347,7 @@ export default function DeliveryLiveView() {
                   declaredFields={selectedBlock?.outputSchema}
                   availability={selectedStep.outputAvailability}
                   emptyLabel="(no output schema declared)"
+                  verb="returned"
                 />
               </div>
               <Button
@@ -1229,6 +1360,8 @@ export default function DeliveryLiveView() {
                 View full output
               </Button>
 
+              </>)}
+              {panelTab === 'overview' && (<>
               {/* Tools Used / Denied — only meaningful for Agentic-mode blocks; absent
                   entirely (both undefined) for Prompt-mode blocks, so this section just
                   doesn't render rather than showing an empty "none" state for every
@@ -1253,93 +1386,132 @@ export default function DeliveryLiveView() {
                 </div>
               )}
 
-              {selectedStep.agentOutput?.confidence != null && (
+              {/* D5: confidence is optional and display-only: no threshold, nothing for native Axon blocks or when absent. */}
+              {showConfidence(selectedStep.agentOutput?.confidence, selectedBlock?.agentRuntime) && (
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 5 }}>
                     <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--axon-t3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                       Confidence
                     </span>
-                    <span style={{
-                      fontSize: 11, fontWeight: 700,
-                      color: selectedStep.agentOutput.confidence >= 0.7 ? 'var(--axon-green)' : 'var(--axon-amber)',
-                    }}>
-                      {Math.round(selectedStep.agentOutput.confidence * 100)}%
+                    <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--axon-t2)' }}>
+                      {Math.round((selectedStep.agentOutput?.confidence ?? 0) * 100)}%
                     </span>
                   </div>
                   <div style={{ height: 6, background: 'var(--axon-bg3)', borderRadius: 4, overflow: 'hidden' }}>
                     <div style={{
-                      height: '100%', width: `${Math.round(selectedStep.agentOutput.confidence * 100)}%`,
-                      background: selectedStep.agentOutput.confidence >= 0.7 ? 'var(--axon-green)' : 'var(--axon-amber)',
-                      borderRadius: 4, transition: 'width 0.3s ease',
+                      height: '100%', width: `${Math.round((selectedStep.agentOutput?.confidence ?? 0) * 100)}%`,
+                      background: 'var(--axon-nexus2)', borderRadius: 4, transition: 'width 0.3s ease',
                     }} />
                   </div>
-                  {selectedStep.agentOutput.confidence < 0.7 && (
-                    <div style={{ fontSize: 9.5, color: 'var(--axon-amber)', marginTop: 4 }}>
-                      ⚠ Below threshold (70%)
-                    </div>
-                  )}
                 </div>
               )}
+              </>)}
             </div>
           ) : null}
 
-          <div style={{ display: selectedStep ? 'none' : 'block' }}>
+          <div style={{ display: sidePanelOpen ? 'none' : 'block' }}>
           {/* Job Details */}
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--axon-t1)', marginBottom: 8 }}>
-            Job Details
-          </div>
-          <div style={{
-            background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
-            borderRadius: 12, padding: '12px 14px', fontSize: 11, marginBottom: 16,
-          }}>
-            {[
-              ...(delivery.localSeq ? [{ k: 'Run', v: `#${delivery.localSeq}` }] : []),
-              { k: 'Pipeline', v: pipelineName },
-              { k: 'Triggered by', v: createdBy },
-              { k: 'Repo', v: delivery.repoUrl, mono: true },
-              { k: 'Workspace', v: workspace ?? delivery.workspaceType, mono: !!workspace },
-              { k: 'Branch', v: branch, mono: true },
-              { k: 'Step', v: `${completedCount} of ${localSteps.length}` },
-              ...(delivery.attemptNumber && delivery.attemptNumber > 1
-                ? [{ k: 'Attempt', v: `#${delivery.attemptNumber}` }]
-                : []),
-            ].map(({ k, v, mono }, i, arr) => (
-              <div key={k} style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                padding: '5px 0', fontSize: 11,
-                borderBottom: i < arr.length - 1 ? '1px solid var(--axon-border)' : 'none',
-              }}>
-                <span style={{ color: 'var(--axon-t3)', flexShrink: 0 }}>{k}</span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, marginLeft: 8 }}>
-                  <span style={{
-                    color: 'var(--axon-t1)', fontWeight: 500,
-                    fontFamily: mono ? 'var(--font-mono)' : 'inherit',
-                    fontSize: mono ? 10 : 11,
-                    minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }} title={typeof v === 'string' ? v : undefined}>
-                    {v}
-                  </span>
-                  {k === 'Repo' && delivery.repoUrl && (
-                    <Button variant="outline" size="icon-sm" className="size-5 shrink-0" onClick={handleCopyRepoLink} title="Copy repository link">
-                      <Copy size={11} />
-                    </Button>
+          <div className="mb-2 text-xs font-semibold text-foreground">Job details</div>
+          <Card className="mb-4 gap-0 py-2">
+            <CardContent className="divide-y px-4">
+              {[
+                ...(delivery.localSeq ? [{ k: 'Run', v: `#${delivery.localSeq}` }] : []),
+                { k: 'Pipeline', v: pipelineName },
+                { k: 'Triggered by', v: createdBy },
+                { k: 'Step', v: `${completedCount} of ${localSteps.length}` },
+                ...(delivery.attemptNumber && delivery.attemptNumber > 1 ? [{ k: 'Attempt', v: `#${delivery.attemptNumber}` }] : []),
+              ].map(({ k, v }) => (
+                <div key={k} className="flex items-baseline justify-between gap-4 py-2 text-xs">
+                  <span className="shrink-0 text-muted-foreground">{k}</span>
+                  <span className="min-w-0 truncate text-right font-medium text-foreground" title={typeof v === 'string' ? v : undefined}>{v}</span>
+                </div>
+              ))}
+              <div className="flex flex-col gap-1.5 py-2.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Delivery folder</span>
+                  {deliveryFolderPath && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button variant="outline" size="icon-sm" onClick={handleOpenWorkspace} aria-label="Open the delivery folder in Explorer"><FolderOpen /></Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Open in Explorer</TooltipContent>
+                    </Tooltip>
                   )}
-                </span>
+                </div>
+                <code className="break-all rounded bg-muted/40 px-2 py-1 font-mono text-[11px] leading-snug text-foreground">{deliveryFolderPath ?? '—'}</code>
               </div>
-            ))}
-          </div>
+            </CardContent>
+          </Card>
 
-          {effectiveWorkspacePath && (
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-              <Button variant="outline" size="sm" className="flex-1 gap-1.5" onClick={handleOpenWorkspace} title="Open workspace folder in Explorer">
-                <FolderOpen size={13} /> Explorer
-              </Button>
-              <Button variant="outline" size="sm" className="flex-1 gap-1.5" onClick={handleOpenInVSCode} title="Open workspace folder in VS Code">
-                <Code2 size={13} /> VS Code
-              </Button>
+          {(repoInfo?.repos.length ?? 0) > 0 && (
+            <>
+              <div className="mb-2 text-xs font-semibold text-foreground">Repositories</div>
+              <Card className="mb-4 gap-0 py-1">
+                <CardContent className="divide-y px-4">
+                  {repoInfo?.repos.map((r) => (
+                    <div key={r.path} className="flex flex-col gap-2 py-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate text-sm font-semibold text-foreground" title={r.path}>{r.name}</span>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="outline" size="icon-sm" aria-label={`Open ${r.name} in Explorer`} onClick={async () => {
+                                const res = await window.axon.shell.openPath(r.path)
+                                if (!res.success) toast.error(res.error ? `Failed to open folder: ${res.error}` : 'Failed to open folder')
+                              }}><FolderOpen /></Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Open in Explorer</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="outline" size="icon-sm" aria-label={`Open ${r.name} in VS Code`} onClick={async () => {
+                                const res = await window.axon.shell.openInVSCode(r.path)
+                                if (!res.success) toast.error(res.error ? `Failed to open VS Code: ${res.error}` : 'Failed to open VS Code')
+                              }}><Code2 /></Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Open in VS Code</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="secondary" className="max-w-full font-mono text-[10.5px]" title={r.branch}><span className="truncate">{r.branch}</span></Badge>
+                        {r.prUrl && (
+                          <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" onClick={() => window.axon.shell.openExternal(r.prUrl as string)} title={r.prUrl}>
+                            PR #{r.prUrl.split('/').pop()} ↗
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            </>
+          )}
+
+          {delivery.workspaceNotice && (
+            <div
+              role="alert"
+              style={{
+                background: 'var(--axon-amber-d)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 10,
+                padding: '10px 12px', margin: '8px 0 12px', fontSize: 11, lineHeight: 1.5, color: 'var(--axon-amber)',
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                {delivery.workspaceNotice.kind === 'stashed' ? 'Changes were stashed in your workspace folder' : 'Workspace folder was not restored'}
+              </div>
+              {delivery.workspaceNotice.message}
             </div>
           )}
 
+          {delivery.supersededBy && (
+            <button
+              data-testid="superseded-link"
+              onClick={() => navigate(`/deliveries/${delivery.supersededBy}`)}
+              style={{ background: 'transparent', color: 'var(--axon-nexus2)', border: 'none', padding: '6px 0', fontSize: 11, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}
+            >
+              Superseded — view the newer attempt →
+            </button>
+          )}
           {delivery.retriedFromDeliveryId && (
             <button
               onClick={() => navigate(`/deliveries/${delivery.retriedFromDeliveryId}`)}
@@ -1349,7 +1521,7 @@ export default function DeliveryLiveView() {
                 cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
               }}
             >
-              ← View previous attempt
+              ← View previous attempt{delivery.attemptNumber && delivery.attemptNumber > 1 ? ` (this is attempt ${delivery.attemptNumber}${delivery.rerunReason ? `, reason: ${delivery.rerunReason}` : ''})` : ''}
             </button>
           )}
 
@@ -1366,24 +1538,24 @@ export default function DeliveryLiveView() {
                 opacity: isClearingWorkspace ? 0.6 : 1,
               }}
             >
-              {isClearingWorkspace ? 'Clearing…' : '🗑 Clear workspace'}
+              {isClearingWorkspace ? 'Removing…' : `🗑 Remove workspace${workspaceBytes !== null ? ` (${formatBytes(workspaceBytes)})` : ''}`}
             </button>
           )}
 
           {/* Completion Cards */}
           {displayStatus === 'Completed' && (
             <>
-              {prUrl && (
-                <div style={{
+              {(delivery.prUrls?.length ? delivery.prUrls : prUrl ? [{ repo: prUrl.split('/').slice(-3, -2)[0] ?? 'PR', url: prUrl }] : []).map((pr) => (
+                <div key={pr.url} style={{
                   background: 'var(--axon-green-d)', border: '1px solid rgba(16,185,129,0.2)',
                   borderRadius: 12, padding: '12px 14px', marginBottom: 16,
                 }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--axon-green)', marginBottom: 8 }}>
-                    ✓ PR Created
+                    ✓ PR Created — {pr.repo}
                   </div>
                   <button
                     onClick={async () => {
-                      await window.axon.shell.openExternal(prUrl)
+                      await window.axon.shell.openExternal(pr.url)
                     }}
                     style={{
                       background: 'transparent', color: 'var(--axon-green)',
@@ -1392,12 +1564,12 @@ export default function DeliveryLiveView() {
                       cursor: 'pointer', fontFamily: 'inherit', width: '100%', textAlign: 'left',
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}
-                    title={prUrl}
+                    title={pr.url}
                   >
-                    {prUrl.split('/').pop()} ↗
+                    {pr.url.split('/').slice(-2).join('/')} ↗
                   </button>
                 </div>
-              )}
+              ))}
               <div style={{
                 background: 'var(--axon-bg2)', border: '1px solid var(--axon-border)',
                 borderRadius: 12, padding: '12px 14px', marginBottom: 16,
@@ -1412,49 +1584,30 @@ export default function DeliveryLiveView() {
             </>
           )}
 
-          {/* Timeline — compact, one line per event. Not labeled "Live" since this
-              same feed shows reconstructed history on a delivery you're just viewing,
-              not actively running. */}
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--axon-t1)', marginBottom: 10 }}>
-            Timeline
-          </div>
+          {/* Timeline: newest first; click an entry to jump to that step (and ForEach item). */}
+          <div className="mb-2 text-xs font-semibold text-foreground">Timeline</div>
           {timeline.length === 0 ? (
-            <div style={{
-              background: 'var(--axon-bg3)', border: '1px solid var(--axon-border)',
-              borderRadius: 6, padding: '7px 10px',
-            }}>
-              <div style={{ fontSize: 11, color: 'var(--axon-t4)' }}>
-                Waiting for events…
-              </div>
-            </div>
+            <p className="rounded-md border bg-card px-3 py-2 text-xs text-muted-foreground">Waiting for events…</p>
           ) : (
-            timeline.map((sig, i) => (
-              <div key={i} style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                background: 'var(--axon-bg3)', border: '1px solid var(--axon-border)',
-                borderRadius: 6, padding: '5px 9px', marginBottom: 4, fontSize: 10.5,
-                overflow: 'hidden',
-              }}>
-                <span style={{ width: 5, height: 5, borderRadius: '50%', background: eventTypeColor[sig.type], flexShrink: 0 }} />
-                <span style={{
-                  fontSize: 9, fontWeight: 700, textTransform: 'uppercase', flexShrink: 0,
-                  color: eventTypeColor[sig.type],
-                }}>
-                  {sig.type}
-                </span>
-                <span style={{
-                  color: 'var(--axon-t2)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                }}>
-                  {sig.body}
-                </span>
-                <span
-                  style={{ fontSize: 9, color: 'var(--axon-t4)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}
-                  title={timeAgo(sig.timestamp)}
+            <div className="flex flex-col gap-1.5 pb-4">
+              {timeline.map((sig, i) => (
+                <div
+                  key={i}
+                  onClick={() => sig.target && selectTimelineTarget(sig.target)}
+                  title={sig.target ? 'Show this step' : undefined}
+                  className={`rounded-md border bg-card px-3 py-2 ${sig.target ? 'cursor-pointer hover:bg-accent/40' : ''}`}
                 >
-                  {new Date(sig.timestamp).toLocaleTimeString()}
-                </span>
-              </div>
-            ))
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide" style={{ color: eventTypeColor[sig.type] }}>
+                      <span className="size-1.5 rounded-full bg-current" />
+                      {eventTypeLabel[sig.type]}
+                    </span>
+                    <span className="font-mono text-[10px] text-muted-foreground" title={timeAgo(sig.timestamp)}>{new Date(sig.timestamp).toLocaleTimeString()}</span>
+                  </div>
+                  <p className="mt-1 line-clamp-3 break-words text-xs text-foreground/90" title={sig.body}>{sig.body}</p>
+                </div>
+              ))}
+            </div>
           )}
           </div>
         </div>

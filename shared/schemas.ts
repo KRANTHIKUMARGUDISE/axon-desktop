@@ -32,7 +32,14 @@ export const WorkspaceTypeSchema = z.enum(['Default', 'Browse'])
 
 export const DeliveryStatusSchema = z.enum([
   'Pending', 'Running', 'Paused', 'Completed', 'Failed', 'Cancelled', 'Interrupted',
+  // A Failed/Cancelled delivery that was re-run: the newer delivery (supersededBy) carries the story on.
+  'Superseded',
 ])
+
+// Why a delivery is being re-run (asked when the user chooses Rerun).
+export const RERUN_REASONS = ['RequirementUpdated', 'AgentUpdated', 'PlatformRetry', 'Other'] as const
+export const RerunReasonSchema = z.enum(RERUN_REASONS)
+export type RerunReason = z.infer<typeof RerunReasonSchema>
 export const StepStatusSchema = z.enum([
   'Pending', 'Running', 'Completed', 'Failed', 'Skipped', 'AwaitingApproval',
 ])
@@ -66,6 +73,20 @@ const registryFields = {
 
 // ---------------------------------------------------------------- block
 
+// outputSchema entries are plain field names (untyped) or {name, type}. A field typed `WorkItemList`
+// is what a ForEach node's "Iterate over" picker offers (D14/D16).
+// `itemFields` (WorkItemList only): extra per-item fields the list provides beyond key/task/workspacePath (handoff contract).
+export const OutputFieldSchema = z.object({
+  name: z.string().min(1),
+  type: z.string().min(1).optional(),
+  itemFields: z.array(z.string().min(1)).optional(),
+})
+export const OutputSchemaEntrySchema = z.union([z.string(), OutputFieldSchema])
+export type OutputSchemaEntry = z.infer<typeof OutputSchemaEntrySchema>
+export const ContextModeSchema = z.enum(['Selective', 'Full'])
+export type ContextMode = z.infer<typeof ContextModeSchema>
+export const WORK_ITEM_LIST_TYPE = 'WorkItemList'
+
 export const CachedFileSchema = z.object({ relativePath: z.string(), content: z.string() })
 export type CachedFile = z.infer<typeof CachedFileSchema>
 
@@ -84,10 +105,16 @@ export const BlockSchema = z.object({
   cachedFiles: z.array(CachedFileSchema).optional(),
   entryPointPath: z.string().optional(),
   contextRequirements: z.array(z.string()).optional(),
-  outputSchema: z.array(z.string()).optional(),
+  outputSchema: z.array(OutputSchemaEntrySchema).optional(),
+  // B1: unset/Selective (default) = a block only sees the fields it declares; Full must be chosen explicitly.
+  contextMode: ContextModeSchema.optional(),
   outputMapping: z.record(z.string(), z.string()).optional(),
   executionType: ExecutionTypeSchema.optional(),
   allowedTools: z.array(z.string()).optional(),
+  // Handoff contract: item fields this block needs from the WorkItemList it consumes (e.g. ["repo"]).
+  requiredItemFields: z.array(z.string().min(1)).optional(),
+  // Only with `repoCatalog` in contextRequirements: inject just the catalog repos carrying one of these tags.
+  catalogTags: z.array(z.string().min(1)).optional(),
   defaultTimeoutSeconds: z.number().optional(),
   visibility: VisibilitySchema.optional(),
   verified: z.boolean().optional(),
@@ -123,18 +150,27 @@ export const PipelineEdgeSchema = z.object({
 })
 export type PipelineEdge = z.infer<typeof PipelineEdgeSchema>
 
+export const ForEachOnEmptySchema = z.enum(['skip', 'fail'])
+
+// A pipeline node is a block node (`blockId`; `type` is the legacy role value or 'block') or a ForEach
+// node (`type: 'forEach'`, no block — D14). One flat list: a node with `parentId` lives inside that ForEach.
 export const PipelineNodeSchema = z.object({
   id: z.string(),
-  type: BlockRoleSchema.optional(),
+  type: z.union([z.literal('forEach'), z.literal('block'), BlockRoleSchema]).optional(),
   name: z.string().optional(),
   label: z.string().optional(),
-  blockId: z.string(),
+  blockId: z.string().default(''),
+  parentId: z.string().optional(),
   position: z.object({ x: z.number(), y: z.number() }).default({ x: 0, y: 0 }),
   config: z.record(z.string(), z.unknown()).optional(),
   timeoutSeconds: z.number().optional(),
   pinnedVersion: z.union([z.string(), z.number()]).nullish(),
   // D13: the block version this node runs. Pinned when the pipeline is published.
   blockVersion: z.number().int().optional(),
+  // ---- ForEach only (D16: it iterates its single direct predecessor's WorkItemList; items run in list order)
+  maxItems: z.number().int().min(1).max(1000).optional(), // default 10
+  onEmpty: ForEachOnEmptySchema.optional(), // default fail
+  size: z.object({ width: z.number(), height: z.number() }).optional(),
 })
 export type PipelineNode = z.infer<typeof PipelineNodeSchema>
 
@@ -205,6 +241,8 @@ export const DeliveryStepSchema = z.object({
   itemKey: z.string().nullable().default(null),
   blockId: z.string().optional(),
   blockName: z.string(),
+  // The resolved working folder the block ran in (D17). PR Creator derives its repos from these.
+  cwd: z.string().optional(),
   status: StepStatusSchema,
   startedAt: z.string().optional(),
   completedAt: z.string().optional(),
@@ -213,6 +251,8 @@ export const DeliveryStepSchema = z.object({
   contextFileRef: z.string().optional(),
   contextAvailability: z.record(z.string(), Availability).optional(),
   outputAvailability: z.record(z.string(), Availability).optional(),
+  // The repoCatalog injected into this step (opt-in context field): how many repos, roughly how many tokens.
+  catalogStats: z.object({ repos: z.number(), approxTokens: z.number() }).optional(),
   output: StepOutputSchema.optional(),
 })
 export type DeliveryStep = z.infer<typeof DeliveryStepSchema>
@@ -229,6 +269,9 @@ export const PipelineSnapshotSchema = z.object({
   blockVersions: z.record(z.string(), z.number()).default({}),
 })
 export type PipelineSnapshot = z.infer<typeof PipelineSnapshotSchema>
+
+export const RepositoryRefSchema = z.object({ url: z.string().min(1), branch: z.string().optional() })
+export type RepositoryRef = z.infer<typeof RepositoryRefSchema>
 
 export const DeliverySchema = z.object({
   ...meta,
@@ -250,9 +293,31 @@ export const DeliverySchema = z.object({
   branch: z.string().nullable().optional(),
   prUrl: z.string().nullable().optional(),
   inputs: z.record(z.string(), z.unknown()).optional(),
+  // Catalog repositories picked on the Manual Delivery screen; fed to the context as `repositories`.
+  repositories: z.array(RepositoryRefSchema).optional(),
+  prUrls: z.array(z.object({ repo: z.string(), url: z.string() })).optional(),
+  // Registry commit of the repository catalog an agent saw (recorded when a block declared repoCatalog).
+  catalogVersion: z.string().optional(),
+  // ForEach item keys in run order, frozen when the ForEach first runs so resume is deterministic.
+  itemPlan: z.record(z.string(), z.object({
+    items: z.array(z.object({ key: z.string() })),
+  })).optional(),
+  // D17: {workspaceRoot}/deliveries/{id}/ — created at start; nodes without a workspace run here.
+  deliveryFolder: z.string().optional(),
+  // D18: set when `workspacePath` (the optional default folder) had a delivery branch created in it.
+  workspaceBase: z.object({ originalBranch: z.string(), branch: z.string() }).optional(),
+  // Set when ending the delivery had to stash leftovers (or could not restore the branch): shown in the Live View.
+  workspaceNotice: z.object({
+    kind: z.enum(['stashed', 'not-restored']),
+    message: z.string(),
+    folder: z.string(),
+    stashName: z.string().optional(),
+  }).optional(),
   retriedFromDeliveryId: z.string().nullable().optional(),
   rerunReason: z.string().max(500).optional(),
   attemptNumber: z.number().optional(),
+  // Set when this delivery was re-run (status Superseded): the id of the newer attempt.
+  supersededBy: z.string().optional(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
   createdByName: z.string().optional(),
@@ -268,8 +333,11 @@ export const CreateDeliveryInputSchema = z.object({
   workspaceType: WorkspaceTypeSchema.default('Default'),
   storeFullContext: z.boolean().optional(),
   inputs: z.record(z.string(), z.unknown()).optional(),
+  // D18: optional default Workspace path (a clean git repo inside the Workspace Root).
+  workspacePath: z.string().optional(),
+  repositories: z.array(RepositoryRefSchema).optional(),
   retriedFromDeliveryId: z.string().optional(),
-  rerunReason: z.string().max(500).optional(),
+  rerunReason: RerunReasonSchema.optional(),
 })
 export type CreateDeliveryInput = z.infer<typeof CreateDeliveryInputSchema>
 
@@ -283,14 +351,20 @@ export const DeliveryEventSchema = z.discriminatedUnion('type', [
   ev('workspace_provisioned', { workspacePath: z.string() }),
   ev('git_preparing', { repoUrl: z.string() }),
   ev('git_prepared', { branch: z.string().optional() }),
-  ev('step_started', { nodeId: z.string(), blockName: z.string() }),
-  ev('step_completed', { nodeId: z.string(), blockName: z.string(), output: AgentOutputSchema }),
+  ev('step_started', { nodeId: z.string(), blockName: z.string(), itemKey: z.string().optional() }),
+  ev('step_completed', { nodeId: z.string(), blockName: z.string(), output: AgentOutputSchema, itemKey: z.string().optional() }),
   ev('step_failed', {
-    nodeId: z.string(), blockName: z.string(), message: z.string(), output: AgentOutputSchema.optional(),
+    nodeId: z.string(), blockName: z.string(), message: z.string(), output: AgentOutputSchema.optional(), itemKey: z.string().optional(),
   }),
   ev('gate_reached', { nodeId: z.string(), blockName: z.string(), output: AgentOutputSchema }),
   ev('gate_approved', { nodeId: z.string(), approvedBy: z.string(), comment: z.string().optional() }),
   ev('gate_rejected', { nodeId: z.string(), rejectedBy: z.string(), comment: z.string() }),
+  ev('item_started', { nodeId: z.string(), itemKey: z.string(), index: z.number().int(), total: z.number().int() }),
+  ev('item_completed', { nodeId: z.string(), itemKey: z.string(), index: z.number().int(), total: z.number().int() }),
+  ev('item_failed', {
+    nodeId: z.string(), itemKey: z.string(), index: z.number().int(), total: z.number().int(), message: z.string(),
+  }),
+  ev('workspace_notice', { message: z.string() }),
   ev('status_changed', { status: DeliveryStatusSchema }),
   ev('completed', { prUrl: z.string().optional() }),
   ev('failed', { message: z.string(), nodeId: z.string().optional() }),

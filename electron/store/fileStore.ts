@@ -9,6 +9,7 @@ import {
 import type {
   Block, BlockInput, Pipeline, PipelineInput, Delivery, CreateDeliveryInput, DeliveryStep,
 } from '../../shared'
+import { atMostOneWorkItemListField } from '../../shared'
 import { atomicWrite } from './atomic'
 import { log } from '../log'
 import { KeyedMutex } from './mutex'
@@ -190,6 +191,8 @@ export class FileStore implements Store {
 
   async createBlock(input: BlockInput): Promise<Block> {
     const block = BlockSchema.parse({ ...input, ...this.newDefinitionMeta() })
+    const multi = atMostOneWorkItemListField(block)
+    if (multi) throw new Error(multi)
     await this.writeDoc('blocks', block.id, block)
     return block
   }
@@ -204,6 +207,8 @@ export class FileStore implements Store {
       const next = BlockSchema.parse({
         ...existing, ...defined(patch), id, immutable: existing.immutable, ...this.nextRevision(existing), updatedAt: this.ts(),
       })
+      const multi = atMostOneWorkItemListField(next)
+      if (multi) throw new Error(multi)
       await this.writeDoc('blocks', id, next)
       return next
     })
@@ -323,6 +328,7 @@ export class FileStore implements Store {
         const unpublished: string[] = []
         const nodes = []
         for (const node of pipeline.nodes) {
+          if (node.type === 'forEach') { nodes.push(node); continue }
           const block = await this.getBlock(node.blockId)
           if (!block) throw new Error(`Block ${node.blockId} (node "${node.label ?? node.id}") not found`)
           const latest = latestPublishedVersion(block)
@@ -428,7 +434,7 @@ export class FileStore implements Store {
 
     const blockVersions: Record<string, number> = {}
     for (const node of pipeline.nodes) {
-      if (node.blockId in blockVersions) continue
+      if (node.type === 'forEach' || node.blockId in blockVersions) continue
       const block = node.blockVersion !== undefined
         ? await this.getBlockVersion(node.blockId, node.blockVersion)
         : await this.getBlock(node.blockId)
@@ -436,6 +442,8 @@ export class FileStore implements Store {
       blockVersions[node.blockId] = block.version
     }
 
+    // Rerun: the new delivery is the next attempt of the same story; the one it replaces is marked Superseded below.
+    const prev = input.retriedFromDeliveryId ? await this.getDelivery(input.retriedFromDeliveryId) : null
     const ts = this.ts()
     const delivery = DeliverySchema.parse({
       id: crypto.randomUUID(),
@@ -459,15 +467,21 @@ export class FileStore implements Store {
       status: 'Pending',
       repoUrl: input.repoUrl,
       workspaceType: input.workspaceType,
+      workspacePath: input.workspacePath,
       storeFullContext: input.storeFullContext,
       steps: [],
       inputs: input.inputs,
       retriedFromDeliveryId: input.retriedFromDeliveryId ?? null,
-      rerunReason: input.rerunReason,
+      rerunReason: input.retriedFromDeliveryId ? (input.rerunReason ?? 'RequirementUpdated') : input.rerunReason,
+      attemptNumber: (prev?.attemptNumber ?? 1) + (prev ? 1 : 0),
       startedAt: ts,
       createdByName,
     })
     await this.writeDoc('deliveries', delivery.id, delivery)
+    // Only an unsuccessful attempt is superseded; "Run again" of a Completed delivery leaves it Completed.
+    if (prev && (prev.status === 'Failed' || prev.status === 'Cancelled')) {
+      await this.updateDelivery(prev.id, (d) => { d.status = 'Superseded'; d.supersededBy = delivery.id })
+    }
     return delivery
   }
 

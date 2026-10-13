@@ -14,7 +14,9 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { usePipelines } from '@/hooks/usePipelines'
 import { useCreateDelivery } from '@/hooks/useDeliveries'
-import type { WorkspaceType } from '@/types'
+
+// Same rule the Workspace Provisioner enforces in main (shared TICKET_KEY).
+const TICKET_KEY = /^[A-Z][A-Z0-9]+-\d+$/
 
 // ── hook ──────────────────────────────────────────────────────────────────────
 export function useNewDeliveryModal() {
@@ -50,9 +52,10 @@ export default function NewDeliveryModal({
 
   const [ticketId, setTicketId] = useState('')
   const [pipelineId, setPipelineId] = useState('')
-  const [repoUrl, setRepoUrl] = useState('')
-  const [workspaceType, setWorkspaceType] = useState<WorkspaceType>('Default')
-  const [browsedPath, setBrowsedPath] = useState<string | null>(null)
+  // D18: one optional Workspace path (a clean git repo inside the Workspace Root). Checked in main before the delivery exists.
+  const [workspacePath, setWorkspacePath] = useState('')
+  const [pathError, setPathError] = useState<string | null>(null)
+  const [checking, setChecking] = useState(false)
   const [inputsJson, setInputsJson] = useState('')
   const [inputsError, setInputsError] = useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -63,9 +66,8 @@ export default function NewDeliveryModal({
   useEffect(() => {
     if (isOpen) {
       setTicketId('')
-      setRepoUrl('')
-      setWorkspaceType('Default')
-      setBrowsedPath(null)
+      setWorkspacePath('')
+      setPathError(null)
       setPipelineId(defaultPipelineId ?? '')
       setInputsJson('')
       setInputsError(null)
@@ -76,7 +78,16 @@ export default function NewDeliveryModal({
   }, [isOpen, defaultPipelineId])
 
   async function handleSubmit() {
-    if (!ticketId || !pipelineId || !repoUrl) return
+    if (!TICKET_KEY.test(ticketId.trim()) || !pipelineId) return
+    if (workspacePath.trim()) {
+      setChecking(true)
+      const check = await window.axon.delivery.checkWorkspacePath(workspacePath.trim()).catch((e) => ({ success: false, error: String(e) }))
+      setChecking(false)
+      if (!check.success) {
+        setPathError(check.error ?? 'Workspace path is not usable')
+        return
+      }
+    }
     let inputs: Record<string, unknown> | undefined
     if (inputsJson.trim()) {
       try {
@@ -88,11 +99,12 @@ export default function NewDeliveryModal({
     }
     try {
       const delivery = await createDelivery.mutateAsync({
-        ticketId,
-        title: ticketId,
+        ticketId: ticketId.trim(),
+        title: ticketId.trim(),
         pipelineId,
-        repoUrl,
-        workspaceType,
+        repoUrl: '',
+        workspaceType: 'Default',
+        workspacePath: workspacePath.trim() || undefined,
         storeFullContext,
         inputs,
       })
@@ -103,7 +115,8 @@ export default function NewDeliveryModal({
     }
   }
 
-  const canSubmit = ticketId.trim() !== '' && pipelineId !== '' && repoUrl.trim() !== ''
+  const ticketValid = TICKET_KEY.test(ticketId.trim())
+  const canSubmit = ticketValid && pipelineId !== ''
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -137,8 +150,10 @@ export default function NewDeliveryModal({
               placeholder="e.g. PROJ-2341"
               className="dark:bg-[var(--axon-bg3)]"
             />
-            <p style={{ fontSize: 10, color: 'var(--axon-t3)', marginTop: 6 }}>
-              Included in the context every AI agent block sees for this delivery.
+            <p style={{ fontSize: 10, color: ticketId && !ticketValid ? 'var(--axon-red)' : 'var(--axon-t3)', marginTop: 6 }}>
+              {ticketId && !ticketValid
+                ? 'Use a Jira-style key such as PROJ-123 (capital letters, a dash and a number).'
+                : 'Included in the context every AI agent block sees for this delivery.'}
             </p>
           </div>
 
@@ -159,78 +174,34 @@ export default function NewDeliveryModal({
             </Select>
           </div>
 
-          {/* Repo URL */}
+          {/* Workspace path (optional, D18) */}
           <div>
             <label className="block mb-1" style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
-              Repository URL <span style={{ color: 'var(--axon-red)' }}>*</span>
-            </label>
-            <Input
-              value={repoUrl}
-              onChange={(e) => setRepoUrl(e.target.value)}
-              placeholder="https://github.com/org/repo"
-              className="dark:bg-[var(--axon-bg3)]"
-            />
-          </div>
-
-          {/* Workspace */}
-          <div>
-            <label className="block mb-1.5" style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
-              Working Directory
+              Workspace path <span style={{ color: 'var(--axon-t3)', fontWeight: 400 }}>(optional)</span>
             </label>
             <div style={{ display: 'flex', gap: 6 }}>
+              <Input
+                value={workspacePath}
+                onChange={(e) => { setWorkspacePath(e.target.value); setPathError(null) }}
+                placeholder="A git repository folder inside the Workspace Root"
+                className="dark:bg-[var(--axon-bg3)]"
+              />
               <Button
                 type="button"
-                size="sm"
-                variant={workspaceType === 'Default' ? 'secondary' : 'outline'}
-                className="rounded-full"
-                style={workspaceType === 'Default' ? { color: 'var(--axon-nexus2)', background: 'var(--axon-nx-glow)' } : undefined}
-                onClick={() => { setWorkspaceType('Default'); setBrowsedPath(null) }}
-              >
-                Default
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant={workspaceType === 'Browse' ? 'secondary' : 'outline'}
-                className="rounded-full"
-                style={workspaceType === 'Browse' ? { color: 'var(--axon-nexus2)', background: 'var(--axon-nx-glow)' } : undefined}
+                variant="outline"
                 onClick={async () => {
-                  const picked = await window.axon.dialog.openDirectory()
-                  if (picked) {
-                    setWorkspaceType('Browse')
-                    setBrowsedPath(picked)
-                  }
+                  const picked = await window.axon.dialog.openDirectory(true)
+                  if (picked) { setWorkspacePath(picked); setPathError(null) }
                 }}
               >
                 Browse…
               </Button>
             </div>
-            <p style={{ fontSize: 10, color: 'var(--axon-t3)', marginTop: 6 }}>
-              {workspaceType === 'Default'
-                ? 'Clone repo into {workspaceRoot}/{ticketId}/'
-                : browsedPath
-                  ? browsedPath
-                  : 'No folder selected'}
-            </p>
-          </div>
-
-          {/* Inputs */}
-          <div>
-            <label className="block mb-1" style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
-              Inputs (JSON, optional)
-            </label>
-            <Textarea
-              value={inputsJson}
-              onChange={(e) => { setInputsJson(e.target.value); setInputsError(null) }}
-              placeholder='{"testMessage": "hello from manual test"}'
-              rows={3}
-              className="resize-y font-mono text-[11px] dark:bg-[var(--axon-bg3)]"
-            />
-            {inputsError ? (
-              <p style={{ fontSize: 10, color: 'var(--axon-red)', marginTop: 6 }}>{inputsError}</p>
+            {pathError ? (
+              <p style={{ fontSize: 10, color: 'var(--axon-red)', marginTop: 6 }}>{pathError}</p>
             ) : (
               <p style={{ fontSize: 10, color: 'var(--axon-t3)', marginTop: 6 }}>
-                Ad-hoc values merged into delivery context — used by blocks' Context Requirements.
+                Blocks run here unless an item names its own workspacePath. AXON creates the delivery branch in it and switches back when the delivery ends. Leave empty to run in the delivery folder.
               </p>
             )}
           </div>
@@ -249,6 +220,28 @@ export default function NewDeliveryModal({
             </Button>
             {showAdvanced && (
               <div style={{ marginTop: 10 }}>
+              {/* Inputs */}
+              <div>
+                <label className="block mb-1" style={{ fontSize: 11, fontWeight: 600, color: 'var(--axon-t2)' }}>
+                  Inputs (JSON, optional)
+                </label>
+                <Textarea
+                  value={inputsJson}
+                  onChange={(e) => { setInputsJson(e.target.value); setInputsError(null) }}
+                  placeholder='{"testMessage": "hello from manual test"}'
+                  rows={3}
+                  className="resize-y font-mono text-[11px] dark:bg-[var(--axon-bg3)]"
+                />
+                {inputsError ? (
+                  <p style={{ fontSize: 10, color: 'var(--axon-red)', marginTop: 6 }}>{inputsError}</p>
+                ) : (
+                  <p style={{ fontSize: 10, color: 'var(--axon-t3)', marginTop: 6 }}>
+                    Ad-hoc values merged into delivery context — used by blocks' Context Requirements.
+                  </p>
+                )}
+              </div>
+
+
                 <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
                   <Checkbox
                     checked={storeFullContext}
@@ -279,7 +272,7 @@ export default function NewDeliveryModal({
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={!canSubmit || createDelivery.isPending}
+            disabled={!canSubmit || createDelivery.isPending || checking}
           >
             {createDelivery.isPending ? 'Starting…' : 'Start Delivery →'}
           </Button>

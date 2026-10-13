@@ -12,6 +12,7 @@ const DOT_COLORS: Record<DeliveryStatus, string> = {
   Failed:    'var(--axon-red)',
   Cancelled: 'var(--axon-t3)',
   Interrupted: 'var(--axon-amber)',
+  Superseded: 'var(--axon-t3)',
 }
 
 function describe(d: DeliverySummary): string {
@@ -20,6 +21,7 @@ function describe(d: DeliverySummary): string {
     case 'Completed': return `${d.ticketId} completed successfully`
     case 'Failed':    return `${d.ticketId} failed`
     case 'Paused':    return `${d.ticketId} waiting for approval`
+    case 'Superseded': return `${d.ticketId} attempt re-run as a newer delivery`
     default:          return `${d.ticketId} is ${d.status.toLowerCase()}`
   }
 }

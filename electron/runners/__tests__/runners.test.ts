@@ -91,12 +91,15 @@ describe('normalizeAgentOutput', () => {
 describe('buildInputFieldsText', () => {
   const pool = { a: 1, b: 'two', c: [3] }
   it('selects only declared fields', () => {
-    expect(buildInputFieldsText(pool, ['a', 'c'])).toBe('a: 1\nc: [3]')
+    expect(buildInputFieldsText(pool, ['a', 'c'])).toBe('<untrusted_field name="a">1</untrusted_field>\n<untrusted_field name="c">[3]</untrusted_field>')
   })
   it('flags declared-but-missing fields', () => {
     expect(buildInputFieldsText(pool, ['zzz'])).toMatch(/none of the required fields \[zzz\]/)
   })
-  it('includes the whole pool when nothing is declared', () => {
-    expect(buildInputFieldsText(pool, [])).toContain('b: "two"')
+  it('includes nothing when nothing is declared (Selective is the default, review B1)', () => {
+    expect(buildInputFieldsText(pool, [])).not.toContain('b: "two"')
+  })
+  it('includes the whole pool only when contextMode is Full', () => {
+    expect(buildInputFieldsText(pool, [], 'Full')).toContain('<untrusted_field name="b">"two"</untrusted_field>')
   })
 })

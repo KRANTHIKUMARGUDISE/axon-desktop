@@ -58,6 +58,24 @@ export type PromoteTargetArg = { scope: 'Org' } | { scope: 'Team'; team: string 
 
 // Documents cross the IPC boundary as plain JSON; the renderer services narrow them to
 // the shared types (Block, Pipeline, Delivery), so the bridge keeps them as `unknown`.
+export interface DeliveryRepos {
+  deliveryFolder?: string
+  repos: { name: string; path: string; branch: string; url?: string; prUrl?: string }[]
+}
+
+export interface CatalogView {
+  entries: { name: string; url: string; defaultBranch?: string; description?: string; tags?: string[] }[]
+  dropped: { index: number; name?: string; reason: string }[]
+  /** Used, but adjusted (e.g. description truncated to 200 characters). */
+  warnings: { index: number; name?: string; reason: string }[]
+  /** The whole file is unusable (bad YAML / no repositories list). */
+  error?: string
+  exists: boolean
+  filePath: string
+  registryPath: string
+  lastSyncAt: string | null
+}
+
 export interface AxonBridge {
   secrets: {
     setGitToken(token: string): Promise<void>
@@ -88,6 +106,8 @@ export interface AxonBridge {
   registry: {
     status(): Promise<RegistryStatus>
     syncNow(): Promise<RegistryStatus>
+    /** The repository catalog from the local registry clone, incl. entries that were dropped and why. */
+    catalog(): Promise<CatalogView>
     /** Live status (sync state, queued writes, offline) pushed from main. Returns an unsubscribe function. */
     onStatus(callback: (status: RegistryStatus) => void): () => void
   }
@@ -121,7 +141,7 @@ export interface AxonBridge {
     list(): Promise<unknown[]>
     get(id: string): Promise<unknown | null>
     create(input: unknown): Promise<unknown>
-    stepData(deliveryId: string, nodeId: string, kind: 'context' | 'output'): Promise<Record<string, unknown>>
+    stepData(deliveryId: string, nodeId: string, kind: 'context' | 'output', itemKey?: string): Promise<Record<string, unknown>>
   }
   delivery: {
     start(id: string): Promise<ActionResult>
@@ -131,6 +151,11 @@ export interface AxonBridge {
     approveGate(id: string, comment?: string): Promise<ActionResult>
     rejectGate(id: string, comment: string): Promise<ActionResult>
     clearWorkspace(id: string): Promise<{ success: boolean; error?: string }>
+    workspaceSize(id: string): Promise<{ success: boolean; bytes: number }>
+    /** The git repos this delivery worked in, derived from the recorded step folders (never scanned). */
+    repos(id: string): Promise<DeliveryRepos>
+    /** D18 pre-check for the New Delivery Workspace path: inside the root, a git repo, clean, not locked. */
+    checkWorkspacePath(path: string): Promise<{ success: boolean; error?: string }>
   }
   events: {
     /** Subscribes to the single typed delivery event channel; returns an unsubscribe function. */
@@ -147,7 +172,7 @@ export interface AxonBridge {
     rejectDetected(): Promise<ClaudeKeyStatus>
   }
   dialog: {
-    openDirectory(): Promise<string | null>
+    openDirectory(startInWorkspaceRoot?: boolean): Promise<string | null>
     openFile(): Promise<string | null>
   }
   shell: {

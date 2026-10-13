@@ -1,12 +1,14 @@
 id: axon-pr-creator
 schemaVersion: 2
 name: PR Creator
-role: IO
-description: Opens linked pull requests for a delivery. Registered now; becomes runnable in a later release.
-version: 1
-tags: [axon, io, stub]
+role: Execution
+description: Opens one pull request per git repository this delivery worked in (derived from the folders its steps ran in) that has changes - stages explicit paths, commits, pushes, finds-or-creates the PR and links sibling PRs (GitHub only in v1).
+version: 5
+tags: [axon, execution, pull-request]
 sourceType: Axon
 agentRuntime: Axon
 artifactFormat: Native
 artifactName: pr-creator
+contextRequirements: [stepCwds, acceptanceCriteria?]
+outputSchema: [prUrls]
 verified: true

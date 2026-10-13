@@ -2,9 +2,26 @@ import type { PipelineEdge, PipelineNode, DeliveryStep, Block } from './schemas'
 
 // Pure pipeline-graph helpers shared by the engine and the renderer's validator.
 
+// Top-level flow only: nodes inside a ForEach (parentId) are run by the ForEach executor, not the main loop.
 export function findStartNode(nodes: PipelineNode[], edges: PipelineEdge[]): PipelineNode | undefined {
   const hasIncoming = new Set(edges.map((e) => e.targetNodeId))
-  return nodes.find((n) => !hasIncoming.has(n.id))
+  return nodes.find((n) => !n.parentId && !hasIncoming.has(n.id))
+}
+
+/** The body of a ForEach, in run order (entry -> exit along a straight chain). */
+export function forEachBody(forEachId: string, nodes: PipelineNode[], edges: PipelineEdge[]): PipelineNode[] {
+  const children = nodes.filter((n) => n.parentId === forEachId)
+  const ids = new Set(children.map((c) => c.id))
+  const inner = edges.filter((e) => ids.has(e.sourceNodeId) && ids.has(e.targetNodeId))
+  const hasIncoming = new Set(inner.map((e) => e.targetNodeId))
+  const out: PipelineNode[] = []
+  let cur = children.find((c) => !hasIncoming.has(c.id))
+  while (cur && !out.includes(cur)) {
+    out.push(cur)
+    const e = inner.find((x) => x.sourceNodeId === cur!.id)
+    cur = e ? children.find((c) => c.id === e.targetNodeId) : undefined
+  }
+  return out
 }
 
 export function nextNode(currentId: string, nodes: PipelineNode[], edges: PipelineEdge[]): PipelineNode | undefined {
@@ -20,9 +37,10 @@ export function nextNode(currentId: string, nodes: PipelineNode[], edges: Pipeli
 export function resolvePipelineProgress(
   nodes: PipelineNode[],
   edges: PipelineEdge[],
-  steps: Pick<DeliveryStep, 'nodeId' | 'status'>[],
+  steps: (Pick<DeliveryStep, 'nodeId' | 'status'> & { itemKey?: string | null })[],
 ): { lastCompletedNode?: PipelineNode; resumeNode?: PipelineNode } {
-  const completed = new Set(steps.filter((s) => s.status === 'Completed').map((s) => s.nodeId))
+  // Only the node's own (itemKey-less) step counts: a ForEach is complete once its summary step is.
+  const completed = new Set(steps.filter((s) => s.status === 'Completed' && !s.itemKey).map((s) => s.nodeId))
   const visited = new Set<string>()
   let lastCompletedNode: PipelineNode | undefined
   let node = findStartNode(nodes, edges)
@@ -60,7 +78,7 @@ export function validatePipelineGraph(
     if (outs.length > 1 && !outs.some((e) => e.isDefault)) {
       errors.push(`Node "${n.label ?? n.id}" has multiple outgoing edges but no default route`)
     }
-    if (blocks && !blocks.has(n.blockId)) errors.push(`Node "${n.label ?? n.id}" references unknown block ${n.blockId}`)
+    if (n.type !== 'forEach' && blocks && !blocks.has(n.blockId)) errors.push(`Node "${n.label ?? n.id}" references unknown block ${n.blockId}`)
   }
   // Cycle detection (no back-edges in v1).
   const visiting = new Set<string>()

@@ -85,7 +85,7 @@ export async function promoteDefinition(
   if (kind === 'pipeline') {
     // Others can only resolve org/team/built-in blocks — a pipeline pointing at a personal block would be broken for them.
     const bad: string[] = []
-    for (const node of (doc as Pipeline).nodes) {
+    for (const node of (doc as Pipeline).nodes.filter((x) => x.type !== 'forEach')) {
       const b = await local.getBlock(node.blockId)
       if (!b) bad.push(node.blockId)
       else if (b.scope === 'Personal') bad.push(b.name)

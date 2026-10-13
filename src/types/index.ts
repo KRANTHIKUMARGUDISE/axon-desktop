@@ -26,7 +26,14 @@ export interface PipelineEdge {
 
 export interface PipelineNode {
   id: string
-  type?: NodeType
+  /** A block role (legacy/typed), or 'forEach' for a ForEach flow node (S4). */
+  type?: NodeType | 'forEach' | 'block'
+  /** The ForEach container this node lives inside (flat list, positions relative to it). */
+  parentId?: string
+  // ForEach only
+  maxItems?: number
+  onEmpty?: 'skip' | 'fail'
+  size?: { width: number; height: number }
   name?: string
   label?: string
   blockId: string
@@ -70,6 +77,7 @@ export interface Pipeline {
 export interface StepAgentOutput {
   summary?: string
   confidence?: number
+  usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number }
   missingFields?: string[]
   humanGateReason?: string
   result?: Record<string, unknown>
@@ -92,6 +100,10 @@ export interface StepAgentOutput {
 export interface DeliveryStep {
   id: string
   nodeId?: string
+  /** ForEach item key (S4); null/undefined for ordinary steps. */
+  itemKey?: string | null
+  /** Resolved working folder the step ran in (D17). */
+  cwd?: string
   name: string
   status: StepStatus
   nodeName?: string
@@ -108,11 +120,18 @@ export interface DeliveryStep {
   isContextTruncated?: boolean
   contextFileRef?: string
   contextAvailability?: Record<string, 'available' | 'missing' | 'empty'>
+  catalogStats?: { repos: number; approxTokens: number }
   outputAvailability?: Record<string, 'available' | 'missing' | 'empty'>
 }
 
 export interface Delivery {
   id: string
+  repositories?: { url: string; branch?: string }[]
+  prUrls?: { repo: string; url: string }[]
+  itemPlan?: Record<string, { items: { key: string }[] }>
+  deliveryFolder?: string
+  workspaceNotice?: { kind: 'stashed' | 'not-restored'; message: string; folder: string; stashName?: string }
+  workspaceBase?: { originalBranch: string; branch: string }
   ticketId: string
   title: string
   pipelineId: string
@@ -135,6 +154,8 @@ export interface Delivery {
   prUrl?: string | null
   inputs?: Record<string, unknown>
   retriedFromDeliveryId?: string | null
+  supersededBy?: string
+  rerunReason?: string
   attemptNumber?: number
   errorMessage?: string
   localSeq?: number
@@ -154,6 +175,8 @@ export interface DeliverySummary {
   ownerTeam?: string
   duration?: string
   localSeq?: number
+  /** ForEach progress, e.g. "Stories: 2 of 4 · refunds-api" (S4). */
+  itemCounter?: string
 }
 
 export interface PagedResponse<T> {
@@ -189,6 +212,9 @@ export interface BuildingBlock {
   usedInPipelineIds?: string[]
   contextRequirements?: string[]
   outputSchema?: string[]
+  // Typed view of the same fields ({name, type}); round-tripped on save so types survive edits.
+  outputSchemaTyped?: import('@shared').OutputSchemaEntry[]
+  contextMode?: 'Selective' | 'Full'
   outputMapping?: Record<string, string>
   sourceType: SourceType
   agentRuntime: AgentRuntime
@@ -204,6 +230,8 @@ export interface BuildingBlock {
   visibility?: BuildingBlockVisibility
   executionType?: ExecutionType
   allowedTools?: string[]
+  requiredItemFields?: string[]
+  catalogTags?: string[]
   defaultTimeoutSeconds?: number
   executionAgreementAcceptedAt?: string
   executionAgreementAcceptedBy?: string

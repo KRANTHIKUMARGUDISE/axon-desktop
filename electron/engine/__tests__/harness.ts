@@ -5,7 +5,7 @@ import { vi } from 'vitest'
 import { FileStore } from '../../store/fileStore'
 import { seedBuiltIns, HUMAN_GATE_BLOCK_ID } from '../../store/seed'
 import { createEngine } from '../engine'
-import type { Engine, WorkspacePort } from '../engine'
+import type { Engine, WorkspacePort, EngineDeps } from '../engine'
 import { createBus } from '../bus'
 import type { AgentOutput, Block, BlockInput, DeliveryEvent, Delivery } from '../../../shared'
 import type { Runner, RunnerInput } from '../../runners/types'
@@ -16,6 +16,8 @@ export interface HarnessOptions {
   script?: Script
   ds1ThresholdBytes?: number
   workspace?: Partial<WorkspacePort>
+  snapshots?: EngineDeps['snapshots']
+  getRepoCatalog?: EngineDeps['getRepoCatalog']
 }
 
 export function ok(label: string, result: Record<string, unknown> = {}): AgentOutput {
@@ -51,8 +53,10 @@ export async function createHarness(opts: HarnessOptions = {}) {
   })
 
   const workspace: WorkspacePort = {
-    prepare: vi.fn(async () => ({ workspacePath: workspaceDir, branch: 'axon/test/T-1-abc123' })),
-    finalize: vi.fn(async () => ({ prUrl: 'https://example.test/pr/1' })),
+    prepare: vi.fn(async () => ({ deliveryFolder: workspaceDir })),
+    resolveCwd: vi.fn(async (d, item) => item ?? d.workspacePath ?? d.deliveryFolder ?? workspaceDir),
+    release: vi.fn(async () => {}),
+    reacquire: vi.fn(async () => {}),
     ...(opts.workspace as object),
   }
 
@@ -61,13 +65,15 @@ export async function createHarness(opts: HarnessOptions = {}) {
       store, runner, workspace, bus, runsDir,
       ds1ThresholdBytes: () => opts.ds1ThresholdBytes ?? 50_000,
       identity: () => 'dev@example.com',
+      snapshots: opts.snapshots,
+      getRepoCatalog: opts.getRepoCatalog,
     })
   const engine = build()
 
   async function mkBlock(over: Partial<BlockInput> = {}): Promise<Block> {
     return store.createBlock({
       name: 'Block', role: 'Execution', description: '', tags: [], sourceType: 'Local',
-      agentRuntime: 'Claude', artifactFormat: 'Skill', executionType: 'Prompt',
+      agentRuntime: 'Claude', artifactFormat: 'Skill', executionType: 'Prompt', contextMode: 'Full',
       cachedFiles: [{ relativePath: 'SKILL.md', content: 'do the thing' }], entryPointPath: 'SKILL.md',
       ...over,
     })

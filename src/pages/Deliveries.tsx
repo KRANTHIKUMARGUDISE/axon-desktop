@@ -42,7 +42,7 @@ const PROGRESS_COLOR: Record<string, string> = {
   Cancelled: 'var(--axon-t3)',
 }
 
-const STATUS_TABS = ['All', 'Running', 'Waiting', 'Completed', 'Failed', 'Cancelled'] as const
+const STATUS_TABS = ['All', 'Running', 'Waiting', 'Completed', 'Failed', 'Cancelled', 'Superseded'] as const
 type TabStatus = typeof STATUS_TABS[number]
 
 // Tabs that should call out attention with their semantic status color whenever they
@@ -186,6 +186,8 @@ export default function Deliveries() {
     Completed: allItems.filter(d => d.status === 'Completed').length,
     Failed: allItems.filter(d => d.status === 'Failed').length,
     Cancelled: allItems.filter(d => d.status === 'Cancelled').length,
+    // A superseded attempt is not a failure of its own: the story (original → reruns) counts once, via its latest attempt.
+    Superseded: allItems.filter(d => d.status === 'Superseded').length,
   }
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -393,6 +395,11 @@ export default function Deliveries() {
                           }} />
                           {d.status}
                         </Badge>
+                        {d.itemCounter && (
+                          <div title="ForEach progress" style={{ fontSize: 10.5, color: 'var(--axon-t3)', marginTop: 4, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            ⟳ {d.itemCounter}
+                          </div>
+                        )}
                       </TableCell>
                       {/* Progress */}
                       <TableCell style={{ padding: '11px 14px', minWidth: 110 }}>

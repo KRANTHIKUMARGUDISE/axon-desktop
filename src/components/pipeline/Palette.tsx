@@ -89,6 +89,23 @@ export default function Palette({ blocks }: Props) {
       </div>
 
       <div className="flex-1 overflow-y-auto">
+        {/* Flow: structural pipeline nodes, deliberately not Building Blocks (D14) */}
+        <div className="px-3 pt-2 pb-1 text-xs font-bold uppercase tracking-wider text-slate-500">Flow</div>
+        <div
+          draggable
+          onDragStart={e => {
+            e.dataTransfer.setData('flowType', 'forEach')
+            e.dataTransfer.effectAllowed = 'copy'
+          }}
+          className="flex items-center gap-2 px-3 py-2 ml-6 mr-2 mb-2 cursor-grab rounded border border-dashed border-violet-400/50 hover:bg-slate-800 transition-colors"
+          title="Runs the blocks inside it once per item of a work list"
+        >
+          <span className="text-violet-300 text-sm">⟳</span>
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-slate-200">ForEach</div>
+            <div className="text-xs text-slate-500 truncate">Run its blocks once per work item</div>
+          </div>
+        </div>
         {Object.entries(grouped).map(([type, items]) => (
           <div key={type}>
             {/* Type header */}
