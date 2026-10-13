@@ -59,9 +59,14 @@ if (!lock) {
 
 let mainWindow: BrowserWindow | null = null
 
+/** Where the icon files live: next to the app's resources once packaged (outside the asar), the build folder in development. */
+function iconDir(): string {
+  return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', 'build')
+}
+
 /** The window icon: the .ico on Windows (crisp at every taskbar size), the .png elsewhere. */
 function windowIcon(): string {
-  const dir = path.join(__dirname, '..', '..', 'build')
+  const dir = iconDir()
   const ico = path.join(dir, 'icon.ico')
   return process.platform === 'win32' && existsSync(ico) ? ico : path.join(dir, 'icon.png')
 }
@@ -97,13 +102,20 @@ function createWindow() {
     },
   })
 
-  // Windows: with an explicit AppUserModelID (needed for notifications) the taskbar button no longer falls back to the window
-  // icon on its own and shows the generic Electron one. Say which icon it is.
+  // Windows: set the taskbar / window icon explicitly from the multi-size .ico.
   if (isWin) {
-    const ico = path.join(__dirname, '..', '..', 'build', 'icon.ico')
-    if (existsSync(ico)) {
-      mainWindow.setIcon(nativeImage.createFromPath(ico))
-      try { mainWindow.setAppDetails({ appId: 'com.company.axon', appIconPath: ico, appIconIndex: 0 }) } catch (err) { log.warn('[window] could not set the taskbar icon details', err) }
+    const ico = path.join(iconDir(), 'icon.ico')
+    const img = existsSync(ico) ? nativeImage.createFromPath(ico) : null
+    if (img && !img.isEmpty()) mainWindow.setIcon(img)
+    else log.warn(`[window] app icon not found or unreadable: ${ico}`)
+    // Development only: tell the taskbar which icon and command belong to this identity (pinning it keeps the AXON icon).
+    if (!app.isPackaged && existsSync(ico)) {
+      try {
+        mainWindow.setAppDetails({
+          appId: 'com.company.axon.dev', appIconPath: ico, appIconIndex: 0,
+          relaunchCommand: `"${process.execPath}" "${app.getAppPath()}"`, relaunchDisplayName: 'AXON (dev)',
+        })
+      } catch (err) { log.warn('[window] could not set the taskbar details', err) }
     }
   }
 
@@ -154,8 +166,23 @@ let watcherHeartbeat: NodeJS.Timeout | null = null
 const REGISTRY_STATUS_CHANNEL = 'registry:status'
 
 app.whenReady().then(async () => {
-  // Windows toast notifications need the app's AppUserModelID (matches electron-builder's appId).
-  app.setAppUserModelId('com.company.axon')
+  // Windows toast notifications and the taskbar need an AppUserModelID (the installed app uses electron-builder's appId). The
+  // development run gets its own identity: it is new to Windows, so no stale or pinned generic "Electron" icon is attached to it.
+  app.setAppUserModelId(app.isPackaged ? 'com.company.axon' : 'com.company.axon.dev')
+  // Development on Windows: the taskbar takes an app's icon from a Start-menu shortcut that carries its AppUserModelID, and the
+  // dev run (electron.exe) has none, so it showed the generic Electron icon. Write that shortcut ("AXON (dev)") at every start;
+  // the installed app gets its own from the installer.
+  if (process.platform === 'win32' && !app.isPackaged) {
+    try {
+      const ico = path.join(iconDir(), 'icon.ico')
+      const lnk = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'AXON (dev).lnk')
+      const ok = shell.writeShortcutLink(lnk, 'replace', {
+        target: process.execPath, args: `"${app.getAppPath()}"`, cwd: app.getAppPath(), icon: ico, iconIndex: 0,
+        appUserModelId: 'com.company.axon.dev', description: 'AXON (development run)',
+      })
+      if (!ok) log.warn('[window] could not write the development Start-menu shortcut')
+    } catch (err) { log.warn('[window] development Start-menu shortcut failed', err) }
+  }
   const userData = app.getPath('userData')
   initLogger({ dir: path.join(userData, 'logs'), level: isDev ? 'debug' : 'info', mirror: isDev })
   log.info(`AXON ${app.getVersion()} starting (electron ${process.versions.electron})`)
